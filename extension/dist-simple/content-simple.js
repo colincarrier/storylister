@@ -99,7 +99,7 @@ class StorylistExtension {
             </svg>
             <span>Storylister</span>
           </div>
-          <button class="storylister-close" onclick="this.closest('#storylister-right-rail').remove()">×</button>
+          <button class="storylister-close" id="storylister-close-btn">×</button>
         </div>
         
         <div class="storylister-content">
@@ -196,6 +196,10 @@ class StorylistExtension {
 
     captureBtn.addEventListener('click', () => this.captureSnapshot());
     exportBtn.addEventListener('click', () => this.showAnalytics());
+
+    // Add close button handler
+    const closeBtn = this.rightRail.querySelector('#storylister-close-btn');
+    closeBtn.addEventListener('click', () => this.hideRightRail());
   }
 
   setupViewerObserver() {
@@ -488,7 +492,7 @@ class StorylistExtension {
       <div class="storylister-analytics-content">
         <div class="storylister-analytics-header">
           <h2>📊 Storylister Analytics</h2>
-          <button class="storylister-close" onclick="this.closest('#storylister-analytics-modal').remove()">×</button>
+          <button class="storylister-close" data-action="close-modal">×</button>
         </div>
         
         <div class="storylister-analytics-body">
@@ -550,37 +554,47 @@ class StorylistExtension {
           </div>
 
           <div class="storylister-analytics-actions">
-            <button class="storylister-btn-primary" onclick="
-              const data = ${JSON.stringify({
-                analytics: {
-                  totalViewers: this.viewers.size,
-                  followers: followerCount,
-                  verified: verifiedCount,
-                  tagDistribution: tagCounts
-                },
-                viewers: viewerData,
-                snapshots: snapshots
-              })};
-              const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-              const url = URL.createObjectURL(blob);
-              const a = document.createElement('a');
-              a.href = url;
-              a.download = 'storylister-analytics-${new Date().toISOString().split('T')[0]}.json';
-              a.click();
-              URL.revokeObjectURL(url);
-            ">Export Full Report</button>
-            <button class="storylister-btn-secondary" onclick="
-              if(confirm('This will clear all snapshots. Are you sure?')) {
-                localStorage.removeItem('storylister-snapshots');
-                this.closest('#storylister-analytics-modal').remove();
-              }
-            ">Clear History</button>
+            <button class="storylister-btn-primary" data-action="export-report">Export Full Report</button>
+            <button class="storylister-btn-secondary" data-action="clear-history">Clear History</button>
           </div>
         </div>
       </div>
     `;
 
     document.body.appendChild(modal);
+
+    // Add event handlers for analytics modal
+    modal.querySelector('[data-action="close-modal"]').addEventListener('click', () => {
+      modal.remove();
+    });
+
+    modal.querySelector('[data-action="export-report"]').addEventListener('click', () => {
+      const data = {
+        analytics: {
+          totalViewers: this.viewers.size,
+          followers: followerCount,
+          verified: verifiedCount,
+          tagDistribution: tagCounts
+        },
+        viewers: viewerData,
+        snapshots: snapshots
+      };
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `storylister-analytics-${new Date().toISOString().split('T')[0]}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    });
+
+    modal.querySelector('[data-action="clear-history"]').addEventListener('click', () => {
+      if(confirm('This will clear all snapshots. Are you sure?')) {
+        localStorage.removeItem('storylister-snapshots');
+        modal.remove();
+        this.showToast('History cleared', 'success');
+      }
+    });
   }
 
   exportData() {
