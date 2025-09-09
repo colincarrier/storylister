@@ -1,0 +1,357 @@
+/* Storylister Extension Styles */
+
+:root {
+  --primary: hsl(262, 83%, 58%);
+  --primary-foreground: hsl(210, 40%, 98%);
+  --secondary: hsl(210, 40%, 94%);
+  --secondary-foreground: hsl(222, 47%, 11%);
+  --background: hsl(0, 0%, 98%);
+  --foreground: hsl(222, 84%, 4.9%);
+  --border: hsl(214, 32%, 91%);
+  --input: hsl(214, 32%, 91%);
+  --ring: hsl(262, 83%, 58%);
+  --radius: 8px;
+}
+
+/* Extension overlay styles */
+.storylister-overlay {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  color: var(--foreground);
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.storylister-overlay * {
+  box-sizing: border-box;
+}
+
+.storylister-overlay input,
+.storylister-overlay select,
+.storylister-overlay button {
+  font-family: inherit;
+  font-size: inherit;
+}
+
+.storylister-overlay input:focus,
+.storylister-overlay select:focus,
+.storylister-overlay button:focus {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+/* Popup styles */
+.popup-body {
+  width: 320px;
+  min-height: 400px;
+  margin: 0;
+  padding: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  background: var(--background);
+  color: var(--foreground);
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+.popup-container {
+  display: flex;
+  flex-direction: column;
+  min-height: 400px;
+}
+
+.popup-header {
+  padding: 16px;
+  border-bottom: 1px solid var(--border);
+  background: white;
+}
+
+.header-content {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.logo {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius);
+  background: var(--primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--primary-foreground);
+}
+
+.header-text h1 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.header-text p {
+  margin: 0;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.version-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.settings-section,
+.pro-section,
+.data-section {
+  padding: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-section h3,
+.pro-section h3,
+.data-section h3 {
+  margin: 0 0 12px 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.setting-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.setting-item:last-child {
+  margin-bottom: 0;
+}
+
+.setting-info {
+  flex: 1;
+}
+
+.setting-label {
+  font-weight: 500;
+  margin-bottom: 2px;
+}
+
+.setting-description {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.toggle {
+  position: relative;
+  display: inline-block;
+  width: 40px;
+  height: 20px;
+}
+
+.toggle input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.toggle-slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: #e5e7eb;
+  border-radius: 20px;
+  transition: 0.2s;
+}
+
+.toggle-slider:before {
+  position: absolute;
+  content: "";
+  height: 16px;
+  width: 16px;
+  left: 2px;
+  bottom: 2px;
+  background: white;
+  border-radius: 50%;
+  transition: 0.2s;
+}
+
+.toggle input:checked + .toggle-slider {
+  background: var(--primary);
+}
+
+.toggle input:checked + .toggle-slider:before {
+  transform: translateX(20px);
+}
+
+.setting-select {
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: white;
+  font-size: 12px;
+  min-width: 120px;
+}
+
+.pro-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.pro-badge {
+  padding: 2px 8px;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.pro-features {
+  margin-bottom: 16px;
+}
+
+.feature-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 13px;
+  color: var(--primary);
+}
+
+.feature-item svg {
+  flex-shrink: 0;
+}
+
+.upgrade-button {
+  width: 100%;
+  padding: 8px 16px;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  border: none;
+  border-radius: 6px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.upgrade-button:hover:not(:disabled) {
+  background: hsl(262, 83%, 52%);
+}
+
+.upgrade-button.pro-active {
+  background: #10b981;
+  cursor: default;
+}
+
+.data-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.data-info {
+  flex: 1;
+}
+
+.data-label {
+  font-weight: 500;
+  margin-bottom: 2px;
+}
+
+.data-description {
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.data-status {
+  color: #10b981;
+}
+
+.data-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.export-button,
+.clear-button {
+  flex: 1;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: white;
+  cursor: pointer;
+  font-size: 12px;
+  transition: background 0.2s;
+}
+
+.export-button:hover {
+  background: var(--secondary);
+}
+
+.clear-button {
+  color: #dc2626;
+  border-color: #dc2626;
+}
+
+.clear-button:hover {
+  background: #fef2f2;
+}
+
+.popup-footer {
+  padding: 12px 16px;
+  margin-top: auto;
+  border-top: 1px solid var(--border);
+  background: #f9fafb;
+}
+
+.footer-links {
+  display: flex;
+  justify-content: center;
+  gap: 16px;
+}
+
+.footer-links a {
+  color: #6b7280;
+  text-decoration: none;
+  font-size: 12px;
+  transition: color 0.2s;
+}
+
+.footer-links a:hover {
+  color: var(--primary);
+}
+
+/* Toast notifications */
+.popup-toast {
+  animation: toast-slide-in 0.2s ease-out;
+}
+
+@keyframes toast-slide-in {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+/* Analytics modal styles */
+.storylister-analytics-modal {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+}
+
+.storylister-analytics-modal * {
+  box-sizing: border-box;
+}
