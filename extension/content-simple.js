@@ -10,8 +10,15 @@ class StorylistExtension {
     this.currentFilters = {
       query: '',
       type: 'all',
-      sort: 'recent'
+      sort: 'recent',
+      tag: 'all'
     };
+    this.availableTags = [
+      { emoji: '❤️', label: 'Crush', id: 'crush' },
+      { emoji: '🥷', label: 'Stalker', id: 'stalker' },
+      { emoji: '👯', label: 'Friend', id: 'friend' },
+      { emoji: '👮‍♂️', label: 'Work', id: 'work' }
+    ];
   }
 
   init() {
@@ -115,6 +122,17 @@ class StorylistExtension {
             </select>
           </div>
           
+          <div class="storylister-tag-filter">
+            <select id="storylister-filter-tag">
+              <option value="all">All tags</option>
+              <option value="crush">❤️ Crush</option>
+              <option value="stalker">🥷 Stalker</option>
+              <option value="friend">👯 Friend</option>
+              <option value="work">👮‍♂️ Work</option>
+              <option value="untagged">No tags</option>
+            </select>
+          </div>
+          
           <div class="storylister-stats">
             <span id="storylister-viewer-count">0 viewers found</span>
             <div class="storylister-actions">
@@ -152,6 +170,7 @@ class StorylistExtension {
     const searchInput = this.rightRail.querySelector('#storylister-search-input');
     const filterType = this.rightRail.querySelector('#storylister-filter-type');
     const sortSelect = this.rightRail.querySelector('#storylister-sort');
+    const tagFilter = this.rightRail.querySelector('#storylister-filter-tag');
     const captureBtn = this.rightRail.querySelector('#storylister-capture');
     const exportBtn = this.rightRail.querySelector('#storylister-export');
 
@@ -170,8 +189,13 @@ class StorylistExtension {
       this.updateResults();
     });
 
+    tagFilter.addEventListener('change', (e) => {
+      this.currentFilters.tag = e.target.value;
+      this.updateResults();
+    });
+
     captureBtn.addEventListener('click', () => this.captureSnapshot());
-    exportBtn.addEventListener('click', () => this.exportData());
+    exportBtn.addEventListener('click', () => this.showAnalytics());
   }
 
   setupViewerObserver() {
@@ -191,55 +215,89 @@ class StorylistExtension {
   }
 
   indexViewers() {
-    // Find all profile links that could be viewers
-    const profileLinks = document.querySelectorAll('a[href*="/"][href*="/"]');
+    // Find viewer list container - Instagram uses specific structure for viewer lists
+    const viewerListSelectors = [
+      'div[role="dialog"] div[style*="overflow"]', // Common viewer list container
+      'div[role="dialog"] ul', // Alternative list structure
+      'div[style*="max-height"] div[style*="flex-direction: column"]' // Scrollable viewer container
+    ];
+    
+    let viewerContainer = null;
+    for (const selector of viewerListSelectors) {
+      const container = document.querySelector(selector);
+      if (container && container.querySelector('a[href*="/"]')) {
+        viewerContainer = container;
+        break;
+      }
+    }
+
+    if (!viewerContainer) {
+      console.log('Storylister: Viewer container not found');
+      return;
+    }
+
+    // Find all profile links within the viewer container
+    const profileLinks = viewerContainer.querySelectorAll('a[href*="/"]');
     let newViewers = 0;
 
     profileLinks.forEach(link => {
       const href = link.href;
       const usernameMatch = href.match(/instagram\.com\/([^\/\?]+)\/?$/);
       
-      if (!usernameMatch || !usernameMatch[1] || usernameMatch[1].includes('/')) {
+      if (!usernameMatch || !usernameMatch[1] || 
+          usernameMatch[1].includes('/') || 
+          usernameMatch[1] === 'explore' || 
+          usernameMatch[1] === 'reels') {
         return;
       }
 
       const username = usernameMatch[1];
       
-      // Skip if already indexed
-      if (this.viewers.has(username)) return;
-
+      // Get existing viewer data or create new
+      const existingViewer = this.viewers.get(username);
+      
       // Extract viewer info from the link's parent container
-      const container = link.closest('div');
+      const container = link.closest('div[role="button"]') || link.parentElement?.parentElement;
       if (!container) return;
 
-      const img = container.querySelector('img');
-      const textElements = container.querySelectorAll('div');
+      const img = container.querySelector('img[alt*="profile"]') || container.querySelector('img');
+      const textElements = container.querySelectorAll('span');
       
       let displayName = '';
-      for (const textEl of textElements) {
-        if (textEl.textContent && textEl.textContent.trim() && 
-            textEl.textContent !== username && 
-            !textEl.textContent.includes('•') &&
-            textEl.textContent.length < 50) {
-          displayName = textEl.textContent.trim();
-          break;
+      let followStatus = '';
+      
+      textElements.forEach(textEl => {
+        const text = textEl.textContent?.trim();
+        if (text && text !== username) {
+          if (text === 'Follow' || text === 'Following' || text === 'Requested') {
+            followStatus = text;
+          } else if (!text.includes('•') && text.length < 50 && !displayName) {
+            displayName = text;
+          }
         }
-      }
+      });
+
+      // Load saved tags from localStorage
+      const savedTags = JSON.parse(localStorage.getItem('storylister-tags') || '{}');
+      const userTags = savedTags[username] || [];
 
       const viewer = {
         username,
-        displayName: displayName || username,
-        profilePic: img ? img.src : null,
+        displayName: displayName || existingViewer?.displayName || username,
+        profilePic: img ? img.src : existingViewer?.profilePic || null,
         isVerified: container.querySelector('[aria-label*="Verified"]') !== null,
-        isFollower: false, // Would need more logic to detect this
-        indexedAt: Date.now()
+        isFollower: followStatus === 'Following',
+        followStatus,
+        tags: userTags,
+        indexedAt: existingViewer?.indexedAt || Date.now(),
+        lastSeen: Date.now()
       };
 
       this.viewers.set(username, viewer);
-      newViewers++;
+      if (!existingViewer) newViewers++;
     });
 
-    if (newViewers > 0) {
+    if (newViewers > 0 || profileLinks.length > 0) {
       console.log(`Storylister: Indexed ${newViewers} new viewers (${this.viewers.size} total)`);
       this.updateResults();
     }
@@ -274,6 +332,19 @@ class StorylistExtension {
         break;
     }
 
+    // Apply tag filter
+    switch (this.currentFilters.tag) {
+      case 'all':
+        // Show all
+        break;
+      case 'untagged':
+        filteredViewers = filteredViewers.filter(v => !v.tags || v.tags.length === 0);
+        break;
+      default:
+        filteredViewers = filteredViewers.filter(v => v.tags && v.tags.includes(this.currentFilters.tag));
+        break;
+    }
+
     // Apply sorting
     switch (this.currentFilters.sort) {
       case 'alphabetical':
@@ -302,28 +373,76 @@ class StorylistExtension {
     }
 
     resultsContainer.innerHTML = filteredViewers.map(viewer => `
-      <div class="storylister-viewer-item" onclick="window.open('https://instagram.com/${viewer.username}', '_blank')">
-        <div class="storylister-viewer-avatar">
+      <div class="storylister-viewer-item" data-username="${viewer.username}">
+        <div class="storylister-viewer-avatar" onclick="window.open('https://instagram.com/${viewer.username}', '_blank')">
           ${viewer.profilePic ? 
             `<img src="${viewer.profilePic}" alt="${viewer.username}">` : 
             `<div class="storylister-avatar-placeholder">${viewer.username.charAt(0).toUpperCase()}</div>`
           }
         </div>
-        <div class="storylister-viewer-info">
+        <div class="storylister-viewer-info" onclick="window.open('https://instagram.com/${viewer.username}', '_blank')">
           <div class="storylister-viewer-username">
             ${viewer.username}
             ${viewer.isVerified ? '<span class="storylister-verified">✓</span>' : ''}
           </div>
           <div class="storylister-viewer-display-name">${viewer.displayName}</div>
         </div>
+        <div class="storylister-viewer-tags">
+          ${this.availableTags.map(tag => `
+            <button class="storylister-tag ${viewer.tags && viewer.tags.includes(tag.id) ? 'active' : ''}" 
+                    data-tag="${tag.id}" 
+                    title="${tag.label}">
+              ${tag.emoji}
+            </button>
+          `).join('')}
+        </div>
       </div>
     `).join('');
+
+    // Add tag click handlers
+    resultsContainer.querySelectorAll('.storylister-tag').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const username = e.target.closest('.storylister-viewer-item').dataset.username;
+        const tagId = e.target.dataset.tag;
+        this.toggleTag(username, tagId);
+      });
+    });
+  }
+
+  toggleTag(username, tagId) {
+    const viewer = this.viewers.get(username);
+    if (!viewer) return;
+
+    // Load current tags
+    const savedTags = JSON.parse(localStorage.getItem('storylister-tags') || '{}');
+    const userTags = savedTags[username] || [];
+
+    // Toggle the tag
+    const tagIndex = userTags.indexOf(tagId);
+    if (tagIndex > -1) {
+      userTags.splice(tagIndex, 1);
+    } else {
+      userTags.push(tagId);
+    }
+
+    // Save to localStorage
+    savedTags[username] = userTags;
+    localStorage.setItem('storylister-tags', JSON.stringify(savedTags));
+
+    // Update viewer object
+    viewer.tags = userTags;
+    this.viewers.set(username, viewer);
+
+    // Update UI
+    this.updateResults();
   }
 
   captureSnapshot() {
     const data = {
       timestamp: new Date().toISOString(),
       storyUrl: window.location.href,
+      storyAuthor: window.location.pathname.split('/')[2] || 'unknown',
       viewers: Array.from(this.viewers.values()),
       totalCount: this.viewers.size
     };
@@ -333,26 +452,139 @@ class StorylistExtension {
     snapshots.push(data);
     localStorage.setItem('storylister-snapshots', JSON.stringify(snapshots));
 
-    this.showToast('Snapshot captured!', 'success');
+    this.showToast(`Snapshot captured! ${this.viewers.size} viewers saved`, 'success');
+  }
+
+  showAnalytics() {
+    // Create analytics modal
+    const modal = document.createElement('div');
+    modal.id = 'storylister-analytics-modal';
+    modal.style.cssText = `
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: rgba(0, 0, 0, 0.5);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000001;
+    `;
+
+    const viewerData = Array.from(this.viewers.values());
+    const snapshots = JSON.parse(localStorage.getItem('storylister-snapshots') || '[]');
+    
+    // Calculate analytics
+    const tagCounts = {};
+    this.availableTags.forEach(tag => {
+      tagCounts[tag.id] = viewerData.filter(v => v.tags && v.tags.includes(tag.id)).length;
+    });
+
+    const verifiedCount = viewerData.filter(v => v.isVerified).length;
+    const followerCount = viewerData.filter(v => v.isFollower).length;
+
+    modal.innerHTML = `
+      <div class="storylister-analytics-content">
+        <div class="storylister-analytics-header">
+          <h2>📊 Storylister Analytics</h2>
+          <button class="storylister-close" onclick="this.closest('#storylister-analytics-modal').remove()">×</button>
+        </div>
+        
+        <div class="storylister-analytics-body">
+          <div class="storylister-stats-grid">
+            <div class="storylister-stat-card">
+              <div class="storylister-stat-value">${this.viewers.size}</div>
+              <div class="storylister-stat-label">Total Viewers</div>
+            </div>
+            <div class="storylister-stat-card">
+              <div class="storylister-stat-value">${followerCount}</div>
+              <div class="storylister-stat-label">Followers</div>
+            </div>
+            <div class="storylister-stat-card">
+              <div class="storylister-stat-value">${verifiedCount}</div>
+              <div class="storylister-stat-label">Verified</div>
+            </div>
+            <div class="storylister-stat-card">
+              <div class="storylister-stat-value">${snapshots.length}</div>
+              <div class="storylister-stat-label">Snapshots</div>
+            </div>
+          </div>
+
+          <div class="storylister-tag-stats">
+            <h3>Tag Distribution</h3>
+            <div class="storylister-tag-bars">
+              ${this.availableTags.map(tag => {
+                const count = tagCounts[tag.id];
+                const percentage = this.viewers.size > 0 ? (count / this.viewers.size * 100).toFixed(1) : 0;
+                return `
+                  <div class="storylister-tag-bar">
+                    <div class="storylister-tag-bar-label">
+                      <span>${tag.emoji} ${tag.label}</span>
+                      <span>${count}</span>
+                    </div>
+                    <div class="storylister-tag-bar-track">
+                      <div class="storylister-tag-bar-fill" style="width: ${percentage}%"></div>
+                    </div>
+                  </div>
+                `;
+              }).join('')}
+            </div>
+          </div>
+
+          <div class="storylister-snapshot-history">
+            <h3>Recent Snapshots</h3>
+            ${snapshots.length > 0 ? `
+              <div class="storylister-snapshot-list">
+                ${snapshots.slice(-5).reverse().map(snap => `
+                  <div class="storylister-snapshot-item">
+                    <div class="storylister-snapshot-info">
+                      <strong>@${snap.storyAuthor || 'unknown'}</strong>
+                      <span>${new Date(snap.timestamp).toLocaleString()}</span>
+                    </div>
+                    <div class="storylister-snapshot-count">${snap.totalCount} viewers</div>
+                  </div>
+                `).join('')}
+              </div>
+            ` : '<p class="storylister-empty">No snapshots yet. Use the 📸 Capture button to save viewer lists.</p>'}
+          </div>
+
+          <div class="storylister-analytics-actions">
+            <button class="storylister-btn-primary" onclick="
+              const data = ${JSON.stringify({
+                analytics: {
+                  totalViewers: this.viewers.size,
+                  followers: followerCount,
+                  verified: verifiedCount,
+                  tagDistribution: tagCounts
+                },
+                viewers: viewerData,
+                snapshots: snapshots
+              })};
+              const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = 'storylister-analytics-${new Date().toISOString().split('T')[0]}.json';
+              a.click();
+              URL.revokeObjectURL(url);
+            ">Export Full Report</button>
+            <button class="storylister-btn-secondary" onclick="
+              if(confirm('This will clear all snapshots. Are you sure?')) {
+                localStorage.removeItem('storylister-snapshots');
+                this.closest('#storylister-analytics-modal').remove();
+              }
+            ">Clear History</button>
+          </div>
+        </div>
+      </div>
+    `;
+
+    document.body.appendChild(modal);
   }
 
   exportData() {
-    const data = {
-      exportedAt: new Date().toISOString(),
-      storyUrl: window.location.href,
-      viewers: Array.from(this.viewers.values()),
-      snapshots: JSON.parse(localStorage.getItem('storylister-snapshots') || '[]')
-    };
-
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `storylister-export-${new Date().toISOString().split('T')[0]}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-
-    this.showToast('Data exported!', 'success');
+    this.showAnalytics();
   }
 
   showToast(message, type) {
@@ -572,6 +804,219 @@ class StorylistExtension {
         color: #6b7280;
         font-size: 14px;
         padding: 20px;
+      }
+
+      .storylister-tag-filter {
+        margin-bottom: 12px;
+      }
+
+      .storylister-tag-filter select {
+        width: 100%;
+        padding: 6px 8px;
+        border: 1px solid #d1d5db;
+        border-radius: 4px;
+        font-size: 12px;
+        background: white;
+      }
+
+      .storylister-viewer-tags {
+        display: flex;
+        gap: 4px;
+        margin-left: auto;
+      }
+
+      .storylister-tag {
+        background: #f3f4f6;
+        border: 1px solid #d1d5db;
+        border-radius: 4px;
+        padding: 4px 8px;
+        font-size: 16px;
+        cursor: pointer;
+        transition: all 0.2s;
+      }
+
+      .storylister-tag:hover {
+        background: #e5e7eb;
+        transform: scale(1.1);
+      }
+
+      .storylister-tag.active {
+        background: #8b5cf6;
+        border-color: #8b5cf6;
+      }
+
+      .storylister-analytics-content {
+        background: white;
+        border-radius: 12px;
+        width: 90%;
+        max-width: 600px;
+        max-height: 90vh;
+        overflow-y: auto;
+      }
+
+      .storylister-analytics-header {
+        padding: 20px;
+        border-bottom: 1px solid #e5e7eb;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+
+      .storylister-analytics-header h2 {
+        margin: 0;
+        font-size: 20px;
+        color: #111827;
+      }
+
+      .storylister-analytics-body {
+        padding: 20px;
+      }
+
+      .storylister-stats-grid {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 12px;
+        margin-bottom: 24px;
+      }
+
+      .storylister-stat-card {
+        background: #f9fafb;
+        padding: 16px;
+        border-radius: 8px;
+        text-align: center;
+      }
+
+      .storylister-stat-value {
+        font-size: 28px;
+        font-weight: bold;
+        color: #8b5cf6;
+      }
+
+      .storylister-stat-label {
+        font-size: 12px;
+        color: #6b7280;
+        margin-top: 4px;
+      }
+
+      .storylister-tag-stats {
+        margin-bottom: 24px;
+      }
+
+      .storylister-tag-stats h3 {
+        font-size: 16px;
+        margin-bottom: 12px;
+        color: #111827;
+      }
+
+      .storylister-tag-bar {
+        margin-bottom: 12px;
+      }
+
+      .storylister-tag-bar-label {
+        display: flex;
+        justify-content: space-between;
+        margin-bottom: 4px;
+        font-size: 14px;
+      }
+
+      .storylister-tag-bar-track {
+        background: #f3f4f6;
+        height: 24px;
+        border-radius: 4px;
+        overflow: hidden;
+      }
+
+      .storylister-tag-bar-fill {
+        background: linear-gradient(90deg, #8b5cf6, #3b82f6);
+        height: 100%;
+        transition: width 0.3s;
+      }
+
+      .storylister-snapshot-history h3 {
+        font-size: 16px;
+        margin-bottom: 12px;
+        color: #111827;
+      }
+
+      .storylister-snapshot-list {
+        background: #f9fafb;
+        border-radius: 8px;
+        padding: 12px;
+      }
+
+      .storylister-snapshot-item {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 8px 0;
+        border-bottom: 1px solid #e5e7eb;
+      }
+
+      .storylister-snapshot-item:last-child {
+        border-bottom: none;
+      }
+
+      .storylister-snapshot-info {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+
+      .storylister-snapshot-info strong {
+        color: #111827;
+        font-size: 14px;
+      }
+
+      .storylister-snapshot-info span {
+        color: #6b7280;
+        font-size: 12px;
+      }
+
+      .storylister-snapshot-count {
+        background: #8b5cf6;
+        color: white;
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .storylister-analytics-actions {
+        display: flex;
+        gap: 12px;
+        margin-top: 24px;
+      }
+
+      .storylister-btn-primary {
+        flex: 1;
+        background: #8b5cf6;
+        color: white;
+        border: none;
+        padding: 12px;
+        border-radius: 6px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: background 0.2s;
+      }
+
+      .storylister-btn-primary:hover {
+        background: #7c3aed;
+      }
+
+      .storylister-btn-secondary {
+        flex: 1;
+        background: white;
+        color: #ef4444;
+        border: 1px solid #ef4444;
+        padding: 12px;
+        border-radius: 6px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s;
+      }
+
+      .storylister-btn-secondary:hover {
+        background: #fef2f2;
       }
     `;
 
