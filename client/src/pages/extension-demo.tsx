@@ -23,6 +23,9 @@ export default function ExtensionDemo() {
               </div>
             </div>
             <div className="flex items-center space-x-3">
+              <a href="/mock-instagram" className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-700 transition">
+                Test Live Demo
+              </a>
               <Badge variant="secondary">Chrome Extension</Badge>
               <Badge variant="default">v1.0.0</Badge>
             </div>
