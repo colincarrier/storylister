@@ -1,0 +1,523 @@
+/* Mock Instagram Styles */
+
+.mock-instagram {
+  width: 100%;
+  height: 100vh;
+  background: #000;
+  position: relative;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  overflow: hidden;
+}
+
+/* Instagram Header */
+.ig-header {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 60px;
+  background: #fff;
+  border-bottom: 1px solid #dbdbdb;
+  z-index: 100;
+}
+
+.ig-header-content {
+  max-width: 975px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 100%;
+  padding: 0 20px;
+}
+
+.ig-logo {
+  font-family: 'Grand Hotel', cursive;
+  font-size: 28px;
+  background: linear-gradient(45deg, #f09433, #e6683c, #dc2743, #cc2366, #bc1888);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  font-weight: normal;
+}
+
+.ig-search input {
+  background: #efefef;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 16px;
+  width: 250px;
+  font-size: 14px;
+}
+
+.ig-nav-icons {
+  display: flex;
+  gap: 20px;
+  font-size: 20px;
+}
+
+.ig-icon {
+  cursor: pointer;
+}
+
+/* Story Viewer */
+.ig-story-viewer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100vh;
+  background: #1a1a1a;
+}
+
+.ig-story-container {
+  width: 400px;
+  height: 700px;
+  background: #000;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.ig-story-header {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  padding: 16px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: linear-gradient(to bottom, rgba(0,0,0,0.8), transparent);
+  z-index: 10;
+}
+
+.ig-story-user {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: white;
+}
+
+.ig-story-user img {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+}
+
+.ig-story-time {
+  opacity: 0.7;
+  font-size: 14px;
+}
+
+.ig-story-close {
+  background: none;
+  border: none;
+  color: white;
+  font-size: 24px;
+  cursor: pointer;
+}
+
+.ig-story-content {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+.ig-story-image {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ig-story-placeholder {
+  text-align: center;
+  color: white;
+  padding: 20px;
+}
+
+.ig-story-placeholder h2 {
+  font-size: 24px;
+  margin-bottom: 10px;
+}
+
+.ig-story-footer {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 16px;
+  background: linear-gradient(to top, rgba(0,0,0,0.8), transparent);
+  color: white;
+}
+
+.ig-story-viewers {
+  padding: 8px 0;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.ig-story-viewers:hover {
+  opacity: 0.8;
+}
+
+.ig-eye-icon {
+  font-size: 16px;
+}
+
+.ig-story-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.ig-story-actions input {
+  flex: 1;
+  background: transparent;
+  border: 1px solid rgba(255,255,255,0.3);
+  border-radius: 22px;
+  padding: 8px 16px;
+  color: white;
+  font-size: 14px;
+}
+
+.ig-story-actions input::placeholder {
+  color: rgba(255,255,255,0.6);
+}
+
+/* Viewer Modal */
+.ig-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0,0,0,0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.ig-viewer-modal {
+  background: white;
+  border-radius: 12px;
+  width: 400px;
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.ig-modal-header {
+  padding: 16px;
+  border-bottom: 1px solid #dbdbdb;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.ig-modal-header h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.ig-modal-header button {
+  background: none;
+  border: none;
+  font-size: 24px;
+  cursor: pointer;
+  color: #262626;
+}
+
+.ig-viewer-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 0;
+}
+
+.ig-viewer-item {
+  display: flex;
+  align-items: center;
+  padding: 8px 16px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.ig-viewer-item:hover {
+  background: #fafafa;
+}
+
+.ig-viewer-link {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  text-decoration: none;
+  color: inherit;
+}
+
+.ig-viewer-link img {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  margin-right: 12px;
+}
+
+.ig-viewer-info {
+  display: flex;
+  flex-direction: column;
+}
+
+.ig-username {
+  font-weight: 600;
+  font-size: 14px;
+  color: #262626;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ig-verified {
+  color: #0095f6;
+  font-size: 12px;
+}
+
+.ig-display-name {
+  color: #8e8e8e;
+  font-size: 14px;
+}
+
+.ig-follow-btn {
+  background: #0095f6;
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 7px 16px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.ig-follow-btn:hover {
+  background: #0074cc;
+}
+
+/* Storylister Extension Styles */
+#storylister-right-rail {
+  position: fixed;
+  top: 80px;
+  right: 20px;
+  width: 320px;
+  max-height: calc(100vh - 100px);
+  z-index: 999999;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  animation: slideIn 0.3s ease-out;
+}
+
+@keyframes slideIn {
+  from { transform: translateX(100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+.storylister-panel {
+  background: white;
+  border-radius: 12px;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1);
+  overflow: hidden;
+  border: 1px solid #e5e7eb;
+}
+
+.storylister-header {
+  background: #f9fafb;
+  padding: 12px 16px;
+  border-bottom: 1px solid #e5e7eb;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.storylister-logo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: #8b5cf6;
+}
+
+.storylister-close {
+  background: none;
+  border: none;
+  font-size: 20px;
+  cursor: pointer;
+  color: #6b7280;
+  padding: 4px;
+  border-radius: 4px;
+}
+
+.storylister-close:hover {
+  background: #e5e7eb;
+}
+
+.storylister-content {
+  padding: 16px;
+}
+
+.storylister-search input {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 14px;
+  margin-bottom: 12px;
+}
+
+.storylister-search input:focus {
+  outline: none;
+  border-color: #8b5cf6;
+  box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.1);
+}
+
+.storylister-filters {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.storylister-filters select,
+.storylister-tag-filter select {
+  flex: 1;
+  padding: 6px 8px;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  font-size: 12px;
+  background: white;
+}
+
+.storylister-tag-filter {
+  margin-bottom: 12px;
+}
+
+.storylister-tag-filter select {
+  width: 100%;
+}
+
+.storylister-stats {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+  font-size: 12px;
+  color: #6b7280;
+}
+
+.storylister-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.storylister-actions button {
+  padding: 4px 8px;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  background: white;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.storylister-actions button:hover {
+  background: #f3f4f6;
+}
+
+.storylister-results {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.storylister-viewer-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.storylister-viewer-item:hover {
+  background: #f3f4f6;
+}
+
+.storylister-viewer-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.storylister-viewer-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.storylister-viewer-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.storylister-viewer-username {
+  font-weight: 500;
+  font-size: 14px;
+  color: #111827;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.storylister-verified {
+  color: #3b82f6;
+  font-weight: bold;
+}
+
+.storylister-viewer-display-name {
+  font-size: 12px;
+  color: #6b7280;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.storylister-viewer-tags {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.storylister-tag {
+  background: #f3f4f6;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 16px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.storylister-tag:hover {
+  background: #e5e7eb;
+  transform: scale(1.1);
+}
+
+.storylister-tag.active {
+  background: #8b5cf6;
+  border-color: #8b5cf6;
+}
