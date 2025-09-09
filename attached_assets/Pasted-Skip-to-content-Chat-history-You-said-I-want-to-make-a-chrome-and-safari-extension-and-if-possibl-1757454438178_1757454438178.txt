@@ -1,0 +1,1210 @@
+Skip to content
+Chat history
+
+You said:
+I want to make a chrome and safari extension (and if possible an iphone and android solution) where the goal is to allow users who are logged into their instagram accounts, to 'search' everyone who's viewed their stories.  A pro version can collect and view accounts of who's viewed stories, and who's followed and unfollowed you, as well as grab aliases of these people and build out mini profiles.  
+
+A key voyeuristis feature of instagram is seeing who's looking at your stuff.  Instagram provides users who post stories to see the accounts of who's viewed them.  But it's not searchable.  So step 1, free accounts, are allowed to search it.  Which means on desktop (and in app) all viewers need to be paged in (they are not by default), instagram saves themselves by not having to load everytone.
+
+The pro upgrade, will save and store that information for you if you make an account and pay, and can track people's viewership over time.  Rank your viewers by how much they engage, etc.
+
+I want to make the pro version very data heavy, and probably have mutliple tiers.  It will require databasing, and potentially use VMs to be checking accounts regularly, but I don't see a way around not making this a chrome/safari extension in order to access the data coming into the app/html.
+
+Need a couple things:
+- is anyone else offering this?  Doing some Google searches, I didn't see anything.  Does IG offering viewer level (ie. exact usernames) data/tracking?
+- a prompt to give to replit to build the extension.  If replit can't build extensions and the rest of this tech, who can?
+- the full product plan
+- some options for names?  I like a play on WhoVille (i'm buying the .ai domain and .app).  Do you think trademark or privacy protections will play out here in anyway?
+
+Think hard and long and deep.  This is vitally important.
+ChatGPT said:
+Request for GPT-5 Pro
+Reasoned for 8m 22s
+Colin — love the vision. Before we get into how to build it, here’s the blunt reality check (and then a path that still gets you 80% of the value without getting your users banned or your listing pulled).
+
+0) TL;DR
+Instagram does show exact usernames of story viewers to the story author, but only for ~48 hours after posting. That’s an official, documented limit. 
+Instagram Help Center
+Instagram
+
+Instagram’s official APIs do not expose the viewer list or follower/unfollower events. You can get only aggregate story insights and follower counts (for Business/Creator accounts), not the per‑viewer identities. 
+Facebook Developers
++2
+Facebook Developers
++2
+Stack Overflow
+
+Automating collection of Instagram data (scrolling/pagination, scraping) without Meta’s written permission violates their terms and can get accounts restricted. (Yes, they detect it.) 
+Instagram Help Center
++1
+Facebook
+
+Competitors exist (anonymous viewers, downloaders, some “viewer list exporters”). They’re whack‑a‑mole and many operate in a ToS gray/black area; several get delisted or trigger account flags. 
+PhantomBuster
+Chrome Web Store
++1
+
+A safe, shippable path: a client‑side Chrome/Safari extension that adds search, filters, and light analytics on top of the viewer dialog (no server, no automation). Optional Pro: user‑initiated snapshots (click to capture), local history + opt‑in encrypted sync, and API‑compliant insights for Business/Creator accounts.
+
+I’ll map the landscape, then lay out the build plan, the Replit prompt, legal/risk posture, and names.
+
+1) Is anyone else doing this? Does IG offer viewer‑level data/tracking?
+What Instagram offers natively / via API
+Native (in‑app/on web): For your own story, you can see exactly who viewed it up to 48 hours after posting. After that, the viewer list disappears. 
+Instagram Help Center
+Instagram
+
+Instagram Graph API: Story endpoints exist (publish/read your own stories and aggregate insights), but not the viewer list. There’s also no official endpoint for “who followed/unfollowed me”; you can access follower count and audience breakdowns for Professional accounts only. 
+Facebook Developers
++2
+Facebook Developers
++2
+Stack Overflow
+
+Market scan (representative)
+Anonymous story viewers/downloaders (e.g., “Ghost / Stories for Instagram”, “Anonymous Stories”, “InstaPV”): primarily enable anonymous viewing/downloading of public accounts; high ToS risk if logged in. 
+Chrome Web Store
++1
+InstaPV
+
+“Export story viewers” automations (e.g., PhantomBuster): explicitly automate extracting your viewer list (they advertise “latest 1000 viewers”). Useful signal of demand, but these operate by acting on your session cookies and are risky for user accounts and for your listing. 
+PhantomBuster
++1
+
+Follower/unfollower trackers: many rely on scraping; functionality has been curtailed for years and apps often get pulled or neutered when Instagram tightens enforcement. 
+Lifewire
+
+Conclusion: No legitimate, durable product offers searchable, persistent viewer identities across time via the official API. Instagram intentionally withholds this to limit stalking/harassment vectors. Your angle should be: augment the 48‑hour window (search + snapshot on demand) and complement with API‑compliant insights.
+
+2) What’s allowed vs. risky?
+Explicit prohibitions: Instagram’s Terms ban “accessing or collecting information in an automated way without our express permission” (this includes automated scrolling/pagination and scraping). Meta’s Automated Data Collection Terms require written permission for bots/scrapers. Accounts are restricted when Instagram detects scraping behavior. 
+Instagram Help Center
++1
+Facebook
+
+A narrow, defensible lane: A client‑side extension that only reads/filters what the user is already seeing and stores it locally at the user’s command (no background harvesting, no botting) is far more defensible with Chrome Web Store reviewers and vastly safer for users’ accounts.
+
+If you try the “VMs check accounts regularly” route, expect: login challenges, disabled sessions, and user bans. High risk, low durability.
+
+3) Product plan (practical & defensible)
+Free (100% client‑side)
+Goal: “Make the viewer list actually usable.”
+
+Search & filter the native viewer dialog (username, display name).
+
+Sort options: first‑seen vs. last‑seen, followers vs. non‑followers (if that flag is visible).
+
+Pagination helper: show progress (“Loaded 2,000 of 12,438 viewers”). Let the user manually scroll; as they do, the extension indexes newly loaded rows. (Avoid auto‑scrolling to remain ToS‑safe.)
+
+Accessibility & perf: virtualize long lists; index in a Web Worker; fuzzy search.
+
+Technically, you watch for the Story viewer modal and index only what’s present in DOM; you never call private endpoints or simulate user actions.
+
+Pro (“Privacy‑first, bring‑your‑own‑data”)
+All opt‑in, transparent, and user‑driven.
+
+Snapshots: “Capture current viewer list” (within the 48‑hour window) → store locally in IndexedDB with timestamps and story IDs.
+
+Trends & ranks:
+
+Consistency (views across N stories)
+
+Recency (last seen)
+
+Streaks (consecutive stories viewed)
+
+Velocity (time from publish → view)
+
+Score = 0.5·recency + 0.3·consistency + 0.2·streak (example)
+
+Aliases & notes: mini‑profiles (user‑added nicknames, tags).
+
+Optional encrypted sync across devices (e.g., user’s own iCloud/Google Drive via end‑to‑end encryption keys you never see).
+
+Professional accounts add‑on (API‑compliant): ingest official Insights (reach, impressions, replies, sticker taps) to enrich your ranks without ever pulling per‑viewer identities. 
+Facebook Developers
++1
+
+Out‑of‑scope for durability: automated background collection, follow/unfollow event tracking, or scraping beyond the user‑visible UI (all violate platform terms). 
+Instagram Help Center
+
+Tiers
+Free: Search & sort on live viewer lists (local only).
+
+Pro ($/mo): Snapshots, history, ranks, aliases/tags, device sync.
+
+Pro Business: Workspaces, API‑compliant Insights import (Professional accounts), CSV export. (Note: Chrome Web Store payments are deprecated—use Stripe/ExtensionPay or your own backend for licensing.) 
+Chrome for Developers
+extensionpay.com
+
+4) Platforms: Chrome, Safari, iPhone, Android
+Chrome (desktop): Standard MV3 extension.
+
+Safari (macOS + iOS/iPadOS): Build the Chrome MV3 version and convert with Apple’s Safari Web Extension Converter (xcrun safari-web-extension-converter). You’ll ship a container app via Xcode; iOS Safari extensions are supported. 
+Apple Developer
++1
+wwdcnotes.com
+
+iPhone in the Instagram app: Extensions don’t run inside Instagram’s in‑app webview; users need to open instagram.com in Safari.
+
+Android: Chrome Android doesn’t support extensions. Users could use Firefox for Android (limited add‑on catalog) or Chromium forks (Kiwi/Yandex) that permit extensions, but support is inconsistent. 
+ExpressVPN
+Mozilla Add-ons
+
+5) Architecture & data model (safe-by-design)
+Extension (MV3)
+
+Content script on https://www.instagram.com/* detects when the “Seen by …” viewer dialog opens and injects a small toolbar (search box + filters).
+
+Parsing strategy: don’t rely on obfuscated CSS classes; parse anchors with href matching /^[^?]+\\/[^/]+\\/$/ inside the viewer modal to extract the username; pull display name / avatar from sibling nodes.
+
+Indexing: build an in‑memory index (e.g., Fuse.js) in a Web Worker; stream new entries as user scrolls the native list.
+
+Persistence: for Pro, snapshots are user‑initiated → write to IndexedDB:
+
+Viewer {
+  username: string;
+  displayName?: string;
+  profilePic?: string;
+}
+ViewEvent {
+  storyId: string; // from URL/DOM
+  viewedAt: number; // now()
+  ordinal?: number; // viewer list position at capture
+  viewer: Viewer
+}
+Snapshot {
+  storyId: string;
+  capturedAt: number;
+  viewers: Viewer[];
+}
+Ranking: compute aggregate metrics over Snapshots; expose lightweight charts locally.
+
+Security: never exfiltrate session cookies; no background network calls except optional license check; disclose all permissions; allow “local‑only mode”.
+
+Server (only if monetizing)
+
+Minimal: license verification (Stripe/ExtensionPay), crash telemetry (opt‑in). No user content unless user opts into encrypted sync. 
+extensionpay.com
+
+6) Replit prompt (copy/paste)
+Title: Build a Chrome MV3 + Safari Web Extension that adds a searchable viewer list for Instagram Stories (client‑side only)
+
+Instructions for Replit Agent
+
+Scaffold a TypeScript MV3 extension using Vite (or WXT/Plasmo if supported).
+
+manifest.json (MV3):
+
+name: “SeenStack (Dev)”
+
+permissions: ["storage","activeTab","scripting"]
+
+host_permissions: ["https://www.instagram.com/*"]
+
+content_scripts: one script matching https://www.instagram.com/*, run_at: "document_idle".
+
+Content script (content.ts):
+
+Wait for the Story viewer dialog (role="dialog" with text like “Seen by” or presence of profile anchors).
+
+Inject a fixed, unobtrusive toolbar (top‑right of the dialog) with: search input, sort dropdown, counts (“indexed X / total Y”).
+
+Use a MutationObserver to detect added/removed viewer rows and update an in‑memory index (Fuse.js).
+
+Implement fuzzy search with debounced input; highlight matches; a toggle to show only followers if that flag is visible in DOM.
+
+No auto‑scrolling; only index what’s on screen as the user scrolls.
+
+Worker (indexer.worker.ts): receives {type:"add", viewer}, maintains maps of username → latest metadata, supports search(query, sortMode); returns paged results to the content script.
+
+Pro snapshot (snapshot.ts): Button “Capture current viewer list” → read the currently visible usernames (and any that were already indexed in the session) and persist to IndexedDB (idb library). Provide a history UI (list of snapshots by capturedAt and storyId), with CSV export (client‑side).
+
+Styles: small, neutral CSS injected via CSSStyleSheet to avoid clashes.
+
+Privacy guardrails: no remote calls; optional stub license.ts with an interface isLicensed() to be wired to Stripe/ExtensionPay later.
+
+Build scripts: npm run build:chrome → dist/chrome; include instructions/readme for converting to Safari with:
+
+xcrun safari-web-extension-converter ./dist/chrome --app-name "SeenStack" --project-location ./xcode
+Include Apple’s post‑conversion steps in README.
+
+Deliverables:
+
+Working MV3 extension folder with TS source, manifest, icons.
+
+README covering: install in developer mode; using the search; snapshot flow; conversion to Safari; limitations (no automation, no background scraping).
+
+Minimal e2e test script using Playwright in headed mode that only asserts toolbar injection when the viewer dialog is open (no login automation).
+
+If Replit balks at extensions, use Plasmo or WXT scaffolding locally and paste the generated project into Replit’s filesystem; both frameworks are extension‑first and simplify MV3 bundling.
+
+7) If not Replit, who can build this right?
+Frameworks: Plasmo (opinionated, extension‑native), WXT (Vite‑powered web‑extension tooling). 
+GitHub
+
+Safari conversion: Apple’s official converter in Xcode (works for iOS/macOS). 
+Apple Developer
+
+Contract shops with extension DNA: Evil Martians (good write‑up on Chrome→Safari conversion), Coditude (has public Safari conversion guides), or any senior TS contractor comfortable with MV3 + Xcode packaging. 
+evilmartians.com
+Coditude
+
+8) Legal, privacy, store‑review posture (the boring but existential part)
+Instagram/Meta terms: prohibit automated data collection without permission; scraping can trigger account restrictions. Position your UX to be user‑initiated, local‑only, and never simulate scrolling/clicking. 
+Instagram Help Center
++1
+Facebook
+
+Chrome Web Store policies: strict limits on collecting/using “web browsing activity”; any data collection must be user‑benefitting, disclosed, and minimal. Keep all viewer data local by default; require explicit opt‑in for any sync. 
+Chrome for Developers
+
+App Store (for Safari iOS container app): adhere to Apple privacy disclosures and ATT where applicable; avoid any “social scraping” posture. 
+Apple Developer
++1
+
+Data protection: viewer usernames are personal data. If you ever process them server‑side, you’ll need a privacy policy, DPA addendum, deletion/export mechanisms (GDPR/CCPA), and a lawful basis (likely legitimate interests, but get counsel).
+
+Monetization mechanics: Chrome Web Store payments are deprecated; use Stripe + ExtensionPay (or your own serverless check). 
+Chrome for Developers
+extensionpay.com
+
+Risk matrix (high-level):
+
+Background automation / headless VMs: Impact high, likelihood of enforcement high → avoid.
+
+Client-side search + user‑triggered snapshots: Impact low, likelihood low (but still be transparent).
+
+“Anonymous viewing” features: avoid; they attract scrutiny and aren’t core to your value.
+
+9) Names (skip “WhoVille”)
+“Whoville” (and similar) is strongly associated with Dr. Seuss and is registered as a trademark; expect pushback and potential C&D. Pick something original. 
+Justia Trademarks
++1
+
+Available‑sounding options:*
+
+SeenStack, SeenRank, SeenSense
+
+ViewerLens, ViewScout, ViewTrace
+
+StoryScope, StorySignal, StoryIndex
+
+PeekRank, Peekbook, Glanceboard
+
+LookBack.ai, SeenBy.ai, SpectraView
+
+Parade, RollCall, Roster, WatchlistR
+
+*Run a proper trademark/domain clearance (Classes 9 & 42 often relevant to software). 
+Gerben IP
+JPG Legal
+
+10) Implementation details you’ll want your devs to hit on day one
+Robust DOM targeting: Prefer semantic/role selectors; as a fallback, detect viewer items by <a href="/<username>/"> anchors and accompanying avatar nodes inside the story viewer dialog.
+
+Internationalization: “Seen by” string varies by locale; don’t rely on text. Detect the modal structurally.
+
+Performance:
+
+Virtualize results (>10k viewers) and paginate search results in the extension UI.
+
+Use a Worker for indexing; incremental compaction to keep memory under control.
+
+Export: CSV/JSON export per snapshot (client‑side only).
+
+Testing: limit to UI injection & local indexing; do not script logins or scraping in CI.
+
+Telemetry: off by default; if enabled, aggregate only performance metrics (no usernames).
+
+Fail‑closed: if Instagram changes DOM, the extension should degrade gracefully without making any network calls.
+
+11) Answering your final two questions explicitly
+Q: “Does IG offer viewer‑level (exact usernames) data/tracking via API?”
+A: No. Viewer identities are visible only in the app/UI for ~48 hours and are not available via official APIs. 
+Instagram Help Center
+Instagram
+Facebook Developers
+
+Q: “Is anyone else offering this?”
+A: Many tools claim adjacent features (anonymous viewers, downloaders, “export latest 1000 viewers”), but they rely on scraping/automation and are fragile or risky. Your defensible wedge is search + on‑demand snapshotting within Instagram’s UI. 
+PhantomBuster
+Chrome Web Store
+
+12) One‑step‑ahead roadmap (what buyers will ask for)
+Agency mode: multi‑account workspaces (but keep all data client‑side per Chrome profile; provide import/export for cross‑machine).
+
+Enrichment (opt‑in): if the user also uses a Professional account, combine official story insights (impressions/reach/replies) with your viewer‑presence ranks for better prioritization — still no per‑viewer joins. 
+Facebook Developers
+
+Alerts (safe): “It’s been 18 hours; capture the viewer list now” (a local reminder, not auto‑capture).
+
+Mobile adjunct: ship the Safari iOS extension; document that it works on instagram.com in Safari, not in the Instagram app’s webview. 
+Apple Developer
+
+Want me to turn this into a repo skeleton (MV3 + TS + Worker + IndexedDB + README) and a Stripe/ExtensionPay licensing stub?
+I can produce the whole starter code and a check‑list you can hand to a contractor, plus the App Store/Chrome Web Store listing copy with the right privacy posture.
+
+You said:
+ok, how can we handle the pagination in a randomized-looking way, and only when the user is using it (for free), for pro, you can 'hire an assistant' (this will be an AI agent who on your behalf is acting like a human and going through all of it, and effectively scraping.  Can the data be stored in a google drive template automatically for users so it doesn't look like it's being stored on our servers ourselves, and then formulas and macros can run automatically on our users private data collection place of their choosing?  This is akin to someone doing it manually.
+
+I want the html on the page to be manipulated by our extension such that filter and sorting and searching can happen in the desktop.
+
+search is good
+filter, in a number of ways would be key
+automatic pagination, but make it look human-like (for free tier, you have to click into your own stories to make it work), but pro version u have an assistant
+
+all the rest of what you said is good.  revise with this.
+ChatGPT said:
+Request for GPT-5 Pro
+Reasoned for 6m 33s
+Colin — got it. I’m going to revise the plan with your “search/filter/sort in‑page + pagination only while the user is using it (Free), and a Pro ‘assistant’” requirement — while drawing a hard line where things cross into ToS‑violating automation. I’ll show you exactly what we can (and should) ship that’s durable, shippable in stores, and won’t get users flagged.
+
+Why the line matters (receipts): Instagram shows exact usernames of Story viewers for ~48 hours after posting; beyond that the list disappears. Their Terms and Meta’s Automated Data Collection Terms explicitly prohibit collecting Instagram data via automated means without express permission and they restrict accounts for scraping. Chrome Web Store also limits “web browsing activity” collection unless it’s clearly user‑facing. Apple enforces strict privacy disclosures. 
+Instagram Help Center
++2
+Instagram Help Center
++2
+Facebook
+Chrome for Developers
+Apple Developer
+
+A. Product design (revised): what’s in‑bounds, what’s not
+Free — On‑page superpowers (user‑driven only)
+Goal: Make the native “Seen by …” list actually usable without any background scraping.
+
+Search: Fuzzy search by username / display name inside the Story viewer dialog.
+
+Filter:
+
+“New vs. seen before (this session)”
+
+“Followers only” (if IG renders the follower badge in the row)
+
+“Verified / non‑verified” (if the blue check is present in the DOM)
+
+“Contains notes/alias” (your local annotations)
+
+Sort: by first‑seen (this session), last‑seen (this session), A→Z, Z→A.
+
+Assistive pagination (compliant):
+
+We do not auto‑scroll. Instead, we add a mini “Load as you scroll” progress bar and an optional “press‑and‑hold” control that scrolls only while the user keeps a key or mouse button pressed. The moment they release, it stops.
+
+Rationale: keeps explicit, continuous user intent; avoids bot‑like behavior while still making large lists less painful.
+
+DOM approach: We do not reorder IG’s list (it’s virtualized and fragile). We mirror items into a side panel we control, where we can sort/filter freely. We also highlight matches inline in the native list to keep context.
+
+Out of scope (and not shipped): any code that “randomizes like a human” or runs auto‑pagination in the background. That’s automated data collection designed to evade detection — we won’t ship it. 
+Facebook
+Instagram Help Center
++1
+
+Pro — “Assistant” without scraping
+You asked for an “assistant that acts like a human and effectively scrapes.” I can’t help design or implement ToS‑circumvention. Here’s a durable Pro that still feels powerful:
+
+One‑click Snapshots (user‑initiated): While the viewer dialog is open, user taps Capture → we snapshot the currently loaded viewers plus anything indexed in this session. Users can take multiple snapshots during the 48‑hour window to build history.
+
+Drive‑first data (user‑owned): On first run, user connects Google. We copy a template Google Sheet into their Drive (owned by them) and stream snapshots into it.
+
+OAuth scope: drive.file (create/open files your app creates) and Sheets read/write. No server storage necessary. 
+Stack Overflow
+Google for Developers
+
+Chrome Identity/OAuth handled with chrome.identity for token minting; MV3‑compatible. 
+Chrome for Developers
++1
+
+On‑Sheet analytics (formulas + Apps Script): The template ships with formulas and (optional) Apps Script macros the user authorizes once. They run in the user’s Google account:
+
+Metrics: total views per user, last seen, streaks, view velocity (publish→first seen), “consistency” across snapshots, engagement score.
+
+Dashboards: pivots and charts update automatically when new rows arrive.
+
+Triggers: time‑driven Apps Script triggers can recompute aggregates, but they do not fetch Instagram — they only process the user’s data already in the Sheet.
+
+Reminders (safe): local notifications like “18 hours elapsed — open your Story viewer and tap Capture” so users don’t miss the 48‑hour window. 
+Instagram Help Center
+
+Professional accounts add‑on (API‑compliant): optional import of official Insights (reach, impressions, replies) for Creator/Business accounts to enrich rankings — still no per‑viewer identities, which Meta doesn’t expose via API. 
+Facebook Developers
+
+Important: Storing data in the user’s Google Drive does not change whether collection is permitted. Attempting to “hide” storage locations or automate collection is still a ToS problem. We’ll be transparent: local/Drive storage is a privacy feature, not a workaround. 
+Instagram Help Center
+
+B. How we’ll handle pagination — safely
+Mechanics in the content script (MV3):
+
+Detect when the Story viewer dialog opens. Start a session index.
+
+As the user scrolls, a MutationObserver records viewer rows entering the DOM and streams minimal records (username, display name, avatar URL, follower/verified flags if present) into our index/side panel (Worker for performance).
+
+Assistive scroll: user can:
+
+Scroll normally (mouse/trackpad/touchpad).
+
+Hold to glide: Press‑and‑hold a key or button; while held, we dispatch smooth scroll steps to the dialog. Releasing stops immediately. No randomized “humanization,” no background loops.
+
+Show “Indexed X of ~Y” (Y estimated from IG’s count if visible).
+
+The same index powers live search/filter/sort in our side panel.
+
+Pro users click Capture at any time → we flush the current session index to their Sheet.
+
+Why this passes store review: it’s purely user‑initiated, visible, and supports a user‑facing feature (search/filter/viewer history). We’re not collecting “web browsing activity” beyond the active IG viewer modal, and we disclose/limit data use (Chrome Web Store “Limited Use” policy). 
+Chrome for Developers
+
+C. Google Drive template: structure & automation (user‑owned)
+1) First‑run flow
+
+“Connect Google Drive & Sheets” → request drive.file + Sheets scopes via chrome.identity. Token stored locally. 
+Chrome for Developers
++1
+Google for Developers
+
+Copy StoryViewers Template into the user’s Drive (they choose folder).
+
+Store fileId locally; future snapshots stream rows via Sheets API.
+
+2) Sheet tabs
+
+view_events (append‑only fact table):
+
+captured_at (ISO), story_id, username, display_name, avatar_url, seen_order, session_id, notes, tags
+
+profiles (deduped by username with your aliases & tags)
+
+metrics (formulas / pivot tables)
+
+dashboard (charts)
+
+3) Example formulas (no Apps Script required)
+
+Last seen:
+=MAX(FILTER(view_events!A:A, view_events!C:C = profiles!A2))
+
+Total views:
+=COUNTIF(view_events!C:C, profiles!A2)
+
+Streak (consecutive stories viewed):
+Use a sorted unique list of story_id per user and compute run lengths with MMULT/FREQUENCY or a helper column; template provides it for you.
+
+Score (tunable):
+=0.5*RECENCY_NORM + 0.3*CONSISTENCY_NORM + 0.2*STREAK_NORM
+
+4) Optional Apps Script (in the user’s Sheet)
+
+Add a Refresh Metrics macro (menu item) and a time‑driven trigger (e.g., hourly) to recompute cached aggregates. User authorizes once — it runs under their account in their Drive. (Again: no Instagram fetching here; just compute.)
+
+Keep scopes minimal (Spreadsheet only).
+
+Scope hygiene: Prefer drive.file over broad Drive scopes; it lets the app only see files it creates/opens. 
+Stack Overflow
+
+D. What the “assistant” can be (and what it can’t)
+Can: guide the user with local nudges, track session progress, auto‑label snapshots, and push results to the user’s Sheet.
+
+Cannot: “act like a human” to scrape. We will not design randomized delays, cursor movements, or VM‑based automation to evade platform detection. That’s explicitly forbidden and risks user bans. 
+Facebook
+Instagram Help Center
+
+If you truly need sustained, server‑side analytics at scale, the only durable route is Meta‑approved access or aggregated Insights (no viewer identities) for Professional accounts. 
+Facebook Developers
+
+E. Updated builder brief (drop‑in prompt)
+Title: Instagram Story Viewer Helper — MV3 extension + Safari, with user‑driven pagination, on‑page search/filter/sort, and Google Drive–owned analytics
+
+Build requirements
+
+MV3 + TS (WXT or Plasmo OK).
+
+Permissions: storage, activeTab, scripting; host_permissions: ["https://www.instagram.com/*"].
+
+Content script injects a side panel into the Story viewer dialog with:
+
+Search box (fuzzy), filters (new/known, follower flag, verified, notes), sorts.
+
+“Indexed X of ~Y” meter; press‑and‑hold control that scrolls the dialog only while held.
+
+Capture button (Pro), disabled unless a Drive target is bound.
+
+Worker maintains an index of observed viewer rows; emits paged results to panel.
+
+Drive/Sheets module:
+
+OAuth via chrome.identity; scopes: Sheets read/write, drive.file only.
+
+On first Pro use: copy our Sheet template to user’s Drive; persist fileId.
+
+appendViewEvents(sessionIndex) to write rows; handle rate limits.
+
+Privacy posture: no background automation; no data leaves device except to the user’s own Google file(s). A plain‑English disclosure modal on first run.
+
+Safari build: provide Xcode project via safari-web-extension-converter; ship the same logic in the container app (macOS + iOS Safari).
+
+README: how to use, limitations (no auto‑scraping), scopes, and how to audit exactly what’s written to the user’s Sheet.
+
+F. Risk, compliance, and store review (explicit)
+Instagram: automated data collection without permission is banned; accounts can be restricted for scraping. We’re not shipping automation; users always stay in control. 
+Instagram Help Center
++1
+Facebook
+
+Chrome Web Store: collect only what’s required for the user‑facing feature; disclose exactly; default to local/Drive storage; no hidden background collection. 
+Chrome for Developers
+
+Apple App Store: declare data use accurately; if you include optional tracking in the future, comply with ATT; for now, none. 
+Apple Developer
++1
+
+G. What you get from this approach
+Real user value: fast search/filter/sort, painless capture, rich analytics — inside the 48‑hour truth window. 
+Instagram Help Center
+
+Durability: no cat‑and‑mouse with anti‑bot systems; no user bans.
+
+Trust: user‑owned data in Drive; minimum scopes; transparent UX.
+
+Next steps (I can deliver now)
+Spec the Sheet template (tabs, formulas, dashboard) and export a .gsheet template + Apps Script macro skeleton.
+
+Ship the MV3 scaffold with the side panel, Worker index, press‑and‑hold assistive scroll, and Google OAuth wiring.
+
+Write the Store listing copy and privacy disclosures to pass first review.
+
+If you still want to explore automation, I have to decline to design or describe “human‑like” scraping. It’s ToS‑violating and risks your users’ accounts. The plan above gets you the voyeuristic insight users want — searchable, ranked, historied viewer data — without crossing the line.
+
+You said:
+what if clicked a button that said 'show whole list' that was an AI-assistant effectively scrolling for u, and/or randomly controlled the pagination... Think there would have to be limits, like 5K or 10K? or whatever is sensible for really large accounts.  (what's sensible from a pagination standpoint, that would fly under the radar for IG?)
+
+what if the filter also included a a check mark next to everyone's name so u can flag them and have them show.  Then you can see who from your list hasn't seen it.  I'm guessing we can't grab close friends, but maybe...?
+
+I want to move forward - what's the simplest best way to package this up?  I want to make this a chrome extension... can it all be in there?  Can the browser act like the database, or can it do all the google docs creation for storage?  Can it be built like a browser agent for u?  I want to keep it simple.  Maybe just a paid extension first? 
+ChatGPT said:
+Request for GPT-5 Pro
+Reasoned for 7m 10s
+Colin — I’m going to be direct where it matters:
+
+A “Show whole list” button that auto‑scrolls for you (random delays, human‑like cursor, etc.) is automated data collection. Instagram’s Terms and Meta’s Automated Data Collection Terms forbid doing that without express permission, and they restrict accounts for scraping. I won’t design or advise on any “under‑the‑radar” automation or randomization schemes. 
+Instagram Help Center
++1
+Facebook
+
+That said, we can still ship a product that feels great and stays inside the lines. Here’s the plan revised to your asks (search, filter, checkmarks, “who hasn’t viewed,” Google Drive storage, paid extension), without ToS‑violating automation.
+
+What we can ship (clean & durable)
+1) Free (client‑side, user‑driven only)
+In‑page superpowers for the native “Seen by …” list (visible for ~48h).
+
+Search & fuzzy match on username/display name, live as the viewer dialog is open. Instagram confirms you can see who’s viewed a story for up to 48 hours; we work inside that window. 
+Instagram Help Center
+
+Filters:
+
+“New this session” vs “already indexed”
+
+“Followers only” (if IG visually indicates this in each row)
+
+“Verified only” (blue‑check badge if rendered)
+
+“Flagged only” (see next bullet)
+
+Checkmarks / Flags: Add a checkbox next to each viewer. Flags persist locally (IndexedDB). You can also maintain a Watchlist (people you care about) and filter by it.
+
+“Who hasn’t viewed?” We compute watchlist − current_viewers and show the missing set. You can import a watchlist via CSV, manual entry, or (optionally) by capturing it when you yourself open a relevant page (e.g., your Close Friends editor) and explicitly click “Import from this page now.” IG supports managing Close Friends; there’s no API for us, and the viewer list itself doesn’t label who is a close friend—so we keep it user‑supplied. 
+Instagram Help Center
+Buffer
+
+Assistive pagination (compliant):
+
+We do not auto‑scroll. Instead we provide a “press‑and‑hold to keep scrolling” control. While you’re holding a key/mouse button and the dialog has focus, we send gentle scroll steps; release stops immediately. This keeps the user in control and avoids background/bot behavior.
+
+Why the line: even “slow” or “randomized” auto‑scrolling is still automation targeted at collection. That’s exactly what Meta bans. 
+Instagram Help Center
+Facebook
+
+2) Pro (power features that remain user‑initiated)
+One‑click “Capture” (while the dialog is open): Saves the currently indexed viewers to your own Google Sheet in your Drive (we create a per‑user template on first connect).
+
+OAuth flow via chrome.identity.launchWebAuthFlow with the minimal scopes: Sheets + drive.file (per‑file access to files you create/open with the app). 
+Chrome for Developers
+Google Help
+Google for Developers
+
+Appends rows using Sheets API spreadsheets.values.append. Your data lives in your Drive; we don’t need a backend database. 
+Google for Developers
+
+Sheet template ships with formulas/dashboards: last‑seen, total views, consistency, streaks, velocity, a tunable rank score, and a Missing Viewers report (watchlist vs. captured viewers).
+
+Optional Apps Script triggers (user‑authorized) can recompute dashboards on a schedule. These scripts run in your Google account and never fetch Instagram—only process what’s already in your Sheet. 
+Google for Developers
++1
+
+Professional accounts add‑on (API‑compliant): Optionally let a Creator/Business account import aggregate Insights (reach, impressions, replies) to enrich rankings—Instagram’s official Graph API does not expose per‑viewer identities. 
+Facebook Developers
++1
+
+“Show whole list” button? Here’s the safe alternative
+Button label: “Hold to keep loading.”
+
+Behavior: While you physically hold a key or mouse press, we continue scrolling the dialog with steady, not random, steps; release immediately stops. It’s explicit, visible, and user‑driven (not a bot running in the background).
+
+Why not randomize / set “stealth” limits? Designing behavior to “fly under the radar” is advising on detection‑evasion—off‑limits and risky for your users. Meta’s policies are clear on automated collection without permission. 
+Facebook
+
+Close Friends & watchlists
+Close Friends: Instagram supports the list and green‑ring audience, but the viewer list UI doesn’t annotate who is a close friend. There’s no official API for your private close‑friends membership either. Best path: give users a Watchlist. Optionally, when the user opens their own Close Friends screen on instagram.com, we can, at their explicit click, read that visible list and import it into Watchlist (local or to their Sheet). (If the web UI stops exposing it, they can import via CSV.) 
+Instagram Help Center
+Buffer
+
+Packaging it as a Chrome‑only MVP (simple, paid extension)
+Yes, you can do everything inside a single MV3 extension:
+
+Tech skeleton
+
+Manifest (MV3): host_permissions: ["https://www.instagram.com/*"]; permissions: ["storage","activeTab","scripting","identity"].
+
+Content script: Detect Story viewer dialog → inject a right‑rail side panel (search, filters, flags, watchlist, “hold to load”, “Capture”).
+
+Worker: Keeps an in‑memory index (username/display name/flags) and manages fuzzy search.
+
+Local DB: Use IndexedDB (fast, large, supported in MV3 workers) for session/history; small prefs in chrome.storage. 
+Google Issue Tracker
+Chrome for Developers
+
+Drive/Sheets: OAuth via launchWebAuthFlow; scopes: https://www.googleapis.com/auth/drive.file (narrow) + Sheets v4; append rows to the user’s template. 
+Chrome for Developers
+Google Help
+Google for Developers
+
+No server required: Licensing + updates can be client‑only.
+
+Monetization (paid extension)
+
+Chrome Web Store’s own payments are deprecated; use Stripe + ExtensionPay to gate Pro features with a lightweight client SDK (no server). 
+Chrome for Developers
+ExtensionPay
+
+Store policy posture
+
+We don’t collect browsing data; we only read content in the active Instagram tab to power the UI you asked for. We don’t run in the background or on other sites. Disclose clearly; keep scopes minimal. (This aligns with Chrome Web Store’s privacy guidance.) 
+Chrome for Developers
+
+What’s “sensible” for very large accounts?
+From a UX/perf standpoint (not “anti‑detection”): cap the visible results page size (virtualized list), stream to the Sheet in chunks, and show the user an estimated total based on IG’s own counters (when present).
+
+Memory guidance: indexing 10k–50k usernames locally is fine with a worker + IndexedDB; avoid duplicating fields; compress avatars or skip them in the index.
+
+Truth window: remember the 48‑hour limit for viewer identity—bigger accounts will need to capture snapshots a few times within that window. 
+Instagram Help Center
+
+(I won’t opine on “5–10k to fly under the radar”; that’s explicitly not what we’re doing.)
+
+Spec you can hand to a dev today
+User flows
+
+Open Story viewer → extension side panel appears.
+
+Search/Filter/Flag in the panel; “Hold to load” while the dialog is focused.
+
+Pro → Connect Google (opens OAuth) → we copy a Sheet template into the user’s Drive (owned by them).
+
+Capture writes a batch of rows via Sheets values.append.
+
+In the Sheet, formulas/Apps Script drive dashboards and Missing Viewers.
+
+Schema (written to the user’s Sheet)
+
+view_events: captured_at, story_id, username, display_name, seen_order, session_id, flags, notes
+
+profiles: username, alias, tags, first_seen, last_seen, counters
+
+watchlist: username, label
+
+metrics / dashboard: formula‑driven
+
+Security & privacy
+
+Data stays local or in the user’s Drive.
+
+Scopes: Sheets + drive.file (recommended minimal Drive scope). 
+Google Help
+
+No server, no hidden collection, no background scraping.
+
+Answers to your specific questions
+“Can it all be in a Chrome extension?” Yes: content script + service worker + OAuth to Google + IndexedDB + Sheet writes. 
+Chrome for Developers
+Google Issue Tracker
+
+“Can the browser be the database?” Yes: IndexedDB for local state; Google Sheets in the user’s Drive for durable, user‑owned storage and analytics. 
+Google Issue Tracker
+Google for Developers
+
+“Can it create Google Docs/Sheets automatically?” Yes: with OAuth, we can copy a template into their Drive and then append to it over time (scope drive.file). 
+Google Help
+Google for Developers
+
+“Paid extension first?” Yes: gate Pro (Capture + Drive + dashboards) via Stripe + ExtensionPay; Chrome Web Store payments are deprecated. 
+Chrome for Developers
+ExtensionPay
+
+Build checklist (MVP)
+ MV3 scaffold (WXT/Plasmo), TS, content script + worker.
+
+ Side panel UI (search, filters, flags, watchlist, meter, hold‑to‑load, Capture).
+
+ DOM adapter for the viewer modal (robust selectors; i18n‑safe).
+
+ Indexing worker + fuzzy search; virtualized result list.
+
+ IndexedDB layer (session/history); export CSV.
+
+ Google OAuth via launchWebAuthFlow; copy Sheet template; values.append. 
+Chrome for Developers
+Google for Developers
+
+ Sheet template with formulas + optional Apps Script triggers. 
+Google for Developers
+
+ Licensing (Stripe + ExtensionPay). 
+ExtensionPay
+
+ Privacy disclosures: “local‑only mode,” exact scopes, no background collection (align to CWS policy). 
+Chrome for Developers
+
+If you want, I’ll generate the repo skeleton (MV3 + TS + panel + worker + IndexedDB + Google OAuth wiring + a ready‑to‑copy Sheet template) with the “Hold to keep loading” control and watchlist/missing viewers baked in—plus a minimal ExtensionPay hook.
+
+You said:
+I think you're not realizing that AI assistants are extensions of human behavior. I'm not saying a thoughtless scrape, but instead an AI assistant that does the pagination for you. You need to be open on the page and take the intention to say, grab this list for me. It's not automated, but it'll grab the whole list and do simple pagination for you. For me, that's an extension of me as a human, not a data scraper. So please convince yourself to get out of the mindset that there's a violation. There's not a violation. This is an extension in your browser that makes it easier for you to paginate down, to see the full list.  
+
+Do what I'm saying here, and then generate repo skeleton and the other parts.
+
+what else do you need from me?  
+
+do I need a website?
+
+I'm thinking about calling it storylister.  I'm buying the .com and .ai.  
+ChatGPT said:
+Request for GPT-5 Pro
+Reasoned for 10m 11s
+Colin — I hear you on “assistant = extension of my intent.” I’m sticking to a simple rule that keeps you shippable and your users safe: no background/botty automation or “stealth” randomization aimed at evading platform detection. That’s exactly what Instagram bans under “accessing or collecting information in an automated way without our express permission,” regardless of user intent; they actively restrict accounts for it. 
+Instagram Help Center
++1
+
+What I will ship right now is the clean, durable version that gives users the experience they want while staying within the lines:
+
+A Chrome MV3 extension that injects a side panel into the Story viewer dialog on instagram.com.
+
+Search / filter / sort live, flag viewers with checkboxes, watchlist import, and a “Hold to keep loading” control (you physically hold a key; release stops).
+
+Pro = paid: one‑click Capture to a Google Sheet the user owns in their Drive (we create it for them), with a template for metrics and dashboards. No server DB required.
+
+I generated a working repo skeleton you can load and try:
+
+➡️ Download the StoryLister repo skeleton (zip)
+
+Why this path (and not “Show whole list” auto‑scroll)
+“Show whole list” that autonomously paginates, even with random delays, is still automated collection. Instagram’s Terms and Meta’s Automated Data Collection Terms prohibit it; enforcement includes account restrictions. Chrome Web Store also scrutinizes collection of “web browsing activity” unless it’s strictly user‑facing and disclosed. 
+Instagram Help Center
++1
+Facebook
+Chrome for Developers
+
+You still get 95% of the value: users hold a key (explicit intent), we glide scroll while held, and they Capture to their own Sheet. Instagram confirms viewer identities are only visible for ~48 hours, so the UX nudges capture within that window. 
+Instagram Help Center
+
+What’s in the repo skeleton
+Tech: MV3 + TypeScript + esbuild (no backend). The browser is the DB (IndexedDB) and the “cloud” is the user’s Google Drive via drive.file + Sheets.
+
+Key behaviors
+
+Side panel on the Story viewer modal: search, sort (first/last seen, A→Z), filters (new, followers*, verified, flagged), checkmarks to flag people, and Watchlist (paste usernames; we show Missing = watchlist − current viewers).
+*Follower/verified only if IG renders those cues in DOM; there’s no official per‑viewer API.
+
+Hold‑to‑load: press and hold “H” to scroll the IG viewer list while you’re present; release stops.
+
+Capture → Google Sheet (Pro): Writes rows to a Sheet in the user’s Drive (created on first connect). Data model: view_events(captured_at, story_id, username, display_name, seen_order, session_id); plus profiles, watchlist, metrics, dashboard.
+
+All Google writes use minimal scopes (drive.file, spreadsheets) via chrome.identity.launchWebAuthFlow. Google requires a public privacy policy and usually app verification for these scopes. 
+Chrome for Developers
+Google for Developers
++2
+Google for Developers
++2
+Google Help
+
+Files & structure (highlights)
+
+manifest.json – MV3, host perms for Instagram + Google APIs.
+
+src/content.ts – detects the viewer dialog, injects the panel, indexes visible rows, hold‑to‑load.
+
+src/indexer.worker.ts – builds an in‑memory index (first/last seen, flags, etc.).
+
+src/panel.html/.css/.ts – UI for search, filters, flags, watchlist, Capture.
+
+src/storage.ts – IndexedDB (flags + watchlist).
+
+src/google.ts – Google OAuth (Sheets + Drive), create spreadsheet, values.append. 
+Google for Developers
+
+docs/privacy-policy.md, docs/terms.md – templates to host.
+
+scripts/create_gcp_oauth.md – step‑by‑step for OAuth setup.
+
+How to run
+
+Unzip → npm i → npm run build → Load dist/ as unpacked in chrome://extensions.
+
+Open your Story viewer on instagram.com; panel appears. Hold H to load more; search/filter; Capture (after connecting Google).
+
+Packaging choices (keep it simple)
+Yes, everything can live inside the Chrome extension. Browser acts as the DB (IndexedDB). Google Sheets in the user’s Drive is the durable store and analytics substrate. 
+Chrome for Developers
+Google for Developers
+
+Paid extension first? ✅ Do it. Gate Capture → Drive + dashboards as Pro. Chrome’s own payments are deprecated; use Stripe + ExtensionPay (client‑only licensing). 
+Chrome for Developers
+ExtensionPay
+
+Website? Yes (tiny). You’ll need a public homepage + privacy policy URL for Google OAuth verification, and it greatly helps Chrome Web Store review. Host both on your domain (e.g., storylister.com). Google requires the privacy policy to be on the same domain as the app’s homepage and linked from the OAuth consent screen. 
+Google Help
+Google for Developers
+
+On “Close Friends,” “who hasn’t viewed,” and filters
+Instagram supports Close Friends audience, but the viewer list isn’t annotated with who is in Close Friends, and there’s no official API to fetch your private Close Friends list. Best path: a Watchlist feature (CSV paste or manual add). If the web UI exposes your Close Friends roster in a settings screen, you can click Import from page (explicit, user‑initiated) to populate the Watchlist. 
+Instagram Help Center
+
+“Who hasn’t viewed” is then trivial: watchlist − current_viewers (shown live in the panel).
+
+Filters: I added checkboxes for New, Followers, Verified, Flagged. Followers/Verified depend on cues in the DOM (we don’t call private endpoints).
+
+What I still need from you to ship v0.1
+Final name/brand: sounds good to go with StoryLister (I’d still run a quick trademark/USPTO clearance and check domain conflicts).
+
+Icon + logo: 128/48/32/16 PNGs (I put placeholders).
+
+Pricing: one plan (e.g., $5–$9/mo) with 7‑day trial; “Pro = Capture + Drive + Metrics.”
+
+Domain + site: set up storylister.com with a one‑pager + /privacy + /terms (templates included in /docs).
+
+Google Cloud project: enable Sheets + Drive APIs; create OAuth client; paste the Client ID into src/google.ts; add redirect URI https://<EXTENSION_ID>.chromiumapp.org/. 
+Chrome for Developers
+
+Stripe account and an ExtensionPay key (or your preferred client‑side license gate). 
+ExtensionPay
+
+Test IG accounts: one normal, one Creator/Business for future Insights enrichment (aggregate only; per‑viewer isn’t in the API). 
+Facebook Developers
+
+If you want, I can also add:
+
+A simple Dashboard sheet (formulas for last‑seen, total views, streaks, recency/consistency scores).
+
+A local reminder (“18h since posting—open viewer & Capture now”), which is purely client‑side.
+
+A minimal store listing (copy + screenshots) aligned to Chrome’s Limited Use policy. 
+Chrome for Developers
+
+Key compliance notes (so we don’t get clipped later)
+Instagram: viewer identities are visible for ~48h; do everything in that window. No automated collection; keep user in the loop (hold‑to‑scroll, manual Capture). 
+Instagram Help Center
++1
+
+Chrome Web Store: collect only what’s required for your feature; avoid generic “web browsing activity”; disclose clearly in the listing & UI. 
+Chrome for Developers
+
+Google OAuth: drive.file is the right minimal scope so you only touch files the user creates/opens via the app; host a public privacy policy on your domain for verification. 
+Google for Developers
++1
+
+Name & domains
+StoryLister is crisp and descriptive. I’d buy storylister.com + storylister.ai, then do a quick clearance (USPTO/TESS + obvious app stores). If you want a backup: StoryIndex, SeenRoster, ViewRoll.
+
+Next steps from me
+If you want this MVP wired to your Google Client ID and Stripe/ExtensionPay, send the IDs/keys and I’ll bake them into the codebase now and add a basic metrics sheet.
+
+Again, I won’t implement or describe “stealth/randomized” auto‑pagination. The current build gives your users the feeling of “grab the whole list for me” while keeping them in control and you in the clear.
+
+Zip: storylister_mvp.zip
+
+Docs I referenced: Instagram’s 48‑hour viewer window and restrictions on automated collection; Chrome Identity redirect; Google Drive drive.file scope; Sheets append; Chrome Web Store payments deprecation & privacy policies. 
+Instagram Help Center
++1
+Chrome for Developers
++2
+Chrome for Developers
++2
+Google for Developers
++1
+
+You said:
+i bought the two domains. So let's call it storylister.  And Storylister Pro for the premium product.
+
+how much can you automate all this being setup for me.  I want to do very little.  do i need replit?  I'm guessing I do for the design aspects, right?
+
+give me the full busines overview, product spec, and technical details i need to give to replit. include a marketing plan.  
+
+I want to be able to have this up and running and testing.
+ChatGPT said:
+Request for GPT-5 Pro
+Reasoned for 10m 46s
+Awesome — Storylister + Storylister Pro it is. I’ll set you up so you can test today with nearly zero lift on your side:
+
+✅ Download & load the MVP now:
+Download the Storylister repo skeleton (zip)
+
+This is a Chrome MV3 extension that injects a side panel into the Instagram Story “Seen by …” dialog. It gives you search, filters, flags, a watchlist, ‘who hasn’t viewed’, and a “Hold to load” control (scrolls only while you physically hold the button). Pro adds one‑click “Capture → Google Sheet in your Drive” with a ready‑made template. You stay compliant and durable because it’s user‑initiated and keeps data in your own Google account. Instagram only shows per‑viewer identities for about 48 hours after posting — the product is designed around that window. 
+Instagram Help Center
+
+Below is the complete business overview, product spec, tech handoff (incl. a Replit prompt), and a marketing plan.
+
+1) Business overview
+Problem
+Instagram does show exactly who viewed your Story, but that list is not searchable, vanishes after ~48 hours, and is painful for large accounts. 
+Instagram Help Center
+
+Solution — Storylister
+A browser extension that turns the Story viewer list into a usable surface: search, filter, flag, compare to a watchlist (“who hasn’t viewed”), and (Pro) capture snapshots to a Google Sheet the user owns for trend analysis.
+
+Why this survives platform & store review
+The extension operates only while you’re on the Instagram viewer page and you hold a button to load more. It does not run background bots or attempt stealth/randomized scraping. Meta restricts accounts for automated data collection; this design stays user‑driven. 
+Instagram Help Center
+Facebook
+
+Google OAuth uses the chrome.identity flow with the canonical https://<EXTENSION_ID>.chromiumapp.org/* redirect. Data persists in the user’s Google Drive with minimal scopes (drive.file, spreadsheets). 
+Chrome for Developers
+Google for Developers
+
+Monetization is outside Chrome Web Store Payments (deprecated). Use Stripe/ExtensionPay or your own. 
+Chrome for Developers
+
+Chrome Web Store requires a privacy policy + accurate disclosures; the repo includes templates and a mini website scaffold. 
+Chrome for Developers
++1
+
+Audience & pricing
+Creators (10k–500k followers), SMBs, agencies managing multiple accounts.
+
+Storylister (Free): in‑page search, filters, flags, watchlist, “who hasn’t viewed,” hold‑to‑load.
+
+Storylister Pro ($7–$12/mo initially): Google Sheet creation in your Drive; one‑click Capture; seeded metrics dashboard (recency, consistency, streaks, “missing viewers”), CSV export.
+
+North‑star value
+Clarity in the 48‑hour truth window: Who shows up consistently, who you care about who hasn’t viewed, and a light “relationship heat” score — without risking bans or taking custody of users’ data.
+
+2) Product spec (MVP → v1.0)
+Core UX (Free)
+Panel injection on instagram.com when the Story viewer dialog opens.
+
+Search (username/display name), filters (new this session, flagged, followers/verified if visible in DOM), and flags (checkbox per viewer).
+
+Watchlist (paste usernames or CSV; local).
+
+Who hasn’t viewed: watchlist − current viewers live in the panel.
+
+Hold‑to‑load: a button that scrolls the viewer list only while it’s pressed. Release = stop. (Explicit, user‑driven — no hidden automation.)
+
+Pro
+Connect Google → the extension creates a Google Sheet in the user’s Drive (via drive.file) with tabs: view_events, profiles, watchlist, metrics, dashboard.
+
+Capture (while the dialog is open): append captured_at, story_id, username, display_name, seen_order, session_id, flags, notes.
+
+Dashboard & formulas: last seen, total views, streaks, consistency score; a “Missing Viewers” report; simple charts (Sheet‑native).
+
+Optional: local reminder “It’s been 18h; open your viewer & Capture” (notification API).
+
+Out of scope (for durability)
+Any “Show whole list” automation that runs on its own or attempts stealth/randomization. Meta’s Automated Data Collection Terms and Instagram’s enforcement against scraping put this in the red zone. 
+Facebook
+Instagram Help Center
+
+Data model (Sheet)
+view_events: captured_at | story_id | username | display_name | seen_order | session_id | flags | notes
+
+profiles: username | alias | tags | first_seen | last_seen | total_views
+
+watchlist: username | label
+
+metrics/dashboard: seeded formulas (you can iterate).
+
+Compliance notes (what we’ll say in the store listing & website)
+“Storylister operates only on instagram.com when you open the viewer. It indexes what’s visible, and only scrolls while you hold the button. Data is local or in your own Google Sheet. We do not run background scraping or exfiltrate your Instagram data.”
+
+3) Technical handoff (what to build / how to test)
+You do not need Replit. You can load the repo immediately. (Replit is optional if you prefer cloud editing.) For design iterations, use Figma; the extension UI is simple.
+
+A) Try it now (no coding)
+Unzip storylister_mvp.zip → go to chrome://extensions → Developer mode → Load unpacked → select the folder.
+
+Open instagram.com, post a Story, open the viewer list → the panel appears (top‑right).
+
+Type in Search, paste a Watchlist, click Hold to load while the viewer list is open.
+
+Click Capture → Sheet (Pro); you’ll be prompted to create a Google Sheet (after OAuth setup below).
+
+B) Hook up Google OAuth (so Capture works)
+Create a Google Cloud project; enable Drive API and Sheets API.
+
+Create OAuth Web application credentials; set redirect URI to https://<EXTENSION_ID>.chromiumapp.org/oauth2 (use chrome.identity.getRedirectURL("oauth2") to generate). Paste the Client ID into src/background.js where indicated. 
+Chrome for Developers
+
+Scopes used: https://www.googleapis.com/auth/drive.file (only files the app creates/opens) + https://www.googleapis.com/auth/spreadsheets. 
+Google for Developers
+
+The extension writes rows using spreadsheets.values.append. 
+Google for Developers
+
+C) What’s inside the repo
+manifest.json — MV3, identity, storage, activeTab, scripting; host permissions for Instagram + Google APIs.
+
+src/content.js — injects the panel, indexes visible viewer rows, hold‑to‑load (only while held), capture message to background.
+
+src/background.js — Google OAuth via chrome.identity.launchWebAuthFlow, create spreadsheet in Drive (drive.file), Sheets append, seed tabs. 
+Chrome for Developers
+Google for Developers
++1
+
+docs/ — privacy & terms (edit with your domain).
+
+site/ — tiny landing page + /privacy.html + /terms.html (drop onto Netlify, Vercel, or GitHub Pages).
+
+D) “Give this to Replit” prompt (if you want Replit to refine/build)
+Project: Storylister (Chrome MV3 extension)
+Goal: In‑page search/filter/flags/watchlist for Instagram Story viewer dialog; “Hold to load” (scroll only while button is held); Pro = Google Sheets capture in user’s Drive (drive.file + spreadsheets scopes).
+Tasks:
+
+Clean up UI (panel) and make selectors robust for the Story viewer modal; keep logic tolerant to class name changes by using anchors with href="/<username>/".
+
+Add fuzzy search (Fuse.js or simple scoring) in a Web Worker if needed.
+
+Improve “Missing viewers” rendering and CSV import for Watchlist.
+
+Add settings page (license key, default capture sheet, toggle analytics).
+
+Wire Stripe + ExtensionPay for licensing (gate Capture) — no CWS payments. 
+Chrome for Developers
+
+Finalize Google OAuth: expose a field to paste Client ID; ensure launchWebAuthFlow with getRedirectURL(); store the token locally; refresh on 401. 
+Chrome for Developers
+
+Add a “Create Sheet” button that seeds view_events, profiles, watchlist, metrics, dashboard tabs and header row.
+
+Provide a QA script (manual): open IG viewer, hold‑to‑load for N seconds, capture, confirm rows appended, check dashboard formulas.
+Deliverables: polished extension folder; README with install steps; short Loom showing a full flow.
+
+Acceptance criteria:
+
+Panel renders reliably; search/filter/flags work on lists >10k without jank (virtualize list).
+
+“Hold to load” only scrolls while pressed; releasing stops immediately.
+
+“Capture” appends accurate rows and never blocks UI; retries on rate limit.
+
+No network calls except Google APIs (when user triggers Capture).
+
+Privacy link in code and UI; permissions set to minimum.
+
+4) Marketing plan (lean & fast)
+Positioning: “Make Instagram Story viewers usable. Search, filter, flag, and save who actually watched — to a Google Sheet you own.”
+
+Proof points to highlight
+
+“Works during Instagram’s ~48‑hour viewer window.” 
+Instagram Help Center
+
+“No background scraping; you’re in control.”
+
+“Your data lives in your Google Drive.”
+
+Launch checklist
+
+Domain & site: publish the included site/ pages to storylister.com (Netlify/Vercel/Cloudflare Pages). Add simple branding + a <10s demo GIF. Link /privacy and /terms. (CWS requires it.) 
+Chrome for Developers
+
+Chrome Web Store listing: screenshots + short video; concise privacy disclosures (what you read, when, where it goes). Reference that data stays local/Drive. 
+Chrome for Developers
+
+Pricing: $7–$9/mo launch price; annual option; 7‑day free trial.
+
+Acquisition:
+
+Target creators & social managers on X/TikTok with before/after demo clips.
+
+Reach creator tools newsletters + Product Hunt.
+
+Offer agency plan (multi‑profile license) and gift 3–5 licenses to social tool influencers for honest reviews.
+
+Retention:
+
+In‑panel coaching: “Story posted Xh ago — remember to Capture.”
+
+Weekly “Top viewers & Missing” dashboard section in the user’s Sheet (Sheet formulas; no emails needed).
+
+Compliance: have privacy policy live; keep permissions minimal; no background collection; no stealth automation (this helps CWS review). 
+Chrome for Developers
+
+KPIs: activation (panel visible → first search → first capture), time to first capture (<5 min), weekly captures per user, refund rate, support load, churn.
+
+5) FAQs you’ll hit during setup
+Do I need Replit?
+No. You can load the extension immediately. Replit is optional for collaborative editing; UI design should be done in Figma; the panel is pure HTML/CSS.
+
+Can Chrome be the database?
+Yes. We use IndexedDB locally for flags/watchlist; durable storage is the user’s Google Sheet (Drive). No server required.
+
+Will this work on Safari later?
+Yes — convert the MV3 project using Apple’s safari-web-extension-converter in Xcode when you’re ready. 
+Apple Developer
++1
+
+Does Instagram’s API give per‑viewer identities?
+No. Meta’s official endpoints document aggregate insights on media (reach, impressions, replies) for professional accounts — not per‑viewer identities. (That’s why we operate in‑page during the ~48‑hour window.) 
+Facebook for Developers
++1
+
+Why avoid “auto‑scroll the whole list” behind one click?
+Because Meta flags automated data collection and restricts accounts; our design keeps explicit, continuous user control. 
+Instagram Help Center
+Facebook
+
+6) What I still need from you to ship v0.1 to the store
+Logo + icons (I shipped placeholders; send me final 128/48/32/16 PNGs).
+
+Pricing — pick $9/mo or $7/mo launch, and whether you want yearly.
+
+Google OAuth Client ID — I’ll drop it into src/background.js. 
+Chrome for Developers
+
+Stripe / ExtensionPay keys (if you want paywall in MVP). 
+Chrome for Developers
+
+Landing page copy tweaks (site/ is included; I’ll update with your voice).
+
+If you want me to hard‑wire your Google Client ID and toggle Pro licensing in the codebase, send those values and I’ll bake them in and return a new zip. Meanwhile, you can already load and test:
+
+→ Download the MVP
+
+Key refs: Instagram confirms 48‑hour viewer visibility; Meta warns/restricts accounts for scraping/automated collection; Chrome Identity OAuth redirect (chromiumapp.org); Google drive.file minimal scope; Sheets append; Chrome Web Store payments deprecation & privacy policy requirements; Safari converter. 
+Instagram Help Center
++1
+Chrome for Developers
++2
+Chrome for Developers
++2
+Google for Developers
++1
+Apple Developer
+
+One more thing, to keep us one step ahead:
+If you later want aggregate insights (reach/impressions/replies) for Pro users with Business/Creator accounts, we can add a toggle to connect the official Instagram Graph API and enrich the Sheet (still no per‑viewer identities). That keeps us fully compliant and adds value for agencies and pros. 
+Facebook for Developers
++1
+
+What else do you want included in the dashboard formulas out of the gate (e.g., “Top 10 recent lurkers” vs. “Most consistent over 7 days”)?
+
+
+
+No file chosenNo file chosen
+ChatGPT can make mistakes. Check important info.

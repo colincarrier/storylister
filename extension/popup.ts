@@ -110,7 +110,7 @@ class PopupManager {
     if (this.settings.isPro) {
       if (upgradeBtn) {
         upgradeBtn.textContent = 'Pro Active ✓';
-        upgradeBtn.disabled = true;
+        (upgradeBtn as HTMLButtonElement).disabled = true;
         upgradeBtn.classList.add('pro-active');
       }
     }

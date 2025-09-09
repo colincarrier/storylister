@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Storylister Settings</title>
+    <style>
+        body {
+            width: 320px;
+            min-height: 400px;
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: #f9fafb;
+        }
+
+        .popup-container {
+            background: white;
+            border-radius: 8px;
+            margin: 12px;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #8b5cf6 0%, #3b82f6 100%);
+            color: white;
+            padding: 16px;
+            text-align: center;
+        }
+
+        .header h1 {
+            margin: 0;
+            font-size: 18px;
+            font-weight: 600;
+        }
+
+        .header p {
+            margin: 4px 0 0 0;
+            font-size: 12px;
+            opacity: 0.9;
+        }
+
+        .content {
+            padding: 16px;
+        }
+
+        .status {
+            background: #f0f9ff;
+            border: 1px solid #0ea5e9;
+            border-radius: 6px;
+            padding: 12px;
+            margin-bottom: 16px;
+            text-align: center;
+        }
+
+        .status.active {
+            background: #f0fdf4;
+            border-color: #10b981;
+            color: #065f46;
+        }
+
+        .status.inactive {
+            background: #fef2f2;
+            border-color: #ef4444;
+            color: #991b1b;
+        }
+
+        .feature-list {
+            margin: 16px 0;
+        }
+
+        .feature-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 8px;
+            font-size: 14px;
+            color: #374151;
+        }
+
+        .feature-item .checkmark {
+            color: #10b981;
+            font-weight: bold;
+        }
+
+        .instructions {
+            background: #f9fafb;
+            border-radius: 6px;
+            padding: 12px;
+            margin: 16px 0;
+            font-size: 13px;
+            color: #6b7280;
+            line-height: 1.4;
+        }
+
+        .instructions strong {
+            color: #374151;
+        }
+
+        .buttons {
+            display: flex;
+            gap: 8px;
+            margin-top: 16px;
+        }
+
+        .btn {
+            flex: 1;
+            padding: 8px 12px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 500;
+            transition: all 0.2s;
+        }
+
+        .btn-primary {
+            background: #8b5cf6;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #7c3aed;
+        }
+
+        .btn-secondary {
+            background: #f3f4f6;
+            color: #374151;
+            border: 1px solid #d1d5db;
+        }
+
+        .btn-secondary:hover {
+            background: #e5e7eb;
+        }
+
+        .footer {
+            padding: 12px 16px;
+            background: #f9fafb;
+            border-top: 1px solid #e5e7eb;
+            font-size: 11px;
+            color: #6b7280;
+            text-align: center;
+        }
+
+        .version {
+            margin-top: 8px;
+            opacity: 0.7;
+        }
+
+        #current-tab {
+            margin-top: 8px;
+            padding: 8px;
+            background: #f3f4f6;
+            border-radius: 4px;
+            font-size: 11px;
+            color: #6b7280;
+            word-break: break-all;
+        }
+    </style>
+</head>
+<body>
+    <div class="popup-container">
+        <div class="header">
+            <h1>Storylister</h1>
+            <p>Instagram Story Viewer Enhancement</p>
+        </div>
+
+        <div class="content">
+            <div class="status" id="extension-status">
+                <strong>Checking status...</strong>
+            </div>
+
+            <div class="feature-list">
+                <div class="feature-item">
+                    <span class="checkmark">✓</span>
+                    <span>Search story viewers in real-time</span>
+                </div>
+                <div class="feature-item">
+                    <span class="checkmark">✓</span>
+                    <span>Filter by followers, verified users</span>
+                </div>
+                <div class="feature-item">
+                    <span class="checkmark">✓</span>
+                    <span>Sort viewers by activity</span>
+                </div>
+                <div class="feature-item">
+                    <span class="checkmark">✓</span>
+                    <span>Capture snapshots & export data</span>
+                </div>
+            </div>
+
+            <div class="instructions">
+                <strong>How to use:</strong><br>
+                1. Navigate to any Instagram story<br>
+                2. Click "Seen by" to open the viewer list<br>
+                3. The Storylister panel will appear on the right<br>
+                4. Use search and filters to find specific viewers
+            </div>
+
+            <div id="current-tab"></div>
+
+            <div class="buttons">
+                <button class="btn btn-secondary" id="open-instagram">Open Instagram</button>
+                <button class="btn btn-primary" id="refresh-tab">Refresh Page</button>
+            </div>
+        </div>
+
+        <div class="footer">
+            Privacy-first • Local data only • No automation
+            <div class="version">v1.0.0</div>
+        </div>
+    </div>
+
+    <script>
+        // Check if we're on Instagram
+        function checkStatus() {
+            chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
+                const currentTab = tabs[0];
+                const statusDiv = document.getElementById('extension-status');
+                const currentTabDiv = document.getElementById('current-tab');
+                
+                if (currentTab.url && currentTab.url.includes('instagram.com')) {
+                    statusDiv.className = 'status active';
+                    statusDiv.innerHTML = '<strong>✓ Active on Instagram</strong><br>Ready to enhance your story viewing experience!';
+                    
+                    if (currentTab.url.includes('/stories/')) {
+                        statusDiv.innerHTML = '<strong>🎯 Story detected!</strong><br>Click "Seen by" to start using Storylister';
+                    }
+                } else {
+                    statusDiv.className = 'status inactive';
+                    statusDiv.innerHTML = '<strong>⚠ Not on Instagram</strong><br>Navigate to Instagram to use Storylister';
+                }
+                
+                currentTabDiv.textContent = 'Current page: ' + (currentTab.url || 'Unknown');
+            });
+        }
+
+        // Open Instagram in current tab
+        document.getElementById('open-instagram').addEventListener('click', function() {
+            chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
+                chrome.tabs.update(tabs[0].id, {url: 'https://www.instagram.com'});
+                window.close();
+            });
+        });
+
+        // Refresh current tab
+        document.getElementById('refresh-tab').addEventListener('click', function() {
+            chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
+                chrome.tabs.reload(tabs[0].id);
+                window.close();
+            });
+        });
+
+        // Check status when popup opens
+        checkStatus();
+        
+        // Update status when tab changes
+        chrome.tabs.onUpdated.addListener(checkStatus);
+        chrome.tabs.onActivated.addListener(checkStatus);
+    </script>
+</body>
+</html>
