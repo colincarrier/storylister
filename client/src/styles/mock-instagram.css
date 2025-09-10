@@ -427,7 +427,7 @@
 
 .storylister-header {
   background: #f9fafb;
-  padding: 12px 16px;
+  padding: 8px 16px;
   border-bottom: 1px solid #e5e7eb;
   display: flex;
   align-items: center;
@@ -650,8 +650,8 @@
 .storylister-stats-summary {
   display: flex;
   justify-content: space-around;
-  margin: 0 16px 16px 16px;
-  padding: 12px;
+  margin: 0 16px 10px 16px;
+  padding: 8px;
   background: #f3f4f6;
   border-radius: 6px;
 }
@@ -1466,7 +1466,7 @@
 
 /* Story Section */
 .storylister-story-section {
-  padding: 16px 16px 0 16px;
+  padding: 10px 16px 0 16px;
   background: white;
 }
 
@@ -1474,21 +1474,21 @@
   font-size: 12px;
   color: #6b7280;
   font-weight: 500;
-  padding: 8px;
+  padding: 5px 8px;
   background: #f9fafb;
   border-radius: 6px;
   text-align: center;
-  margin-bottom: 6px;
+  margin-bottom: 4px;
 }
 
 .story-insights-btn-small {
   width: 100%;
-  padding: 6px 10px;
+  padding: 4px 8px;
   background: #DBE0E5;
   color: #111827;
   border: 1px solid #c4c9ce;
   border-radius: 4px;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 500;
   cursor: pointer;
   transition: all 0.2s;
