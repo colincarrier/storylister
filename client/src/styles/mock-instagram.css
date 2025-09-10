@@ -494,10 +494,15 @@
   padding: 10px 12px;
   border: 1px solid #e5e7eb;
   border-radius: 8px;
-  font-size: 14px;
+  font-size: 16px;
+  color: #1f2937;
   margin-bottom: 12px;
   background: white;
   transition: all 0.2s;
+}
+
+.storylister-search input::placeholder {
+  color: #6b7280;
 }
 
 .storylister-search input:focus {
