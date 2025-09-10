@@ -344,6 +344,29 @@
   justify-content: space-between;
 }
 
+.storylister-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.storylister-pro-toggle {
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid #8b5cf6;
+  background: white;
+  color: #8b5cf6;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.storylister-pro-toggle:hover {
+  background: #8b5cf6;
+  color: white;
+}
+
 .storylister-logo {
   display: flex;
   align-items: center;
@@ -520,4 +543,225 @@
 .storylister-tag.active {
   background: #8b5cf6;
   border-color: #8b5cf6;
+}
+
+/* Stats Summary */
+.storylister-stats-summary {
+  display: flex;
+  justify-content: space-around;
+  padding: 12px;
+  background: #f3f4f6;
+  border-radius: 6px;
+  margin-bottom: 12px;
+}
+
+.stat-item {
+  text-align: center;
+}
+
+.stat-label {
+  display: block;
+  font-size: 11px;
+  color: #6b7280;
+  margin-bottom: 4px;
+}
+
+.stat-value {
+  display: block;
+  font-size: 18px;
+  font-weight: 600;
+  color: #111827;
+}
+
+/* Tag Controls */
+.storylister-tag-controls {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.storylister-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.storylister-checkbox input[type="checkbox"] {
+  cursor: pointer;
+}
+
+.storylister-manage-tags {
+  padding: 4px 8px;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  background: white;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.storylister-manage-tags:hover {
+  background: #f3f4f6;
+}
+
+/* Tag Manager Modal */
+.storylister-tag-manager {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 400px;
+  max-height: 500px;
+  background: white;
+  border-radius: 12px;
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.2);
+  z-index: 10001;
+  display: flex;
+  flex-direction: column;
+}
+
+.tag-manager-header {
+  padding: 16px;
+  border-bottom: 1px solid #e5e7eb;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.tag-manager-header h3 {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.tag-manager-header button {
+  background: none;
+  border: none;
+  font-size: 20px;
+  cursor: pointer;
+  color: #6b7280;
+  padding: 4px;
+}
+
+.tag-manager-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.tag-manager-stats {
+  background: #f3f4f6;
+  padding: 12px;
+  border-radius: 6px;
+  margin-bottom: 16px;
+}
+
+.tag-manager-stats p {
+  margin: 4px 0;
+  font-size: 13px;
+  color: #4b5563;
+}
+
+.tag-manager-list {
+  max-height: 250px;
+  overflow-y: auto;
+}
+
+.tag-manager-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px;
+  border-radius: 4px;
+  margin-bottom: 4px;
+  background: #f9fafb;
+}
+
+.tag-manager-item span {
+  font-size: 13px;
+}
+
+.tag-status {
+  color: #10b981;
+  font-size: 11px;
+}
+
+.tag-remove {
+  padding: 2px 6px;
+  border: 1px solid #ef4444;
+  color: #ef4444;
+  background: white;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.tag-remove:hover {
+  background: #fef2f2;
+}
+
+.tag-manager-empty {
+  text-align: center;
+  color: #9ca3af;
+  font-size: 13px;
+  padding: 20px;
+}
+
+.tag-manager-footer {
+  padding: 16px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.tag-manager-footer button {
+  width: 100%;
+  padding: 8px;
+  background: #ef4444;
+  color: white;
+  border: none;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.tag-manager-footer button:hover {
+  background: #dc2626;
+}
+
+/* Pro Mode Tag Dropdown */
+.storylister-tag-dropdown {
+  padding: 4px 6px;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  font-size: 12px;
+  background: white;
+  cursor: pointer;
+  min-width: 80px;
+}
+
+.storylister-tag-dropdown:focus {
+  outline: none;
+  border-color: #8b5cf6;
+  box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.1);
+}
+
+/* Clickable Username Styles */
+.storylister-viewer-username:hover {
+  color: #8b5cf6;
+  text-decoration: underline;
+}
+
+.storylister-viewer-avatar {
+  cursor: pointer;
+}
+
+.storylister-viewer-avatar:hover {
+  opacity: 0.8;
+}
+
+.storylister-viewer-meta {
+  color: #9ca3af;
+  font-size: 11px;
 }

@@ -1,43 +1,71 @@
 import { useState, useEffect, useRef } from 'react';
 import '@/styles/mock-instagram.css';
 
-// Mock viewer data
+// Mock viewer data with timestamps (simulating when they viewed the story)
 const mockViewers = [
-  { username: 'sarah_jones', displayName: 'Sarah Jones', profilePic: 'https://i.pravatar.cc/150?u=sarah', isVerified: true, isFollower: true },
-  { username: 'mike_wilson', displayName: 'Mike Wilson', profilePic: 'https://i.pravatar.cc/150?u=mike', isVerified: false, isFollower: true },
-  { username: 'emma_davis', displayName: 'Emma Davis', profilePic: 'https://i.pravatar.cc/150?u=emma', isVerified: false, isFollower: false },
-  { username: 'alex_martin', displayName: 'Alex Martin', profilePic: 'https://i.pravatar.cc/150?u=alex', isVerified: true, isFollower: true },
-  { username: 'lisa_brown', displayName: 'Lisa Brown', profilePic: 'https://i.pravatar.cc/150?u=lisa', isVerified: false, isFollower: false },
-  { username: 'chris_taylor', displayName: 'Chris Taylor', profilePic: 'https://i.pravatar.cc/150?u=chris', isVerified: false, isFollower: true },
-  { username: 'jessica_lee', displayName: 'Jessica Lee', profilePic: 'https://i.pravatar.cc/150?u=jessica', isVerified: true, isFollower: true },
-  { username: 'david_smith', displayName: 'David Smith', profilePic: 'https://i.pravatar.cc/150?u=david', isVerified: false, isFollower: false },
-  { username: 'sophia_garcia', displayName: 'Sophia Garcia', profilePic: 'https://i.pravatar.cc/150?u=sophia', isVerified: false, isFollower: true },
-  { username: 'ryan_anderson', displayName: 'Ryan Anderson', profilePic: 'https://i.pravatar.cc/150?u=ryan', isVerified: false, isFollower: false },
-  { username: 'olivia_thomas', displayName: 'Olivia Thomas', profilePic: 'https://i.pravatar.cc/150?u=olivia', isVerified: true, isFollower: true },
-  { username: 'nathan_white', displayName: 'Nathan White', profilePic: 'https://i.pravatar.cc/150?u=nathan', isVerified: false, isFollower: true },
-  { username: 'mia_robinson', displayName: 'Mia Robinson', profilePic: 'https://i.pravatar.cc/150?u=mia', isVerified: false, isFollower: false },
-  { username: 'james_clark', displayName: 'James Clark', profilePic: 'https://i.pravatar.cc/150?u=james', isVerified: false, isFollower: true },
-  { username: 'ava_martinez', displayName: 'Ava Martinez', profilePic: 'https://i.pravatar.cc/150?u=ava', isVerified: true, isFollower: true },
+  { username: 'sarah_jones', displayName: 'Sarah Jones', profilePic: 'https://i.pravatar.cc/150?u=sarah', isVerified: true, isFollower: true, viewedAt: Date.now() - 1000 * 60 * 2 }, // 2 min ago
+  { username: 'mike_wilson', displayName: 'Mike Wilson', profilePic: 'https://i.pravatar.cc/150?u=mike', isVerified: false, isFollower: true, viewedAt: Date.now() - 1000 * 60 * 5 }, // 5 min ago
+  { username: 'emma_davis', displayName: 'Emma Davis', profilePic: 'https://i.pravatar.cc/150?u=emma', isVerified: false, isFollower: false, viewedAt: Date.now() - 1000 * 60 * 8 }, // 8 min ago
+  { username: 'alex_martin', displayName: 'Alex Martin', profilePic: 'https://i.pravatar.cc/150?u=alex', isVerified: true, isFollower: true, viewedAt: Date.now() - 1000 * 60 * 12 }, // 12 min ago
+  { username: 'lisa_brown', displayName: 'Lisa Brown', profilePic: 'https://i.pravatar.cc/150?u=lisa', isVerified: false, isFollower: false, viewedAt: Date.now() - 1000 * 60 * 15 }, // 15 min ago
+  { username: 'chris_taylor', displayName: 'Chris Taylor', profilePic: 'https://i.pravatar.cc/150?u=chris', isVerified: false, isFollower: true, viewedAt: Date.now() - 1000 * 60 * 20 }, // 20 min ago
+  { username: 'jessica_lee', displayName: 'Jessica Lee', profilePic: 'https://i.pravatar.cc/150?u=jessica', isVerified: true, isFollower: true, viewedAt: Date.now() - 1000 * 60 * 25 }, // 25 min ago
+  { username: 'david_smith', displayName: 'David Smith', profilePic: 'https://i.pravatar.cc/150?u=david', isVerified: false, isFollower: false, viewedAt: Date.now() - 1000 * 60 * 30 }, // 30 min ago
+  { username: 'sophia_garcia', displayName: 'Sophia Garcia', profilePic: 'https://i.pravatar.cc/150?u=sophia', isVerified: false, isFollower: true, viewedAt: Date.now() - 1000 * 60 * 35 }, // 35 min ago
+  { username: 'ryan_anderson', displayName: 'Ryan Anderson', profilePic: 'https://i.pravatar.cc/150?u=ryan', isVerified: false, isFollower: false, viewedAt: Date.now() - 1000 * 60 * 40 }, // 40 min ago
+  { username: 'olivia_thomas', displayName: 'Olivia Thomas', profilePic: 'https://i.pravatar.cc/150?u=olivia', isVerified: true, isFollower: true, viewedAt: Date.now() - 1000 * 60 * 45 }, // 45 min ago
+  { username: 'nathan_white', displayName: 'Nathan White', profilePic: 'https://i.pravatar.cc/150?u=nathan', isVerified: false, isFollower: true, viewedAt: Date.now() - 1000 * 60 * 50 }, // 50 min ago
+  { username: 'mia_robinson', displayName: 'Mia Robinson', profilePic: 'https://i.pravatar.cc/150?u=mia', isVerified: false, isFollower: false, viewedAt: Date.now() - 1000 * 60 * 55 }, // 55 min ago
+  { username: 'james_clark', displayName: 'James Clark', profilePic: 'https://i.pravatar.cc/150?u=james', isVerified: false, isFollower: true, viewedAt: Date.now() - 1000 * 60 * 60 }, // 1 hour ago
+  { username: 'ava_martinez', displayName: 'Ava Martinez', profilePic: 'https://i.pravatar.cc/150?u=ava', isVerified: true, isFollower: true, viewedAt: Date.now() - 1000 * 60 * 65 }, // 1h 5m ago
 ];
+
+// Helper function to format time ago
+const formatTimeAgo = (timestamp: number) => {
+  const diff = Date.now() - timestamp;
+  const minutes = Math.floor(diff / 60000);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+  
+  if (days > 0) return `${days}d ago`;
+  if (hours > 0) return `${hours}h ago`;
+  if (minutes > 0) return `${minutes}m ago`;
+  return 'just now';
+};
 
 export default function MockInstagram() {
   const [showViewerModal, setShowViewerModal] = useState(false);
   const [storylisterActive, setStoryListerActive] = useState(false);
+  const [showTagManager, setShowTagManager] = useState(false);
   const [viewers, setViewers] = useState(new Map());
   const [currentFilters, setCurrentFilters] = useState({
     query: '',
     type: 'all',
     sort: 'recent',
-    tag: 'all'
+    showTagged: false
   });
-  const [tags, setTags] = useState<{[key: string]: string[]}>({});
-  const contentScriptRef = useRef<any>(null);
+  
+  // Load tags from localStorage
+  const [taggedUsers, setTaggedUsers] = useState<Set<string>>(() => {
+    const stored = localStorage.getItem('storylister_tagged_users');
+    return stored ? new Set(JSON.parse(stored)) : new Set();
+  });
+  
+  // Save tags to localStorage whenever they change
+  useEffect(() => {
+    localStorage.setItem('storylister_tagged_users', JSON.stringify(Array.from(taggedUsers)));
+  }, [taggedUsers]);
 
-  const availableTags = [
-    { emoji: '❤️', label: 'Crush', id: 'crush' },
-    { emoji: '🥷', label: 'Stalker', id: 'stalker' },
-    { emoji: '👯', label: 'Friend', id: 'friend' },
-    { emoji: '👮‍♂️', label: 'Work', id: 'work' }
+  // Pro mode toggle (for demo purposes)
+  const [isProMode, setIsProMode] = useState(false);
+  const [selectedCustomTag, setSelectedCustomTag] = useState('tagged');
+  
+  const customTags = [
+    { id: 'tagged', emoji: '👀', label: 'Tagged' },
+    { id: 'crush', emoji: '❤️', label: 'Crush' },
+    { id: 'stalker', emoji: '🥷', label: 'Stalker' },
+    { id: 'friend', emoji: '👯', label: 'Friend' },
+    { id: 'work', emoji: '👮‍♂️', label: 'Work' }
   ];
 
   // Load the extension script when viewer modal opens
@@ -51,7 +79,7 @@ export default function MockInstagram() {
         mockViewers.forEach(viewer => {
           viewerMap.set(viewer.username, {
             ...viewer,
-            tags: tags[viewer.username] || [],
+            isTagged: taggedUsers.has(viewer.username),
             indexedAt: Date.now(),
             lastSeen: Date.now()
           });
@@ -59,24 +87,21 @@ export default function MockInstagram() {
         setViewers(viewerMap);
       }, 500);
     }
-  }, [showViewerModal, storylisterActive, tags]);
+  }, [showViewerModal, storylisterActive, taggedUsers]);
 
-  const toggleTag = (username: string, tagId: string) => {
-    const userTags = tags[username] || [];
-    const tagIndex = userTags.indexOf(tagId);
-    
-    if (tagIndex > -1) {
-      userTags.splice(tagIndex, 1);
+  const toggleTag = (username: string) => {
+    const newTaggedUsers = new Set(taggedUsers);
+    if (newTaggedUsers.has(username)) {
+      newTaggedUsers.delete(username);
     } else {
-      userTags.push(tagId);
+      newTaggedUsers.add(username);
     }
-    
-    setTags({ ...tags, [username]: userTags });
+    setTaggedUsers(newTaggedUsers);
     
     // Update viewer
     const viewer = viewers.get(username);
     if (viewer) {
-      viewer.tags = userTags;
+      viewer.isTagged = newTaggedUsers.has(username);
       setViewers(new Map(viewers));
     }
   };
@@ -107,15 +132,8 @@ export default function MockInstagram() {
     }
 
     // Apply tag filter
-    switch (currentFilters.tag) {
-      case 'all':
-        break;
-      case 'untagged':
-        filteredViewers = filteredViewers.filter(v => !v.tags || v.tags.length === 0);
-        break;
-      default:
-        filteredViewers = filteredViewers.filter(v => v.tags && v.tags.includes(currentFilters.tag));
-        break;
+    if (currentFilters.showTagged) {
+      filteredViewers = filteredViewers.filter(v => v.isTagged);
     }
 
     // Apply sorting
@@ -124,11 +142,45 @@ export default function MockInstagram() {
         filteredViewers.sort((a, b) => a.username.localeCompare(b.username));
         break;
       case 'recent':
-        filteredViewers.sort((a, b) => b.indexedAt - a.indexedAt);
+        filteredViewers.sort((a, b) => a.viewedAt - b.viewedAt);
+        break;
+      case 'oldest':
+        filteredViewers.sort((a, b) => b.viewedAt - a.viewedAt);
         break;
     }
 
     return filteredViewers;
+  };
+
+  // Calculate stats
+  const totalViewers = viewers.size;
+  const totalVerified = Array.from(viewers.values()).filter(v => v.isVerified).length;
+  const taggedInCurrentStory = Array.from(viewers.values()).filter(v => v.isTagged).length;
+  const totalTaggedUsers = taggedUsers.size;
+
+  const exportData = () => {
+    const data = getFilteredViewers().map(v => ({
+      username: v.username,
+      displayName: v.displayName,
+      isVerified: v.isVerified,
+      isFollower: v.isFollower,
+      isTagged: v.isTagged,
+      viewedAt: new Date(v.viewedAt).toISOString()
+    }));
+    
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `storylister_export_${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleUsernameClick = (username: string) => {
+    // In a real extension, this would open the Instagram profile
+    console.log(`Opening profile: @${username}`);
+    alert(`Would open Instagram profile: @${username}`);
   };
 
   return (
@@ -199,14 +251,27 @@ export default function MockInstagram() {
             <div className="ig-viewer-list">
               {mockViewers.map(viewer => (
                 <div key={viewer.username} className="ig-viewer-item" role="button">
-                  <a href={`#${viewer.username}`} className="ig-viewer-link">
-                    <img src={viewer.profilePic} alt={viewer.username} />
+                  <a 
+                    href="#" 
+                    className="ig-viewer-link"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      handleUsernameClick(viewer.username);
+                    }}
+                  >
+                    <img 
+                      src={viewer.profilePic} 
+                      alt={viewer.username}
+                      style={{ cursor: 'pointer' }}
+                    />
                     <div className="ig-viewer-info">
                       <span className="ig-username">
                         {viewer.username}
                         {viewer.isVerified && <span className="ig-verified">✓</span>}
                       </span>
-                      <span className="ig-display-name">{viewer.displayName}</span>
+                      <span className="ig-display-name">
+                        {viewer.displayName} · {formatTimeAgo(viewer.viewedAt)}
+                      </span>
                     </div>
                   </a>
                   <button className="ig-follow-btn">
@@ -231,10 +296,35 @@ export default function MockInstagram() {
                 </svg>
                 <span>Storylister</span>
               </div>
-              <button className="storylister-close" onClick={() => setStoryListerActive(false)}>×</button>
+              <div className="storylister-header-actions">
+                <button 
+                  className="storylister-pro-toggle"
+                  onClick={() => setIsProMode(!isProMode)}
+                  title={isProMode ? "Switch to Free mode" : "Switch to Pro mode (demo)"}
+                >
+                  {isProMode ? 'Pro' : 'Free'}
+                </button>
+                <button className="storylister-close" onClick={() => setStoryListerActive(false)}>×</button>
+              </div>
             </div>
             
             <div className="storylister-content">
+              {/* Stats Summary */}
+              <div className="storylister-stats-summary">
+                <div className="stat-item">
+                  <span className="stat-label">Total Viewers</span>
+                  <span className="stat-value">{totalViewers}</span>
+                </div>
+                <div className="stat-item">
+                  <span className="stat-label">Verified</span>
+                  <span className="stat-value">{totalVerified}</span>
+                </div>
+                <div className="stat-item">
+                  <span className="stat-label">Tagged</span>
+                  <span className="stat-value">{taggedInCurrentStory}/{totalTaggedUsers}</span>
+                </div>
+              </div>
+              
               <div className="storylister-search">
                 <input 
                   type="text" 
@@ -260,63 +350,141 @@ export default function MockInstagram() {
                   onChange={(e) => setCurrentFilters({...currentFilters, sort: e.target.value})}
                 >
                   <option value="recent">Recent first</option>
+                  <option value="oldest">Oldest first</option>
                   <option value="alphabetical">A-Z</option>
-                  <option value="active">Most active</option>
                 </select>
               </div>
               
-              <div className="storylister-tag-filter">
-                <select 
-                  value={currentFilters.tag}
-                  onChange={(e) => setCurrentFilters({...currentFilters, tag: e.target.value})}
+              <div className="storylister-tag-controls">
+                <label className="storylister-checkbox">
+                  <input 
+                    type="checkbox"
+                    checked={currentFilters.showTagged}
+                    onChange={(e) => setCurrentFilters({...currentFilters, showTagged: e.target.checked})}
+                  />
+                  <span>Show only tagged</span>
+                </label>
+                
+                <button 
+                  className="storylister-manage-tags"
+                  onClick={() => setShowTagManager(!showTagManager)}
                 >
-                  <option value="all">All tags</option>
-                  <option value="crush">❤️ Crush</option>
-                  <option value="stalker">🥷 Stalker</option>
-                  <option value="friend">👯 Friend</option>
-                  <option value="work">👮‍♂️ Work</option>
-                  <option value="untagged">No tags</option>
-                </select>
+                  Manage Tags
+                </button>
               </div>
               
               <div className="storylister-stats">
                 <span>{getFilteredViewers().length} viewers found</span>
                 <div className="storylister-actions">
-                  <button>📸 Capture</button>
-                  <button>📊 Export</button>
+                  <button onClick={exportData}>📊 Export</button>
                 </div>
               </div>
               
               <div className="storylister-results">
                 {getFilteredViewers().map(viewer => (
                   <div key={viewer.username} className="storylister-viewer-item">
-                    <div className="storylister-viewer-avatar">
+                    <div 
+                      className="storylister-viewer-avatar"
+                      onClick={() => handleUsernameClick(viewer.username)}
+                      style={{ cursor: 'pointer' }}
+                    >
                       <img src={viewer.profilePic} alt={viewer.username} />
                     </div>
                     <div className="storylister-viewer-info">
-                      <div className="storylister-viewer-username">
+                      <div 
+                        className="storylister-viewer-username"
+                        onClick={() => handleUsernameClick(viewer.username)}
+                        style={{ cursor: 'pointer' }}
+                      >
                         {viewer.username}
                         {viewer.isVerified && <span className="storylister-verified">✓</span>}
                       </div>
-                      <div className="storylister-viewer-display-name">{viewer.displayName}</div>
+                      <div className="storylister-viewer-meta">
+                        {viewer.displayName} · {formatTimeAgo(viewer.viewedAt)}
+                      </div>
                     </div>
                     <div className="storylister-viewer-tags">
-                      {availableTags.map(tag => (
+                      {!isProMode ? (
+                        // Free mode: Single "Tagged" button
                         <button
-                          key={tag.id}
-                          className={`storylister-tag ${viewer.tags?.includes(tag.id) ? 'active' : ''}`}
-                          onClick={() => toggleTag(viewer.username, tag.id)}
-                          title={tag.label}
+                          className={`storylister-tag ${viewer.isTagged ? 'active' : ''}`}
+                          onClick={() => toggleTag(viewer.username)}
+                          title="Tagged"
                         >
-                          {tag.emoji}
+                          👀
                         </button>
-                      ))}
+                      ) : (
+                        // Pro mode: Custom tag dropdown
+                        <select 
+                          className="storylister-tag-dropdown"
+                          value={viewer.isTagged ? selectedCustomTag : ''}
+                          onChange={(e) => {
+                            if (e.target.value) {
+                              if (!viewer.isTagged) toggleTag(viewer.username);
+                              setSelectedCustomTag(e.target.value);
+                            } else {
+                              if (viewer.isTagged) toggleTag(viewer.username);
+                            }
+                          }}
+                        >
+                          <option value="">No tag</option>
+                          {customTags.map(tag => (
+                            <option key={tag.id} value={tag.id}>
+                              {tag.emoji} {tag.label}
+                            </option>
+                          ))}
+                        </select>
+                      )}
                     </div>
                   </div>
                 ))}
               </div>
             </div>
           </div>
+          
+          {/* Tag Manager Modal */}
+          {showTagManager && (
+            <div className="storylister-tag-manager">
+              <div className="tag-manager-header">
+                <h3>Manage Tagged Users</h3>
+                <button onClick={() => setShowTagManager(false)}>×</button>
+              </div>
+              <div className="tag-manager-content">
+                <div className="tag-manager-stats">
+                  <p>Total tagged users: {taggedUsers.size}</p>
+                  <p>Tagged in this story: {taggedInCurrentStory}</p>
+                </div>
+                <div className="tag-manager-list">
+                  {Array.from(taggedUsers).map(username => {
+                    const viewer = viewers.get(username);
+                    return (
+                      <div key={username} className="tag-manager-item">
+                        <span>{username}</span>
+                        {viewer && <span className="tag-status">✓ In this story</span>}
+                        <button 
+                          className="tag-remove"
+                          onClick={() => toggleTag(username)}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    );
+                  })}
+                  {taggedUsers.size === 0 && (
+                    <p className="tag-manager-empty">No tagged users yet</p>
+                  )}
+                </div>
+                <div className="tag-manager-footer">
+                  <button onClick={() => {
+                    setTaggedUsers(new Set());
+                    setViewers(new Map(
+                      Array.from(viewers.entries()).map(([k, v]) => [k, {...v, isTagged: false}])
+                    ));
+                  }}>Clear All Tags</button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
