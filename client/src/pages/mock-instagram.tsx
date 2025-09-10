@@ -634,6 +634,7 @@ export default function MockInstagram() {
               </div>
               
               <div className="tag-manager-content">
+                {/* Stats Overview */}
                 <div className="tag-manager-stats">
                   <div className="stat-card">
                     <span className="stat-number">{taggedUsers.size}</span>
@@ -641,7 +642,7 @@ export default function MockInstagram() {
                   </div>
                   <div className="stat-card">
                     <span className="stat-number">{taggedInCurrentStory}</span>
-                    <span className="stat-label">In This Story</span>
+                    <span className="stat-label">Watching Now</span>
                   </div>
                   <div className="stat-card">
                     <span className="stat-number">{taggedUsers.size - taggedInCurrentStory}</span>
@@ -649,16 +650,16 @@ export default function MockInstagram() {
                   </div>
                 </div>
                 
-                {/* Add User Section */}
-                <div className="tag-manager-add-section">
-                  <div className="section-header">
-                    <h4>🔍 Quick Add User</h4>
-                    <span className="section-hint">Type to search from current viewers</span>
+                {/* Add New Tags Section */}
+                <div className="tag-section-wrapper">
+                  <div className="section-title">
+                    <h4>Add Tags to Current Viewers</h4>
+                    <span className="section-subtitle">Search and tag viewers from this story</span>
                   </div>
                   <div className="tag-manager-add-controls">
                     <input
                       type="text"
-                      placeholder="Search by username..."
+                      placeholder="Type username to search current viewers..."
                       value={manualUsername}
                       onChange={(e) => setManualUsername(e.target.value)}
                       onKeyPress={(e) => {
@@ -669,17 +670,6 @@ export default function MockInstagram() {
                       }}
                       className="tag-manager-search-input"
                     />
-                    <button
-                      className="tag-manager-add-btn"
-                      onClick={() => {
-                        if (manualUsername.trim()) {
-                          toggleTag(manualUsername.trim());
-                          setManualUsername('');
-                        }
-                      }}
-                    >
-                      + Add
-                    </button>
                   </div>
                   {manualUsername && (
                     <div className="tag-manager-suggestions">
@@ -703,31 +693,33 @@ export default function MockInstagram() {
                               <span className="suggestion-username">{user.username}</span>
                               <span className="suggestion-meta">{user.displayName}</span>
                             </div>
-                            <span className="suggestion-add">+</span>
+                            <button className="tag-btn-add">
+                              {taggedUsers.has(user.username) ? '👀' : '+'}
+                            </button>
                           </div>
                         ))}
                     </div>
                   )}
                 </div>
                 
-                {/* Search Tagged Users */}
-                <div className="tag-manager-search-section">
-                  <div className="section-header">
-                    <h4>📋 Your Tagged Users</h4>
-                    {taggedUsers.size > 0 && (
-                      <span className="section-count">{taggedUsers.size} users</span>
-                    )}
+                {/* Manage Tagged Users Section */}
+                <div className="tag-section-wrapper">
+                  <div className="section-title">
+                    <h4>Your Tagged Users</h4>
+                    <span className="section-subtitle">
+                      {taggedUsers.size > 0 ? `${taggedUsers.size} users tagged` : 'No users tagged yet'}
+                    </span>
                   </div>
-                  <input
-                    type="text"
-                    placeholder="Filter tagged users..."
-                    value={tagManagerSearch}
-                    onChange={(e) => setTagManagerSearch(e.target.value)}
-                    className="tag-manager-filter-input"
-                  />
-                </div>
-                
-                <div className="tag-manager-list">
+                  {taggedUsers.size > 0 && (
+                    <input
+                      type="text"
+                      placeholder="Filter your tagged users..."
+                      value={tagManagerSearch}
+                      onChange={(e) => setTagManagerSearch(e.target.value)}
+                      className="tag-manager-filter-input"
+                    />
+                  )}
+                  <div className="tag-manager-list">
                   {Array.from(taggedUsers)
                     .filter(username => 
                       !tagManagerSearch || 
@@ -779,6 +771,7 @@ export default function MockInstagram() {
                       <p className="empty-hint">Try a different search term</p>
                     </div>
                   )}
+                  </div>
                 </div>
                 <div className="tag-manager-footer">
                   <div className="footer-actions">
