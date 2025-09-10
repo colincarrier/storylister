@@ -430,21 +430,17 @@ export default function MockInstagram() {
                 </div>
               </div>
               
-              {/* Story to Story Insights Button */}
-              <button 
-                className="storylister-insights-btn"
-                onClick={() => setShowViewerInsights(true)}
-              >
-                📊 Story to Story Insights
-              </button>
-              
-              <div className="storylister-search">
-                <input 
-                  type="text" 
-                  placeholder="Search viewers..." 
-                  value={currentFilters.query}
-                  onChange={(e) => setCurrentFilters({...currentFilters, query: e.target.value})}
-                />
+              {/* Main Search Section */}
+              <div className="storylister-search-section">
+                <h3 className="search-title">Search Viewers</h3>
+                <div className="storylister-search">
+                  <input 
+                    type="text" 
+                    placeholder="Search by username or name..." 
+                    value={currentFilters.query}
+                    onChange={(e) => setCurrentFilters({...currentFilters, query: e.target.value})}
+                  />
+                </div>
               </div>
               
               <div className="storylister-filter-buttons">
@@ -491,22 +487,14 @@ export default function MockInstagram() {
               </div>
               
               <div className="storylister-stats">
-                <span>{getFilteredViewers().length} viewers found</span>
-                <div className="storylister-actions">
-                  <button 
-                    className="sort-toggle-btn"
-                    onClick={() => setCurrentFilters({...currentFilters, sort: currentFilters.sort === 'recent' ? 'oldest' : 'recent'})}
-                    title="Toggle sort order"
-                  >
-                    {currentFilters.sort === 'recent' ? '↓ Newest' : '↑ Oldest'}
-                  </button>
-                  <button 
-                    className="storylister-manage-tags"
-                    onClick={() => setShowTagManager(!showTagManager)}
-                  >
-                    Manage Tags
-                  </button>
-                </div>
+                <span className="viewer-count">{getFilteredViewers().length} viewers found</span>
+                <button 
+                  className="sort-toggle-btn"
+                  onClick={() => setCurrentFilters({...currentFilters, sort: currentFilters.sort === 'recent' ? 'oldest' : 'recent'})}
+                  title="Toggle sort order"
+                >
+                  {currentFilters.sort === 'recent' ? '↓ Newest' : '↑ Oldest'}
+                </button>
               </div>
               
               <div className="storylister-results">
@@ -569,14 +557,37 @@ export default function MockInstagram() {
                 ))}
               </div>
               
-              {/* Export & Track Button at Bottom */}
-              <div className="storylister-bottom-actions">
-                <button 
-                  className="export-track-btn"
-                  onClick={exportData}
-                >
-                  📊 Export & Track
-                </button>
+              {/* Bottom Action Sections */}
+              <div className="storylister-bottom-sections">
+                {/* Analytics Section */}
+                <div className="bottom-section analytics-section">
+                  <button 
+                    className="storylister-insights-btn"
+                    onClick={() => setShowViewerInsights(true)}
+                  >
+                    📊 Story to Story Insights
+                  </button>
+                </div>
+                
+                {/* Tag Management Section */}
+                <div className="bottom-section tag-section">
+                  <button 
+                    className="storylister-manage-tags"
+                    onClick={() => setShowTagManager(!showTagManager)}
+                  >
+                    🏷️ Manage Tags
+                  </button>
+                </div>
+                
+                {/* Export Section */}
+                <div className="bottom-section export-section">
+                  <button 
+                    className="export-track-btn"
+                    onClick={exportData}
+                  >
+                    💾 Export & Track
+                  </button>
+                </div>
               </div>
             </div>
           </div>

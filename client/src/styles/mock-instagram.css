@@ -477,6 +477,9 @@
 
 .storylister-content {
   padding: 16px;
+  display: flex;
+  flex-direction: column;
+  height: calc(100% - 60px); /* Account for header */
 }
 
 .storylister-search input {
@@ -546,8 +549,10 @@
 }
 
 .storylister-results {
-  max-height: 400px;
+  flex: 1;
   overflow-y: auto;
+  min-height: 200px;
+  margin-bottom: 12px;
 }
 
 .storylister-viewer-item {
@@ -679,18 +684,6 @@
   cursor: pointer;
 }
 
-.storylister-manage-tags {
-  padding: 4px 8px;
-  border: 1px solid #d1d5db;
-  border-radius: 4px;
-  background: white;
-  font-size: 11px;
-  cursor: pointer;
-}
-
-.storylister-manage-tags:hover {
-  background: #f3f4f6;
-}
 
 /* Tag Manager Modal */
 .storylister-tag-manager {
@@ -1222,25 +1215,29 @@
 
 /* Filter Buttons System */
 .storylister-filter-buttons {
-  margin-bottom: 12px;
+  margin-bottom: 16px;
+  padding: 12px;
+  background: #f9fafb;
+  border-radius: 8px;
+  border: 1px solid #e5e7eb;
 }
 
 .filter-buttons-main {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 6px;
-  margin-bottom: 8px;
+  gap: 8px;
+  margin-bottom: 10px;
 }
 
 .filter-buttons-secondary {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 6px;
+  gap: 8px;
 }
 
 .filter-btn, .filter-btn-small {
-  padding: 8px 12px;
-  border: 1px solid #e5e7eb;
+  padding: 10px 12px;
+  border: 2px solid #d1d5db;
   border-radius: 6px;
   background: white;
   color: #374151;
@@ -1250,22 +1247,26 @@
   transition: all 0.2s;
   text-align: center;
   white-space: nowrap;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
 }
 
 .filter-btn-small {
-  padding: 6px 8px;
+  padding: 8px 10px;
   font-size: 12px;
 }
 
 .filter-btn:hover, .filter-btn-small:hover {
   background: #f3f4f6;
   transform: translateY(-1px);
+  border-color: #9ca3af;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
 }
 
 .filter-btn.active, .filter-btn-small.active {
   background: #8b5cf6;
   color: white;
-  border-color: #8b5cf6;
+  border-color: #7c3aed;
+  box-shadow: 0 2px 4px rgba(139, 92, 246, 0.3);
 }
 
 /* Sort Toggle Button */
@@ -1286,22 +1287,122 @@
   border-color: #9ca3af;
 }
 
-/* Bottom Actions */
-.storylister-bottom-actions {
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid #e5e7eb;
+/* Search Section Emphasis */
+.storylister-search-section {
+  margin-bottom: 16px;
+}
+
+.search-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #111827;
+  margin: 0 0 10px 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.storylister-search input {
+  font-size: 14px;
+  padding: 10px 12px;
+}
+
+/* Viewer Count */
+.storylister-stats {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.viewer-count {
+  font-size: 14px;
+  font-weight: 600;
+  color: #374151;
+}
+
+/* Bottom Action Sections */
+.storylister-bottom-sections {
+  margin-top: auto;
+  padding-top: 16px;
+  border-top: 2px solid #e5e7eb;
+}
+
+.bottom-section {
+  margin-bottom: 10px;
+}
+
+.bottom-section:last-child {
+  margin-bottom: 0;
+}
+
+.analytics-section {
+  padding-bottom: 10px;
+  border-bottom: 1px solid #f3f4f6;
+}
+
+.tag-section {
+  padding-bottom: 10px;
+  border-bottom: 1px solid #f3f4f6;
+}
+
+.storylister-insights-btn {
+  width: 100%;
+  padding: 10px 16px;
+  background: white;
+  color: #6b7280;
+  border: 2px solid #e5e7eb;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.storylister-insights-btn:hover {
+  background: #f9fafb;
+  border-color: #9ca3af;
+  color: #374151;
+  transform: translateY(-1px);
+}
+
+.storylister-manage-tags {
+  width: 100%;
+  padding: 10px 16px;
+  background: white;
+  color: #6b7280;
+  border: 2px solid #e5e7eb;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+.storylister-manage-tags:hover {
+  background: #f9fafb;
+  border-color: #9ca3af;
+  color: #374151;
+  transform: translateY(-1px);
 }
 
 .export-track-btn {
   width: 100%;
-  padding: 10px 16px;
+  padding: 12px 16px;
   background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%);
   color: white;
   border: none;
   border-radius: 6px;
   font-size: 14px;
-  font-weight: 500;
+  font-weight: 600;
   cursor: pointer;
   transition: all 0.2s;
   display: flex;
