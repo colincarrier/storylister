@@ -146,6 +146,9 @@ export default function MockInstagram() {
       case 'non-followers':
         filteredViewers = filteredViewers.filter(v => !v.isFollower);
         break;
+      case 'following':
+        filteredViewers = filteredViewers.filter(v => v.isFollowing);
+        break;
       case 'verified':
         filteredViewers = filteredViewers.filter(v => v.isVerified);
         break;
@@ -156,17 +159,12 @@ export default function MockInstagram() {
       filteredViewers = filteredViewers.filter(v => v.isTagged);
     }
 
-    // Apply sorting
-    switch (currentFilters.sort) {
-      case 'alphabetical':
-        filteredViewers.sort((a, b) => a.username.localeCompare(b.username));
-        break;
-      case 'recent':
-        filteredViewers.sort((a, b) => b.viewedAt - a.viewedAt);
-        break;
-      case 'oldest':
-        filteredViewers.sort((a, b) => a.viewedAt - b.viewedAt);
-        break;
+    // Apply sorting (timing only)
+    if (currentFilters.sort === 'oldest') {
+      filteredViewers.sort((a, b) => a.viewedAt - b.viewedAt);
+    } else {
+      // Default to newest first
+      filteredViewers.sort((a, b) => b.viewedAt - a.viewedAt);
     }
 
     return filteredViewers;
@@ -432,12 +430,12 @@ export default function MockInstagram() {
                 </div>
               </div>
               
-              {/* Viewer Insights Button */}
+              {/* Story to Story Insights Button */}
               <button 
                 className="storylister-insights-btn"
                 onClick={() => setShowViewerInsights(true)}
               >
-                📊 Viewer Insights
+                📊 Story to Story Insights
               </button>
               
               <div className="storylister-search">
@@ -449,36 +447,63 @@ export default function MockInstagram() {
                 />
               </div>
               
-              <div className="storylister-filters">
-                <select 
-                  value={currentFilters.type}
-                  onChange={(e) => setCurrentFilters({...currentFilters, type: e.target.value})}
-                >
-                  <option value="all">All viewers</option>
-                  <option value="followers">Followers only</option>
-                  <option value="non-followers">Non-followers</option>
-                  <option value="verified">Verified</option>
-                </select>
-                
-                <select 
-                  value={currentFilters.sort}
-                  onChange={(e) => setCurrentFilters({...currentFilters, sort: e.target.value})}
-                >
-                  <option value="recent">Recent first</option>
-                  <option value="oldest">Oldest first</option>
-                  <option value="alphabetical">A-Z</option>
-                </select>
+              <div className="storylister-filter-buttons">
+                <div className="filter-buttons-main">
+                  <button 
+                    className={`filter-btn ${currentFilters.type === 'all' ? 'active' : ''}`}
+                    onClick={() => setCurrentFilters({...currentFilters, type: 'all'})}
+                  >
+                    All
+                  </button>
+                  <button 
+                    className={`filter-btn ${currentFilters.type === 'verified' ? 'active' : ''}`}
+                    onClick={() => setCurrentFilters({...currentFilters, type: 'verified'})}
+                  >
+                    ☑ Verified ({totalVerified})
+                  </button>
+                  <button 
+                    className={`filter-btn ${currentFilters.showTagged ? 'active' : ''}`}
+                    onClick={() => setCurrentFilters({...currentFilters, showTagged: !currentFilters.showTagged})}
+                  >
+                    👀 Tagged ({taggedInCurrentStory}/{taggedUsers.size})
+                  </button>
+                </div>
+                <div className="filter-buttons-secondary">
+                  <button 
+                    className={`filter-btn-small ${currentFilters.type === 'following' ? 'active' : ''}`}
+                    onClick={() => setCurrentFilters({...currentFilters, type: 'following'})}
+                  >
+                    Following
+                  </button>
+                  <button 
+                    className={`filter-btn-small ${currentFilters.type === 'followers' ? 'active' : ''}`}
+                    onClick={() => setCurrentFilters({...currentFilters, type: 'followers'})}
+                  >
+                    Followers
+                  </button>
+                  <button 
+                    className={`filter-btn-small ${currentFilters.type === 'non-followers' ? 'active' : ''}`}
+                    onClick={() => setCurrentFilters({...currentFilters, type: 'non-followers'})}
+                  >
+                    Non-followers
+                  </button>
+                </div>
               </div>
               
-              <div className="storylister-tag-controls">
-                <label className="storylister-checkbox">
-                  <input 
-                    type="checkbox"
-                    checked={currentFilters.showTagged}
-                    onChange={(e) => setCurrentFilters({...currentFilters, showTagged: e.target.checked})}
-                  />
-                  <span>Show only tagged</span>
-                </label>
+              <div className="storylister-sort-controls">
+                <span className="sort-label">Sort:</span>
+                <button 
+                  className={`sort-btn ${currentFilters.sort === 'recent' ? 'active' : ''}`}
+                  onClick={() => setCurrentFilters({...currentFilters, sort: 'recent'})}
+                >
+                  Newest first
+                </button>
+                <button 
+                  className={`sort-btn ${currentFilters.sort === 'oldest' ? 'active' : ''}`}
+                  onClick={() => setCurrentFilters({...currentFilters, sort: 'oldest'})}
+                >
+                  Oldest first
+                </button>
                 
                 <button 
                   className="storylister-manage-tags"
@@ -678,12 +703,61 @@ export default function MockInstagram() {
             </div>
           )}
           
-          {/* Viewer Insights Modal */}
+          {/* Story to Story Insights Modal */}
           {showViewerInsights && (
             <div className="viewer-insights-modal">
               <div className="insights-header">
-                <h3>Viewer Insights - Story {currentStory + 1}</h3>
+                <h3>Story to Story Insights</h3>
                 <button onClick={() => setShowViewerInsights(false)}>×</button>
+              </div>
+              
+              {/* Story Comparison Stats */}
+              <div className="insights-comparison">
+                <div className="comparison-stat">
+                  <span className="stat-label">Current Story</span>
+                  <span className="stat-value">Story {currentStory + 1} of 3</span>
+                </div>
+                <div className="comparison-stat">
+                  <span className="stat-label">Viewers</span>
+                  <span className="stat-value">{getStoryViewers(currentStory).length}</span>
+                </div>
+                {currentStory > 0 && (
+                  <>
+                    <div className="comparison-stat">
+                      <span className="stat-label">Drop-off Rate</span>
+                      <span className="stat-value drop-off">
+                        -{Math.round((1 - getStoryViewers(currentStory).length / getStoryViewers(currentStory - 1).length) * 100)}%
+                      </span>
+                    </div>
+                    <div className="comparison-stat">
+                      <span className="stat-label">Retention</span>
+                      <span className="stat-value retention">
+                        {Math.round((getStoryViewers(currentStory).length / getStoryViewers(0).length) * 100)}%
+                      </span>
+                    </div>
+                  </>
+                )}
+              </div>
+              
+              {/* Story Progress Visualization */}
+              <div className="story-progress-bar">
+                {[0, 1, 2].map(storyIdx => {
+                  const viewers = getStoryViewers(storyIdx).length;
+                  const maxViewers = getStoryViewers(0).length;
+                  const percentage = (viewers / maxViewers) * 100;
+                  return (
+                    <div key={storyIdx} className={`progress-segment ${storyIdx === currentStory ? 'active' : ''}`}>
+                      <div className="progress-label">Story {storyIdx + 1}</div>
+                      <div className="progress-bar-container">
+                        <div 
+                          className="progress-bar-fill"
+                          style={{ width: `${percentage}%` }}
+                        />
+                      </div>
+                      <div className="progress-count">{viewers} viewers</div>
+                    </div>
+                  );
+                })}
               </div>
               
               <div className="insights-tabs">
