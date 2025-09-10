@@ -525,7 +525,11 @@ export default function MockInstagram() {
                         style={{ cursor: 'pointer' }}
                       >
                         {viewer.username}
-                        {viewer.isVerified && <span className="storylister-verified">✓</span>}
+                        {viewer.isVerified && (
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="#1877F2" style={{ display: 'inline', verticalAlign: 'middle', marginLeft: '4px' }}>
+                            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+                          </svg>
+                        )}
                       </div>
                       <div className="storylister-viewer-meta">
                         {viewer.displayName} · {formatTimeAgo(viewer.viewedAt)}
@@ -803,7 +807,11 @@ export default function MockInstagram() {
                         <div className="insights-user-info">
                           <span className="insights-username">
                             {user.username}
-                            {user.isVerified && <span className="storylister-verified">✓</span>}
+                            {user.isVerified && (
+                              <svg width="14" height="14" viewBox="0 0 24 24" fill="#1877F2" style={{ display: 'inline', verticalAlign: 'middle', marginLeft: '4px' }}>
+                                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+                              </svg>
+                            )}
                           </span>
                           <span className="insights-meta">{user.displayName}</span>
                         </div>
@@ -829,7 +837,11 @@ export default function MockInstagram() {
                           <div className="insights-user-info">
                             <span className="insights-username">
                               {user.username}
-                              {user.isVerified && <span className="storylister-verified">✓</span>}
+                              {user.isVerified && (
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="#1877F2" style={{ display: 'inline', verticalAlign: 'middle', marginLeft: '4px' }}>
+                                  <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+                                </svg>
+                              )}
                             </span>
                             <span className="insights-meta">{user.displayName}</span>
                           </div>
@@ -860,7 +872,11 @@ export default function MockInstagram() {
                             <div className="insights-user-info">
                               <span className="insights-username">
                                 {user.username}
-                                {user.isVerified && <span className="storylister-verified">✓</span>}
+                                {user.isVerified && (
+                                  <svg width="14" height="14" viewBox="0 0 24 24" fill="#1877F2" style={{ display: 'inline', verticalAlign: 'middle', marginLeft: '4px' }}>
+                                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+                                  </svg>
+                                )}
                               </span>
                               <span className="insights-meta">{user.displayName}</span>
                             </div>
@@ -885,7 +901,11 @@ export default function MockInstagram() {
                             <div className="insights-user-info">
                               <span className="insights-username">
                                 {user.username}
-                                {user.isVerified && <span className="storylister-verified">✓</span>}
+                                {user.isVerified && (
+                                  <svg width="14" height="14" viewBox="0 0 24 24" fill="#1877F2" style={{ display: 'inline', verticalAlign: 'middle', marginLeft: '4px' }}>
+                                    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
+                                  </svg>
+                                )}
                               </span>
                               <span className="insights-meta">{user.displayName}</span>
                             </div>
