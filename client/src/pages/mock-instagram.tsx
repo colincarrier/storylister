@@ -1,24 +1,43 @@
 import { useState, useEffect, useRef } from 'react';
 import '@/styles/mock-instagram.css';
 
-// Mock viewer data with timestamps (simulating when they viewed the story)
-const mockViewers = [
-  { username: 'sarah_jones', displayName: 'Sarah Jones', profilePic: 'https://i.pravatar.cc/150?u=sarah', isVerified: true, isFollower: true, viewedAt: Date.now() - 1000 * 60 * 2 }, // 2 min ago
-  { username: 'mike_wilson', displayName: 'Mike Wilson', profilePic: 'https://i.pravatar.cc/150?u=mike', isVerified: false, isFollower: true, viewedAt: Date.now() - 1000 * 60 * 5 }, // 5 min ago
-  { username: 'emma_davis', displayName: 'Emma Davis', profilePic: 'https://i.pravatar.cc/150?u=emma', isVerified: false, isFollower: false, viewedAt: Date.now() - 1000 * 60 * 8 }, // 8 min ago
-  { username: 'alex_martin', displayName: 'Alex Martin', profilePic: 'https://i.pravatar.cc/150?u=alex', isVerified: true, isFollower: true, viewedAt: Date.now() - 1000 * 60 * 12 }, // 12 min ago
-  { username: 'lisa_brown', displayName: 'Lisa Brown', profilePic: 'https://i.pravatar.cc/150?u=lisa', isVerified: false, isFollower: false, viewedAt: Date.now() - 1000 * 60 * 15 }, // 15 min ago
-  { username: 'chris_taylor', displayName: 'Chris Taylor', profilePic: 'https://i.pravatar.cc/150?u=chris', isVerified: false, isFollower: true, viewedAt: Date.now() - 1000 * 60 * 20 }, // 20 min ago
-  { username: 'jessica_lee', displayName: 'Jessica Lee', profilePic: 'https://i.pravatar.cc/150?u=jessica', isVerified: true, isFollower: true, viewedAt: Date.now() - 1000 * 60 * 25 }, // 25 min ago
-  { username: 'david_smith', displayName: 'David Smith', profilePic: 'https://i.pravatar.cc/150?u=david', isVerified: false, isFollower: false, viewedAt: Date.now() - 1000 * 60 * 30 }, // 30 min ago
-  { username: 'sophia_garcia', displayName: 'Sophia Garcia', profilePic: 'https://i.pravatar.cc/150?u=sophia', isVerified: false, isFollower: true, viewedAt: Date.now() - 1000 * 60 * 35 }, // 35 min ago
-  { username: 'ryan_anderson', displayName: 'Ryan Anderson', profilePic: 'https://i.pravatar.cc/150?u=ryan', isVerified: false, isFollower: false, viewedAt: Date.now() - 1000 * 60 * 40 }, // 40 min ago
-  { username: 'olivia_thomas', displayName: 'Olivia Thomas', profilePic: 'https://i.pravatar.cc/150?u=olivia', isVerified: true, isFollower: true, viewedAt: Date.now() - 1000 * 60 * 45 }, // 45 min ago
-  { username: 'nathan_white', displayName: 'Nathan White', profilePic: 'https://i.pravatar.cc/150?u=nathan', isVerified: false, isFollower: true, viewedAt: Date.now() - 1000 * 60 * 50 }, // 50 min ago
-  { username: 'mia_robinson', displayName: 'Mia Robinson', profilePic: 'https://i.pravatar.cc/150?u=mia', isVerified: false, isFollower: false, viewedAt: Date.now() - 1000 * 60 * 55 }, // 55 min ago
-  { username: 'james_clark', displayName: 'James Clark', profilePic: 'https://i.pravatar.cc/150?u=james', isVerified: false, isFollower: true, viewedAt: Date.now() - 1000 * 60 * 60 }, // 1 hour ago
-  { username: 'ava_martinez', displayName: 'Ava Martinez', profilePic: 'https://i.pravatar.cc/150?u=ava', isVerified: true, isFollower: true, viewedAt: Date.now() - 1000 * 60 * 65 }, // 1h 5m ago
-];
+// Generate 100 mock users with varied characteristics
+const generateMockUsers = () => {
+  const firstNames = ['Sarah', 'Mike', 'Emma', 'Alex', 'Lisa', 'Chris', 'Jessica', 'David', 'Sophia', 'Ryan', 
+                       'Olivia', 'Nathan', 'Mia', 'James', 'Ava', 'Daniel', 'Isabella', 'William', 'Emily', 'Mason',
+                       'Charlotte', 'Ethan', 'Amelia', 'Michael', 'Harper', 'Benjamin', 'Evelyn', 'Jacob', 'Abigail', 'Lucas'];
+  const lastNames = ['Johnson', 'Smith', 'Williams', 'Brown', 'Jones', 'Garcia', 'Miller', 'Davis', 'Rodriguez', 'Martinez',
+                      'Anderson', 'Taylor', 'Thomas', 'Hernandez', 'Moore', 'Martin', 'Jackson', 'Thompson', 'White', 'Lopez'];
+  
+  const users = [];
+  for (let i = 0; i < 100; i++) {
+    const firstName = firstNames[Math.floor(Math.random() * firstNames.length)];
+    const lastName = lastNames[Math.floor(Math.random() * lastNames.length)];
+    const username = `${firstName.toLowerCase()}_${lastName.toLowerCase()}${Math.floor(Math.random() * 99)}`;
+    
+    users.push({
+      username,
+      displayName: `${firstName} ${lastName}`,
+      profilePic: `https://i.pravatar.cc/150?u=${username}`,
+      isVerified: Math.random() < 0.1, // 10% verified
+      isFollower: Math.random() < 0.7, // 70% followers
+      viewedAt: Date.now() - Math.floor(Math.random() * 1000 * 60 * 120) // Random time in last 2 hours
+    });
+  }
+  
+  return users.sort((a, b) => b.viewedAt - a.viewedAt); // Sort by most recent first
+};
+
+const mockUsers = generateMockUsers();
+
+// Define which users watched which stories
+const getStoryViewers = (storyIndex: number) => {
+  // Story 1: 100% (all 100 users)
+  // Story 2: 85% (first 85 users)
+  // Story 3: 60% (first 60 users)
+  const viewerCounts = [100, 85, 60];
+  return mockUsers.slice(0, viewerCounts[storyIndex]);
+};
 
 // Helper function to format time ago
 const formatTimeAgo = (timestamp: number) => {
@@ -34,9 +53,12 @@ const formatTimeAgo = (timestamp: number) => {
 };
 
 export default function MockInstagram() {
+  const [currentStory, setCurrentStory] = useState(0);
   const [showViewerModal, setShowViewerModal] = useState(false);
   const [storylisterActive, setStoryListerActive] = useState(false);
   const [showTagManager, setShowTagManager] = useState(false);
+  const [showViewerInsights, setShowViewerInsights] = useState(false);
+  const [insightsTab, setInsightsTab] = useState('watchers');
   const [viewers, setViewers] = useState(new Map());
   const [currentFilters, setCurrentFilters] = useState({
     query: '',
@@ -68,15 +90,16 @@ export default function MockInstagram() {
     { id: 'work', emoji: '👮‍♂️', label: 'Work' }
   ];
 
-  // Load the extension script when viewer modal opens
+  // Load viewers for current story when modal opens
   useEffect(() => {
     if (showViewerModal && !storylisterActive) {
       // Simulate extension activation
       setTimeout(() => {
         setStoryListerActive(true);
-        // Index mock viewers
+        // Index viewers for current story
+        const storyViewers = getStoryViewers(currentStory);
         const viewerMap = new Map();
-        mockViewers.forEach(viewer => {
+        storyViewers.forEach(viewer => {
           viewerMap.set(viewer.username, {
             ...viewer,
             isTagged: taggedUsers.has(viewer.username),
@@ -87,7 +110,24 @@ export default function MockInstagram() {
         setViewers(viewerMap);
       }, 500);
     }
-  }, [showViewerModal, storylisterActive, taggedUsers]);
+  }, [showViewerModal, storylisterActive, taggedUsers, currentStory]);
+
+  // Update viewers when story changes
+  useEffect(() => {
+    if (storylisterActive) {
+      const storyViewers = getStoryViewers(currentStory);
+      const viewerMap = new Map();
+      storyViewers.forEach(viewer => {
+        viewerMap.set(viewer.username, {
+          ...viewer,
+          isTagged: taggedUsers.has(viewer.username),
+          indexedAt: Date.now(),
+          lastSeen: Date.now()
+        });
+      });
+      setViewers(viewerMap);
+    }
+  }, [currentStory, storylisterActive, taggedUsers]);
 
   const toggleTag = (username: string) => {
     const newTaggedUsers = new Set(taggedUsers);
@@ -142,14 +182,35 @@ export default function MockInstagram() {
         filteredViewers.sort((a, b) => a.username.localeCompare(b.username));
         break;
       case 'recent':
-        filteredViewers.sort((a, b) => a.viewedAt - b.viewedAt);
+        filteredViewers.sort((a, b) => b.viewedAt - a.viewedAt);
         break;
       case 'oldest':
-        filteredViewers.sort((a, b) => b.viewedAt - a.viewedAt);
+        filteredViewers.sort((a, b) => a.viewedAt - b.viewedAt);
         break;
     }
 
     return filteredViewers;
+  };
+
+  // Get insights data
+  const getInsightsData = () => {
+    const currentViewers = new Set(getStoryViewers(currentStory).map(v => v.username));
+    const previousViewers = currentStory > 0 ? new Set(getStoryViewers(currentStory - 1).map(v => v.username)) : new Set();
+    
+    const watchers = Array.from(currentViewers).map(username => 
+      mockUsers.find(u => u.username === username)!
+    );
+    
+    const fellOff = Array.from(previousViewers).filter(username => !currentViewers.has(username as string))
+      .map(username => mockUsers.find(u => u.username === username)!);
+    
+    const taggedInStory = Array.from(taggedUsers).filter(username => currentViewers.has(username))
+      .map(username => mockUsers.find(u => u.username === username)!);
+    
+    const taggedNotInStory = Array.from(taggedUsers).filter(username => !currentViewers.has(username))
+      .map(username => mockUsers.find(u => u.username === username)!);
+    
+    return { watchers, fellOff, taggedInStory, taggedNotInStory };
   };
 
   // Calculate stats
@@ -165,14 +226,15 @@ export default function MockInstagram() {
       isVerified: v.isVerified,
       isFollower: v.isFollower,
       isTagged: v.isTagged,
-      viewedAt: new Date(v.viewedAt).toISOString()
+      viewedAt: new Date(v.viewedAt).toISOString(),
+      story: currentStory + 1
     }));
     
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `storylister_export_${Date.now()}.json`;
+    a.download = `storylister_story${currentStory + 1}_export_${Date.now()}.json`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -181,6 +243,14 @@ export default function MockInstagram() {
     // In a real extension, this would open the Instagram profile
     console.log(`Opening profile: @${username}`);
     alert(`Would open Instagram profile: @${username}`);
+  };
+
+  const navigateStory = (direction: 'prev' | 'next') => {
+    if (direction === 'prev' && currentStory > 0) {
+      setCurrentStory(currentStory - 1);
+    } else if (direction === 'next' && currentStory < 2) {
+      setCurrentStory(currentStory + 1);
+    }
   };
 
   return (
@@ -205,6 +275,16 @@ export default function MockInstagram() {
       {/* Story Viewer */}
       <div className="ig-story-viewer">
         <div className="ig-story-container">
+          {/* Story Progress Bars */}
+          <div className="ig-story-progress">
+            {[0, 1, 2].map(index => (
+              <div 
+                key={index} 
+                className={`ig-progress-bar ${index === currentStory ? 'active' : ''} ${index < currentStory ? 'completed' : ''}`}
+              />
+            ))}
+          </div>
+          
           <div className="ig-story-header">
             <div className="ig-story-user">
               <img src="https://i.pravatar.cc/150?u=yourstory" alt="Your Story" />
@@ -214,12 +294,32 @@ export default function MockInstagram() {
             <button className="ig-story-close">✕</button>
           </div>
 
+          {/* Navigation Arrows */}
+          {currentStory > 0 && (
+            <button className="ig-story-nav ig-story-nav-prev" onClick={() => navigateStory('prev')}>
+              ‹
+            </button>
+          )}
+          {currentStory < 2 && (
+            <button className="ig-story-nav ig-story-nav-next" onClick={() => navigateStory('next')}>
+              ›
+            </button>
+          )}
+
           <div className="ig-story-content">
             <div className="ig-story-image">
               <div className="ig-story-placeholder">
-                <h2>Your Story Content</h2>
-                <p>This is a mock Instagram story viewer</p>
-                <p>Click "Seen by" below to test Storylister</p>
+                <h2>Story {currentStory + 1} of 3</h2>
+                <p>This is story #{currentStory + 1}</p>
+                <div className="story-stats">
+                  <p>{getStoryViewers(currentStory).length} viewers</p>
+                  {currentStory > 0 && (
+                    <p className="drop-off-stat">
+                      {100 - Math.round(getStoryViewers(currentStory).length / getStoryViewers(0).length * 100)}% drop-off from Story 1
+                    </p>
+                  )}
+                </div>
+                <p className="story-hint">Click "Seen by" below to test Storylister</p>
               </div>
             </div>
           </div>
@@ -227,7 +327,7 @@ export default function MockInstagram() {
           <div className="ig-story-footer">
             <div className="ig-story-viewers" onClick={() => setShowViewerModal(true)}>
               <span className="ig-eye-icon">👁</span>
-              <span>Seen by {mockViewers.length}</span>
+              <span>Seen by {getStoryViewers(currentStory).length}</span>
             </div>
             <div className="ig-story-actions">
               <input type="text" placeholder="Send message" />
@@ -249,7 +349,7 @@ export default function MockInstagram() {
               <button onClick={() => setShowViewerModal(false)}>✕</button>
             </div>
             <div className="ig-viewer-list">
-              {mockViewers.map(viewer => (
+              {getStoryViewers(currentStory).map(viewer => (
                 <div key={viewer.username} className="ig-viewer-item" role="button">
                   <a 
                     href="#" 
@@ -309,10 +409,15 @@ export default function MockInstagram() {
             </div>
             
             <div className="storylister-content">
+              {/* Current Story Indicator */}
+              <div className="storylister-story-indicator">
+                Analyzing Story {currentStory + 1} of 3
+              </div>
+              
               {/* Stats Summary */}
               <div className="storylister-stats-summary">
                 <div className="stat-item">
-                  <span className="stat-label">Total Viewers</span>
+                  <span className="stat-label">Viewers</span>
                   <span className="stat-value">{totalViewers}</span>
                 </div>
                 <div className="stat-item">
@@ -324,6 +429,14 @@ export default function MockInstagram() {
                   <span className="stat-value">{taggedInCurrentStory}/{totalTaggedUsers}</span>
                 </div>
               </div>
+              
+              {/* Viewer Insights Button */}
+              <button 
+                className="storylister-insights-btn"
+                onClick={() => setShowViewerInsights(true)}
+              >
+                📊 Viewer Insights
+              </button>
               
               <div className="storylister-search">
                 <input 
@@ -482,6 +595,129 @@ export default function MockInstagram() {
                     ));
                   }}>Clear All Tags</button>
                 </div>
+              </div>
+            </div>
+          )}
+          
+          {/* Viewer Insights Modal */}
+          {showViewerInsights && (
+            <div className="viewer-insights-modal">
+              <div className="insights-header">
+                <h3>Viewer Insights - Story {currentStory + 1}</h3>
+                <button onClick={() => setShowViewerInsights(false)}>×</button>
+              </div>
+              
+              <div className="insights-tabs">
+                <button 
+                  className={`insights-tab ${insightsTab === 'watchers' ? 'active' : ''}`}
+                  onClick={() => setInsightsTab('watchers')}
+                >
+                  Watchers ({getInsightsData().watchers.length})
+                </button>
+                <button 
+                  className={`insights-tab ${insightsTab === 'fell-off' ? 'active' : ''} ${currentStory === 0 ? 'disabled' : ''}`}
+                  onClick={() => currentStory > 0 && setInsightsTab('fell-off')}
+                  disabled={currentStory === 0}
+                >
+                  Fell-off ({currentStory > 0 ? getInsightsData().fellOff.length : 0})
+                </button>
+                <button 
+                  className={`insights-tab ${insightsTab === 'tagged' ? 'active' : ''}`}
+                  onClick={() => setInsightsTab('tagged')}
+                >
+                  Tagged ({getInsightsData().taggedInStory.length}/{taggedUsers.size})
+                </button>
+              </div>
+              
+              <div className="insights-content">
+                {insightsTab === 'watchers' && (
+                  <div className="insights-list">
+                    <p className="insights-description">Users who viewed this story</p>
+                    {getInsightsData().watchers.map(user => (
+                      <div key={user.username} className="insights-user">
+                        <img src={user.profilePic} alt={user.username} />
+                        <div className="insights-user-info">
+                          <span className="insights-username">
+                            {user.username}
+                            {user.isVerified && <span className="storylister-verified">✓</span>}
+                          </span>
+                          <span className="insights-meta">{user.displayName}</span>
+                        </div>
+                        {taggedUsers.has(user.username) && <span className="insights-tag">👀</span>}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                
+                {insightsTab === 'fell-off' && (
+                  <div className="insights-list">
+                    <p className="insights-description">Users who watched Story {currentStory} but not this one</p>
+                    {getInsightsData().fellOff.length > 0 ? (
+                      getInsightsData().fellOff.map(user => (
+                        <div key={user.username} className="insights-user fell-off">
+                          <img src={user.profilePic} alt={user.username} />
+                          <div className="insights-user-info">
+                            <span className="insights-username">
+                              {user.username}
+                              {user.isVerified && <span className="storylister-verified">✓</span>}
+                            </span>
+                            <span className="insights-meta">{user.displayName}</span>
+                          </div>
+                          {taggedUsers.has(user.username) && <span className="insights-tag">👀</span>}
+                        </div>
+                      ))
+                    ) : (
+                      <p className="insights-empty">No users fell off at this story</p>
+                    )}
+                  </div>
+                )}
+                
+                {insightsTab === 'tagged' && (
+                  <div className="insights-list">
+                    <p className="insights-description">Your tagged users and their viewing status</p>
+                    {getInsightsData().taggedInStory.length > 0 && (
+                      <>
+                        <h4 className="insights-subheader">Watched this story</h4>
+                        {getInsightsData().taggedInStory.map(user => (
+                          <div key={user.username} className="insights-user">
+                            <img src={user.profilePic} alt={user.username} />
+                            <div className="insights-user-info">
+                              <span className="insights-username">
+                                {user.username}
+                                {user.isVerified && <span className="storylister-verified">✓</span>}
+                              </span>
+                              <span className="insights-meta">{user.displayName}</span>
+                            </div>
+                            <span className="insights-status watched">✓ Watched</span>
+                          </div>
+                        ))}
+                      </>
+                    )}
+                    
+                    {getInsightsData().taggedNotInStory.length > 0 && (
+                      <>
+                        <h4 className="insights-subheader">Haven't watched this story</h4>
+                        {getInsightsData().taggedNotInStory.map(user => (
+                          <div key={user.username} className="insights-user not-watched">
+                            <img src={user.profilePic} alt={user.username} />
+                            <div className="insights-user-info">
+                              <span className="insights-username">
+                                {user.username}
+                                {user.isVerified && <span className="storylister-verified">✓</span>}
+                              </span>
+                              <span className="insights-meta">{user.displayName}</span>
+                            </div>
+                            <span className="insights-status not-watched">Not watched</span>
+                          </div>
+                        ))}
+                      </>
+                    )}
+                    
+                    {taggedUsers.size === 0 && (
+                      <p className="insights-empty">No tagged users yet</p>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           )}
