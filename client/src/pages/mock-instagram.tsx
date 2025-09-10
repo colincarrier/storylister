@@ -85,11 +85,10 @@ export default function MockInstagram() {
   const [selectedCustomTag, setSelectedCustomTag] = useState('tagged');
   
   const customTags = [
-    { id: 'tagged', emoji: '👀', label: 'Tagged' },
     { id: 'crush', emoji: '❤️', label: 'Crush' },
-    { id: 'stalker', emoji: '🥷', label: 'Stalker' },
+    { id: 'cop', emoji: '👮‍♂️', label: 'Cop' },
     { id: 'friend', emoji: '👯', label: 'Friend' },
-    { id: 'work', emoji: '👮‍♂️', label: 'Work' }
+    { id: 'coworker', emoji: '💼', label: 'Coworker' }
   ];
 
   // Load viewers for current story
@@ -597,15 +596,16 @@ export default function MockInstagram() {
             </div>
           </div>
           
-          {/* Tag Manager Modal */}
+          {/* Tag Manager Modal - Full Panel Takeover */}
           {showTagManager && (
-            <div className="storylister-tag-manager">
+            <div className="storylister-tag-manager-fullscreen">
               <div className="tag-manager-header">
+                <button className="tag-manager-back" onClick={() => setShowTagManager(false)}>← Back</button>
                 <div className="tag-manager-title">
                   <span className="tag-icon">👀</span>
                   <h3>Manage Tagged Users</h3>
                 </div>
-                <button className="tag-manager-close" onClick={() => setShowTagManager(false)}>×</button>
+                <div style={{ width: '80px' }}></div>
               </div>
               
               {/* Helper Text Section */}
@@ -625,6 +625,12 @@ export default function MockInstagram() {
                     <span>Monitor who consistently watches your content</span>
                   </div>
                 </div>
+                {!isProMode && (
+                  <div className="tag-manager-upsell">
+                    <span className="upsell-emoji">✨</span>
+                    <span className="upsell-text">Want to tag and track more? <button className="upsell-btn" onClick={() => setIsProMode(true)}>Upgrade to Pro!</button></span>
+                  </div>
+                )}
               </div>
               
               <div className="tag-manager-content">
@@ -775,20 +781,28 @@ export default function MockInstagram() {
                   )}
                 </div>
                 <div className="tag-manager-footer">
-                  <button 
-                    className="clear-all-btn"
-                    onClick={() => {
-                      if (confirm('Remove all tagged users? This cannot be undone.')) {
-                        setTaggedUsers(new Set());
-                        setViewers(new Map(
-                          Array.from(viewers.entries()).map(([k, v]) => [k, {...v, isTagged: false}])
-                        ));
-                        setTagManagerSearch('');
-                      }
-                    }}
-                  >
-                    🗑️ Clear All Tags
-                  </button>
+                  <div className="footer-actions">
+                    <button 
+                      className="clear-all-btn"
+                      onClick={() => {
+                        if (confirm('Remove all tagged users? This cannot be undone.')) {
+                          setTaggedUsers(new Set());
+                          setViewers(new Map(
+                            Array.from(viewers.entries()).map(([k, v]) => [k, {...v, isTagged: false}])
+                          ));
+                          setTagManagerSearch('');
+                        }
+                      }}
+                    >
+                      🗑️ Clear All
+                    </button>
+                    <button 
+                      className="done-btn"
+                      onClick={() => setShowTagManager(false)}
+                    >
+                      Done
+                    </button>
+                  </div>
                 </div>
               </div>
             </div>
