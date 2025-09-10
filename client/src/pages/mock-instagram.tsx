@@ -601,22 +601,58 @@ export default function MockInstagram() {
           {showTagManager && (
             <div className="storylister-tag-manager">
               <div className="tag-manager-header">
-                <h3>Manage Tagged Users</h3>
-                <button onClick={() => setShowTagManager(false)}>×</button>
+                <div className="tag-manager-title">
+                  <span className="tag-icon">👀</span>
+                  <h3>Manage Tagged Users</h3>
+                </div>
+                <button className="tag-manager-close" onClick={() => setShowTagManager(false)}>×</button>
               </div>
+              
+              {/* Helper Text Section */}
+              <div className="tag-manager-helper">
+                <p className="helper-title">Why tag viewers?</p>
+                <div className="helper-reasons">
+                  <div className="helper-item">
+                    <span className="helper-emoji">🎯</span>
+                    <span>Track your most loyal viewers across stories</span>
+                  </div>
+                  <div className="helper-item">
+                    <span className="helper-emoji">💜</span>
+                    <span>Identify top fans and engaged followers</span>
+                  </div>
+                  <div className="helper-item">
+                    <span className="helper-emoji">📊</span>
+                    <span>Monitor who consistently watches your content</span>
+                  </div>
+                </div>
+              </div>
+              
               <div className="tag-manager-content">
                 <div className="tag-manager-stats">
-                  <p>Total tagged users: {taggedUsers.size}</p>
-                  <p>Tagged in this story: {taggedInCurrentStory}</p>
+                  <div className="stat-card">
+                    <span className="stat-number">{taggedUsers.size}</span>
+                    <span className="stat-label">Total Tagged</span>
+                  </div>
+                  <div className="stat-card">
+                    <span className="stat-number">{taggedInCurrentStory}</span>
+                    <span className="stat-label">In This Story</span>
+                  </div>
+                  <div className="stat-card">
+                    <span className="stat-number">{taggedUsers.size - taggedInCurrentStory}</span>
+                    <span className="stat-label">Not Watching</span>
+                  </div>
                 </div>
                 
                 {/* Add User Section */}
                 <div className="tag-manager-add-section">
-                  <h4>Add Tagged User</h4>
+                  <div className="section-header">
+                    <h4>🔍 Quick Add User</h4>
+                    <span className="section-hint">Type to search from current viewers</span>
+                  </div>
                   <div className="tag-manager-add-controls">
                     <input
                       type="text"
-                      placeholder="Search or enter username..."
+                      placeholder="Search by username..."
                       value={manualUsername}
                       onChange={(e) => setManualUsername(e.target.value)}
                       onKeyPress={(e) => {
@@ -636,7 +672,7 @@ export default function MockInstagram() {
                         }
                       }}
                     >
-                      Add
+                      + Add
                     </button>
                   </div>
                   {manualUsername && (
@@ -657,7 +693,11 @@ export default function MockInstagram() {
                             }}
                           >
                             <img src={user.profilePic} alt={user.username} />
-                            <span>{user.username}</span>
+                            <div className="suggestion-info">
+                              <span className="suggestion-username">{user.username}</span>
+                              <span className="suggestion-meta">{user.displayName}</span>
+                            </div>
+                            <span className="suggestion-add">+</span>
                           </div>
                         ))}
                     </div>
@@ -666,9 +706,15 @@ export default function MockInstagram() {
                 
                 {/* Search Tagged Users */}
                 <div className="tag-manager-search-section">
+                  <div className="section-header">
+                    <h4>📋 Your Tagged Users</h4>
+                    {taggedUsers.size > 0 && (
+                      <span className="section-count">{taggedUsers.size} users</span>
+                    )}
+                  </div>
                   <input
                     type="text"
-                    placeholder="Search tagged users..."
+                    placeholder="Filter tagged users..."
                     value={tagManagerSearch}
                     onChange={(e) => setTagManagerSearch(e.target.value)}
                     className="tag-manager-filter-input"
@@ -685,34 +731,64 @@ export default function MockInstagram() {
                       const viewer = viewers.get(username);
                       return (
                         <div key={username} className="tag-manager-item">
-                          <span>{username}</span>
-                          {viewer && <span className="tag-status">✓ In this story</span>}
+                          <div className="tag-item-left">
+                            <span className="tag-item-emoji">👤</span>
+                            <div className="tag-item-info">
+                              <span className="tag-item-username">{username}</span>
+                              {viewer && (
+                                <span className="tag-status watching">
+                                  <svg width="12" height="12" viewBox="0 0 24 24" fill="#10b981">
+                                    <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/>
+                                  </svg>
+                                  Watching now
+                                </span>
+                              )}
+                              {!viewer && (
+                                <span className="tag-status not-watching">Not in this story</span>
+                              )}
+                            </div>
+                          </div>
                           <button 
                             className="tag-remove"
                             onClick={() => toggleTag(username)}
                           >
-                            Remove
+                            ×
                           </button>
                         </div>
                       );
                     })}
                   {taggedUsers.size === 0 && (
-                    <p className="tag-manager-empty">No tagged users yet</p>
+                    <div className="tag-manager-empty">
+                      <span className="empty-emoji">🏷️</span>
+                      <p className="empty-title">No tagged users yet</p>
+                      <p className="empty-hint">Start tagging viewers to track your most engaged audience!</p>
+                    </div>
                   )}
                   {tagManagerSearch && Array.from(taggedUsers).filter(username => 
                     username.toLowerCase().includes(tagManagerSearch.toLowerCase())
                   ).length === 0 && taggedUsers.size > 0 && (
-                    <p className="tag-manager-empty">No matching tagged users</p>
+                    <div className="tag-manager-empty">
+                      <span className="empty-emoji">🔍</span>
+                      <p className="empty-title">No matches found</p>
+                      <p className="empty-hint">Try a different search term</p>
+                    </div>
                   )}
                 </div>
                 <div className="tag-manager-footer">
-                  <button onClick={() => {
-                    setTaggedUsers(new Set());
-                    setViewers(new Map(
-                      Array.from(viewers.entries()).map(([k, v]) => [k, {...v, isTagged: false}])
-                    ));
-                    setTagManagerSearch('');
-                  }}>Clear All Tags</button>
+                  <button 
+                    className="clear-all-btn"
+                    onClick={() => {
+                      if (confirm('Remove all tagged users? This cannot be undone.')) {
+                        setTaggedUsers(new Set());
+                        setViewers(new Map(
+                          Array.from(viewers.entries()).map(([k, v]) => [k, {...v, isTagged: false}])
+                        ));
+                        setTagManagerSearch('');
+                      }
+                    }}
+                  >
+                    🗑️ Clear All Tags
+                  </button>
                 </div>
               </div>
             </div>
