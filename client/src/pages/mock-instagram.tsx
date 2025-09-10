@@ -55,11 +55,13 @@ const formatTimeAgo = (timestamp: number) => {
 export default function MockInstagram() {
   const [currentStory, setCurrentStory] = useState(0);
   const [showViewerModal, setShowViewerModal] = useState(false);
-  const [storylisterActive, setStoryListerActive] = useState(false);
+  const [storylisterActive, setStoryListerActive] = useState(true); // Always active when viewing stories
   const [showTagManager, setShowTagManager] = useState(false);
   const [showViewerInsights, setShowViewerInsights] = useState(false);
   const [insightsTab, setInsightsTab] = useState('watchers');
   const [viewers, setViewers] = useState(new Map());
+  const [tagManagerSearch, setTagManagerSearch] = useState('');
+  const [manualUsername, setManualUsername] = useState('');
   const [currentFilters, setCurrentFilters] = useState({
     query: '',
     type: 'all',
@@ -90,44 +92,22 @@ export default function MockInstagram() {
     { id: 'work', emoji: '👮‍♂️', label: 'Work' }
   ];
 
-  // Load viewers for current story when modal opens
+  // Load viewers for current story
   useEffect(() => {
-    if (showViewerModal && !storylisterActive) {
-      // Simulate extension activation
-      setTimeout(() => {
-        setStoryListerActive(true);
-        // Index viewers for current story
-        const storyViewers = getStoryViewers(currentStory);
-        const viewerMap = new Map();
-        storyViewers.forEach(viewer => {
-          viewerMap.set(viewer.username, {
-            ...viewer,
-            isTagged: taggedUsers.has(viewer.username),
-            indexedAt: Date.now(),
-            lastSeen: Date.now()
-          });
-        });
-        setViewers(viewerMap);
-      }, 500);
-    }
-  }, [showViewerModal, storylisterActive, taggedUsers, currentStory]);
-
-  // Update viewers when story changes
-  useEffect(() => {
-    if (storylisterActive) {
-      const storyViewers = getStoryViewers(currentStory);
-      const viewerMap = new Map();
-      storyViewers.forEach(viewer => {
-        viewerMap.set(viewer.username, {
-          ...viewer,
-          isTagged: taggedUsers.has(viewer.username),
-          indexedAt: Date.now(),
-          lastSeen: Date.now()
-        });
+    // Always load viewers when story changes or modal opens
+    const storyViewers = getStoryViewers(currentStory);
+    const viewerMap = new Map();
+    storyViewers.forEach(viewer => {
+      viewerMap.set(viewer.username, {
+        ...viewer,
+        isTagged: taggedUsers.has(viewer.username),
+        indexedAt: Date.now(),
+        lastSeen: Date.now()
       });
-      setViewers(viewerMap);
-    }
-  }, [currentStory, storylisterActive, taggedUsers]);
+    });
+    setViewers(viewerMap);
+  }, [currentStory, taggedUsers]);
+
 
   const toggleTag = (username: string) => {
     const newTaggedUsers = new Set(taggedUsers);
@@ -205,10 +185,32 @@ export default function MockInstagram() {
       .map(username => mockUsers.find(u => u.username === username)!);
     
     const taggedInStory = Array.from(taggedUsers).filter(username => currentViewers.has(username))
-      .map(username => mockUsers.find(u => u.username === username)!);
+      .map(username => {
+        const user = mockUsers.find(u => u.username === username);
+        // If user not found in mockUsers, create a basic user object
+        return user || {
+          username,
+          displayName: username,
+          profilePic: `https://i.pravatar.cc/150?u=${username}`,
+          isVerified: false,
+          isFollower: false,
+          viewedAt: Date.now()
+        };
+      });
     
     const taggedNotInStory = Array.from(taggedUsers).filter(username => !currentViewers.has(username))
-      .map(username => mockUsers.find(u => u.username === username)!);
+      .map(username => {
+        const user = mockUsers.find(u => u.username === username);
+        // If user not found in mockUsers, create a basic user object
+        return user || {
+          username,
+          displayName: username,
+          profilePic: `https://i.pravatar.cc/150?u=${username}`,
+          isVerified: false,
+          isFollower: false,
+          viewedAt: Date.now()
+        };
+      });
     
     return { watchers, fellOff, taggedInStory, taggedNotInStory };
   };
@@ -384,8 +386,8 @@ export default function MockInstagram() {
         </div>
       )}
 
-      {/* Storylister Extension Panel */}
-      {storylisterActive && showViewerModal && (
+      {/* Storylister Extension Panel - Always visible when viewing your own stories */}
+      {storylisterActive && (
         <div id="storylister-right-rail">
           <div className="storylister-panel">
             <div className="storylister-header">
@@ -567,24 +569,100 @@ export default function MockInstagram() {
                   <p>Total tagged users: {taggedUsers.size}</p>
                   <p>Tagged in this story: {taggedInCurrentStory}</p>
                 </div>
+                
+                {/* Add User Section */}
+                <div className="tag-manager-add-section">
+                  <h4>Add Tagged User</h4>
+                  <div className="tag-manager-add-controls">
+                    <input
+                      type="text"
+                      placeholder="Search or enter username..."
+                      value={manualUsername}
+                      onChange={(e) => setManualUsername(e.target.value)}
+                      onKeyPress={(e) => {
+                        if (e.key === 'Enter' && manualUsername.trim()) {
+                          toggleTag(manualUsername.trim());
+                          setManualUsername('');
+                        }
+                      }}
+                      className="tag-manager-search-input"
+                    />
+                    <button
+                      className="tag-manager-add-btn"
+                      onClick={() => {
+                        if (manualUsername.trim()) {
+                          toggleTag(manualUsername.trim());
+                          setManualUsername('');
+                        }
+                      }}
+                    >
+                      Add
+                    </button>
+                  </div>
+                  {manualUsername && (
+                    <div className="tag-manager-suggestions">
+                      {mockUsers
+                        .filter(u => 
+                          u.username.toLowerCase().includes(manualUsername.toLowerCase()) &&
+                          !taggedUsers.has(u.username)
+                        )
+                        .slice(0, 5)
+                        .map(user => (
+                          <div 
+                            key={user.username}
+                            className="tag-suggestion-item"
+                            onClick={() => {
+                              toggleTag(user.username);
+                              setManualUsername('');
+                            }}
+                          >
+                            <img src={user.profilePic} alt={user.username} />
+                            <span>{user.username}</span>
+                          </div>
+                        ))}
+                    </div>
+                  )}
+                </div>
+                
+                {/* Search Tagged Users */}
+                <div className="tag-manager-search-section">
+                  <input
+                    type="text"
+                    placeholder="Search tagged users..."
+                    value={tagManagerSearch}
+                    onChange={(e) => setTagManagerSearch(e.target.value)}
+                    className="tag-manager-filter-input"
+                  />
+                </div>
+                
                 <div className="tag-manager-list">
-                  {Array.from(taggedUsers).map(username => {
-                    const viewer = viewers.get(username);
-                    return (
-                      <div key={username} className="tag-manager-item">
-                        <span>{username}</span>
-                        {viewer && <span className="tag-status">✓ In this story</span>}
-                        <button 
-                          className="tag-remove"
-                          onClick={() => toggleTag(username)}
-                        >
-                          Remove
-                        </button>
-                      </div>
-                    );
-                  })}
+                  {Array.from(taggedUsers)
+                    .filter(username => 
+                      !tagManagerSearch || 
+                      username.toLowerCase().includes(tagManagerSearch.toLowerCase())
+                    )
+                    .map(username => {
+                      const viewer = viewers.get(username);
+                      return (
+                        <div key={username} className="tag-manager-item">
+                          <span>{username}</span>
+                          {viewer && <span className="tag-status">✓ In this story</span>}
+                          <button 
+                            className="tag-remove"
+                            onClick={() => toggleTag(username)}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      );
+                    })}
                   {taggedUsers.size === 0 && (
                     <p className="tag-manager-empty">No tagged users yet</p>
+                  )}
+                  {tagManagerSearch && Array.from(taggedUsers).filter(username => 
+                    username.toLowerCase().includes(tagManagerSearch.toLowerCase())
+                  ).length === 0 && taggedUsers.size > 0 && (
+                    <p className="tag-manager-empty">No matching tagged users</p>
                   )}
                 </div>
                 <div className="tag-manager-footer">
@@ -593,6 +671,7 @@ export default function MockInstagram() {
                     setViewers(new Map(
                       Array.from(viewers.entries()).map(([k, v]) => [k, {...v, isTagged: false}])
                     ));
+                    setTagManagerSearch('');
                   }}>Clear All Tags</button>
                 </div>
               </div>
@@ -643,7 +722,13 @@ export default function MockInstagram() {
                           </span>
                           <span className="insights-meta">{user.displayName}</span>
                         </div>
-                        {taggedUsers.has(user.username) && <span className="insights-tag">👀</span>}
+                        <button
+                          className={`insights-tag-btn ${taggedUsers.has(user.username) ? 'active' : ''}`}
+                          onClick={() => toggleTag(user.username)}
+                          title={taggedUsers.has(user.username) ? 'Untag' : 'Tag'}
+                        >
+                          👀
+                        </button>
                       </div>
                     ))}
                   </div>
@@ -663,7 +748,13 @@ export default function MockInstagram() {
                             </span>
                             <span className="insights-meta">{user.displayName}</span>
                           </div>
-                          {taggedUsers.has(user.username) && <span className="insights-tag">👀</span>}
+                          <button
+                            className={`insights-tag-btn ${taggedUsers.has(user.username) ? 'active' : ''}`}
+                            onClick={() => toggleTag(user.username)}
+                            title={taggedUsers.has(user.username) ? 'Untag' : 'Tag'}
+                          >
+                            👀
+                          </button>
                         </div>
                       ))
                     ) : (
@@ -688,7 +779,13 @@ export default function MockInstagram() {
                               </span>
                               <span className="insights-meta">{user.displayName}</span>
                             </div>
-                            <span className="insights-status watched">✓ Watched</span>
+                            <button
+                              className="insights-tag-btn active"
+                              onClick={() => toggleTag(user.username)}
+                              title="Untag"
+                            >
+                              👀 Untag
+                            </button>
                           </div>
                         ))}
                       </>
@@ -707,7 +804,13 @@ export default function MockInstagram() {
                               </span>
                               <span className="insights-meta">{user.displayName}</span>
                             </div>
-                            <span className="insights-status not-watched">Not watched</span>
+                            <button
+                              className="insights-tag-btn active"
+                              onClick={() => toggleTag(user.username)}
+                              title="Untag"
+                            >
+                              👀 Untag
+                            </button>
                           </div>
                         ))}
                       </>
