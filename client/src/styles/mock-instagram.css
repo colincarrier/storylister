@@ -1484,9 +1484,9 @@
 .story-insights-btn-small {
   width: 100%;
   padding: 6px 10px;
-  background: #f3f4f6;
+  background: #DBE0E5;
   color: #111827;
-  border: 1px solid #e5e7eb;
+  border: 1px solid #c4c9ce;
   border-radius: 4px;
   font-size: 12px;
   font-weight: 500;
@@ -1499,7 +1499,7 @@
 }
 
 .story-insights-btn-small:hover {
-  background: #e5e7eb;
+  background: #c4c9ce;
   border-color: #9ca3af;
   color: #000000;
 }
