@@ -1506,6 +1506,54 @@
   color: #000000;
 }
 
+/* Story Navigation Controls */
+.story-navigation {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  padding: 12px;
+  background: #f9fafb;
+  border-radius: 8px;
+  margin-bottom: 16px;
+}
+
+.story-nav-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: 2px solid #e5e7eb;
+  background: white;
+  color: #374151;
+  font-size: 18px;
+  font-weight: bold;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.story-nav-btn:hover:not(:disabled) {
+  background: #8b5cf6;
+  color: white;
+  border-color: #8b5cf6;
+  transform: scale(1.1);
+}
+
+.story-nav-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.story-nav-indicator {
+  font-size: 14px;
+  font-weight: 600;
+  color: #374151;
+  min-width: 100px;
+  text-align: center;
+}
+
 /* Story Progress Visualization */
 .story-progress-bar {
   display: flex;
@@ -1520,6 +1568,21 @@
 .progress-segment {
   flex: 1;
   text-align: center;
+  cursor: pointer;
+  transition: transform 0.2s;
+  padding: 8px;
+  border-radius: 6px;
+}
+
+.progress-segment:hover {
+  background: #f9fafb;
+  transform: translateY(-2px);
+}
+
+.progress-segment.active {
+  background: #f3f0ff;
+  border: 2px solid #8b5cf6;
+  padding: 6px;
 }
 
 .progress-segment.active .progress-label {

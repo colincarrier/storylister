@@ -729,10 +729,6 @@ export default function MockInstagram() {
               {/* Story Comparison Stats */}
               <div className="insights-comparison">
                 <div className="comparison-stat">
-                  <span className="stat-label">Current Story</span>
-                  <span className="stat-value">Story {currentStory + 1} of 3</span>
-                </div>
-                <div className="comparison-stat">
                   <span className="stat-label">Viewers</span>
                   <span className="stat-value">{getStoryViewers(currentStory).length}</span>
                 </div>
@@ -754,6 +750,27 @@ export default function MockInstagram() {
                 )}
               </div>
               
+              {/* Story Navigation Controls */}
+              <div className="story-navigation">
+                <button 
+                  className="story-nav-btn prev"
+                  onClick={() => setCurrentStory(Math.max(0, currentStory - 1))}
+                  disabled={currentStory === 0}
+                  title="Previous Story"
+                >
+                  ←
+                </button>
+                <span className="story-nav-indicator">Story {currentStory + 1} of 3</span>
+                <button 
+                  className="story-nav-btn next"
+                  onClick={() => setCurrentStory(Math.min(2, currentStory + 1))}
+                  disabled={currentStory === 2}
+                  title="Next Story"
+                >
+                  →
+                </button>
+              </div>
+              
               {/* Story Progress Visualization */}
               <div className="story-progress-bar">
                 {[0, 1, 2].map(storyIdx => {
@@ -761,7 +778,13 @@ export default function MockInstagram() {
                   const maxViewers = getStoryViewers(0).length;
                   const percentage = (viewers / maxViewers) * 100;
                   return (
-                    <div key={storyIdx} className={`progress-segment ${storyIdx === currentStory ? 'active' : ''}`}>
+                    <div 
+                      key={storyIdx} 
+                      className={`progress-segment ${storyIdx === currentStory ? 'active' : ''}`}
+                      onClick={() => setCurrentStory(storyIdx)}
+                      style={{ cursor: 'pointer' }}
+                      title={`View Story ${storyIdx + 1}`}
+                    >
                       <div className="progress-label">Story {storyIdx + 1}</div>
                       <div className="progress-bar-container">
                         <div 
