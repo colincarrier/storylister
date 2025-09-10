@@ -1483,8 +1483,8 @@
 .story-insights-btn-small {
   width: 100%;
   padding: 6px 10px;
-  background: #f9fafb;
-  color: #9ca3af;
+  background: #f3f4f6;
+  color: #111827;
   border: 1px solid #e5e7eb;
   border-radius: 4px;
   font-size: 12px;
@@ -1498,9 +1498,9 @@
 }
 
 .story-insights-btn-small:hover {
-  background: #f3f4f6;
+  background: #e5e7eb;
   border-color: #9ca3af;
-  color: #6b7280;
+  color: #000000;
 }
 
 /* Story Progress Visualization */
