@@ -557,8 +557,11 @@
 .storylister-results {
   flex: 1;
   overflow-y: auto;
-  min-height: 150px;
+  min-height: 200px;
+  max-height: 50vh;
   margin-bottom: 8px;
+  resize: vertical;
+  overflow: auto;
 }
 
 .storylister-viewer-item {
@@ -1338,7 +1341,7 @@
 }
 
 .bottom-section {
-  margin-bottom: 10px;
+  margin-bottom: 16px;
 }
 
 .bottom-section:last-child {
@@ -1484,8 +1487,8 @@
 .story-insights-btn-small {
   width: 100%;
   padding: 6px 10px;
-  background: white;
-  color: #6b7280;
+  background: #f9fafb;
+  color: #9ca3af;
   border: 1px solid #e5e7eb;
   border-radius: 4px;
   font-size: 12px;
@@ -1499,9 +1502,9 @@
 }
 
 .story-insights-btn-small:hover {
-  background: #f9fafb;
+  background: #f3f4f6;
   border-color: #9ca3af;
-  color: #374151;
+  color: #6b7280;
 }
 
 /* Story Progress Visualization */

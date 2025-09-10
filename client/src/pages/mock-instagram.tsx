@@ -418,7 +418,7 @@ export default function MockInstagram() {
                   className="story-insights-btn-small"
                   onClick={() => setShowViewerInsights(true)}
                 >
-                  📊 Story Insights
+                  📊 Story to Story Insights
                 </button>
               </div>
               
