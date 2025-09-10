@@ -1250,8 +1250,6 @@
   transition: all 0.2s;
   text-align: center;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .filter-btn-small {
@@ -1270,24 +1268,8 @@
   border-color: #8b5cf6;
 }
 
-/* Sort Controls */
-.storylister-sort-controls {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 12px;
-  padding: 8px;
-  background: #f9fafb;
-  border-radius: 6px;
-}
-
-.sort-label {
-  font-size: 12px;
-  color: #6b7280;
-  font-weight: 500;
-}
-
-.sort-btn {
+/* Sort Toggle Button */
+.sort-toggle-btn {
   padding: 6px 10px;
   border: 1px solid #e5e7eb;
   border-radius: 4px;
@@ -1296,20 +1278,42 @@
   font-size: 12px;
   cursor: pointer;
   transition: all 0.2s;
+  white-space: nowrap;
 }
 
-.sort-btn:hover {
+.sort-toggle-btn:hover {
   background: #f3f4f6;
+  border-color: #9ca3af;
 }
 
-.sort-btn.active {
-  background: #374151;
+/* Bottom Actions */
+.storylister-bottom-actions {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.export-track-btn {
+  width: 100%;
+  padding: 10px 16px;
+  background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%);
   color: white;
-  border-color: #374151;
+  border: none;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
 }
 
-.storylister-sort-controls .storylister-manage-tags {
-  margin-left: auto;
+.export-track-btn:hover {
+  background: linear-gradient(135deg, #7c3aed 0%, #6d28d9 100%);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3);
 }
 
 /* Story Comparison Stats */

@@ -490,33 +490,22 @@ export default function MockInstagram() {
                 </div>
               </div>
               
-              <div className="storylister-sort-controls">
-                <span className="sort-label">Sort:</span>
-                <button 
-                  className={`sort-btn ${currentFilters.sort === 'recent' ? 'active' : ''}`}
-                  onClick={() => setCurrentFilters({...currentFilters, sort: 'recent'})}
-                >
-                  Newest first
-                </button>
-                <button 
-                  className={`sort-btn ${currentFilters.sort === 'oldest' ? 'active' : ''}`}
-                  onClick={() => setCurrentFilters({...currentFilters, sort: 'oldest'})}
-                >
-                  Oldest first
-                </button>
-                
-                <button 
-                  className="storylister-manage-tags"
-                  onClick={() => setShowTagManager(!showTagManager)}
-                >
-                  Manage Tags
-                </button>
-              </div>
-              
               <div className="storylister-stats">
                 <span>{getFilteredViewers().length} viewers found</span>
                 <div className="storylister-actions">
-                  <button onClick={exportData}>📊 Export</button>
+                  <button 
+                    className="sort-toggle-btn"
+                    onClick={() => setCurrentFilters({...currentFilters, sort: currentFilters.sort === 'recent' ? 'oldest' : 'recent'})}
+                    title="Toggle sort order"
+                  >
+                    {currentFilters.sort === 'recent' ? '↓ Newest' : '↑ Oldest'}
+                  </button>
+                  <button 
+                    className="storylister-manage-tags"
+                    onClick={() => setShowTagManager(!showTagManager)}
+                  >
+                    Manage Tags
+                  </button>
                 </div>
               </div>
               
@@ -578,6 +567,16 @@ export default function MockInstagram() {
                     </div>
                   </div>
                 ))}
+              </div>
+              
+              {/* Export & Track Button at Bottom */}
+              <div className="storylister-bottom-actions">
+                <button 
+                  className="export-track-btn"
+                  onClick={exportData}
+                >
+                  📊 Export & Track
+                </button>
               </div>
             </div>
           </div>
