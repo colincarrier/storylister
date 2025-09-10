@@ -560,7 +560,7 @@
   overflow-y: auto;
   min-height: 75vh;
   max-height: 85vh;
-  padding: 8px 16px;
+  padding: 8px 16px 0;
   background: #DBE0E5;
   resize: vertical;
   position: relative;
@@ -1330,7 +1330,6 @@
 
 /* Bottom Action Sections */
 .storylister-bottom-sections {
-  margin-top: auto;
   padding: 16px;
   background: #DBE0E5;
   border-top: 2px solid #c4c9ce;
