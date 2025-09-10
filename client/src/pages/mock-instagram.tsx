@@ -410,8 +410,16 @@ export default function MockInstagram() {
             
             <div className="storylister-content">
               {/* Current Story Indicator */}
-              <div className="storylister-story-indicator">
-                Analyzing Story {currentStory + 1} of 3
+              <div className="storylister-story-section">
+                <div className="storylister-story-indicator">
+                  Analyzing Story {currentStory + 1} of 3
+                </div>
+                <button 
+                  className="story-insights-btn-small"
+                  onClick={() => setShowViewerInsights(true)}
+                >
+                  📊 Story Insights
+                </button>
               </div>
               
               {/* Stats Summary */}
@@ -559,16 +567,6 @@ export default function MockInstagram() {
               
               {/* Bottom Action Sections */}
               <div className="storylister-bottom-sections">
-                {/* Analytics Section */}
-                <div className="bottom-section analytics-section">
-                  <button 
-                    className="storylister-insights-btn"
-                    onClick={() => setShowViewerInsights(true)}
-                  >
-                    📊 Story to Story Insights
-                  </button>
-                </div>
-                
                 {/* Tag Management Section */}
                 <div className="bottom-section tag-section">
                   <button 
