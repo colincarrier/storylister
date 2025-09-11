@@ -19,27 +19,32 @@ export default function ExtensionPreview() {
       };
     }
     
-    // Only load script if not already loaded
-    if (!scriptRef.current && !(window as any).storylistExtension) {
-      const script = document.createElement('script');
-      script.src = '/extension/dist/content.js';
-      script.onload = () => {
-        console.log('Extension script loaded in preview mode');
-        // Initialize the extension
-        const extension = (window as any).storylistExtension;
-        if (extension) {
-          extension.init();
-        }
-      };
-      script.onerror = (error) => {
-        console.error('Failed to load extension script:', error);
-      };
-      document.body.appendChild(script);
-      scriptRef.current = script;
-    } else if ((window as any).storylistExtension) {
-      // If extension already exists, just re-initialize it
-      (window as any).storylistExtension.init();
+    // Remove any existing script first
+    const existingScript = document.querySelector('script[data-storylister-extension]');
+    if (existingScript) {
+      existingScript.remove();
     }
+    
+    // Delete the old extension object to force reload
+    delete (window as any).storylistExtension;
+    
+    // Load script with cache-busting parameter
+    const script = document.createElement('script');
+    script.src = `/extension/dist/content.js?v=${Date.now()}`;
+    script.setAttribute('data-storylister-extension', 'true');
+    script.onload = () => {
+      console.log('Extension script loaded in preview mode (refreshed)');
+      // Initialize the extension
+      const extension = (window as any).storylistExtension;
+      if (extension) {
+        extension.init();
+      }
+    };
+    script.onerror = (error) => {
+      console.error('Failed to load extension script:', error);
+    };
+    document.body.appendChild(script);
+    scriptRef.current = script;
     
     // Cleanup on unmount
     return () => {
