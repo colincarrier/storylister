@@ -28,29 +28,27 @@ for (let i = 11; i <= 100; i++) {
 
 export default function ExtensionPreview() {
   const [searchQuery, setSearchQuery] = useState('');
-  const [activeFilter, setActiveFilter] = useState('all');
-  const [activeTab, setActiveTab] = useState('following');
+  const [categoryFilter, setCategoryFilter] = useState('all');
+  const [tagFilter, setTagFilter] = useState('all');
   const [taggedUsers, setTaggedUsers] = useState<Set<string>>(new Set());
   const [showTagManager, setShowTagManager] = useState(false);
   const [showInsights, setShowInsights] = useState(false);
-  const [currentStory, setCurrentStory] = useState(0);
-  const [insightsTab, setInsightsTab] = useState('watchers');
 
   const filteredViewers = mockViewers.filter(viewer => {
     if (searchQuery && !viewer.username.toLowerCase().includes(searchQuery.toLowerCase())) {
       return false;
     }
-    if (activeFilter === 'verified' && !viewer.isVerified) {
+    if (categoryFilter === 'verified' && !viewer.isVerified) {
       return false;
     }
-    if (activeFilter === 'tagged' && !taggedUsers.has(viewer.username)) {
+    if (tagFilter === 'tagged' && !taggedUsers.has(viewer.username)) {
       return false;
     }
     return true;
   });
 
   const verifiedCount = mockViewers.filter(v => v.isVerified).length;
-  const taggedCount = mockViewers.filter(v => taggedUsers.has(v.username)).length;
+  const taggedCount = taggedUsers.size;
 
   const toggleTag = (username: string) => {
     const newTagged = new Set(taggedUsers);
@@ -74,147 +72,110 @@ export default function ExtensionPreview() {
         </div>
       </div>
 
-      {/* This is the exact extension panel */}
-      <div className="storylister-extension-panel">
-        <div className="storylister-header">
-          <div className="storylister-logo">
-            <span className="logo-icon">👁️</span>
-            <span>Storylister</span>
-          </div>
-          <button className="storylister-close">×</button>
-        </div>
-
-        <div className="storylister-pro-toggle">
-          <label className="pro-switch">
-            <input type="checkbox" />
-            <span className="slider"></span>
-          </label>
-          <span className="pro-label">Free</span>
-        </div>
-
-        <div className="storylister-stats">
-          <div className="stat-card">
-            <div className="stat-label">VIEWERS</div>
-            <div className="stat-value">{mockViewers.length}</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-label">VERIFIED</div>
-            <div className="stat-value">{verifiedCount}</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-label">TAGGED</div>
-            <div className="stat-value">{taggedCount}/{taggedUsers.size}</div>
-          </div>
-        </div>
-
-        <div className="storylister-content">
-          <div className="storylister-search-section">
-            <h3>Search Viewers</h3>
-            <input
-              type="text"
-              placeholder="Search by username or name..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-            />
-          </div>
-
-          <div className="storylister-filters">
-            <button 
-              className={`filter-tab ${activeFilter === 'all' ? 'active' : ''}`}
-              onClick={() => setActiveFilter('all')}
-            >
-              All
-            </button>
-            <button 
-              className={`filter-tab ${activeFilter === 'verified' ? 'active' : ''}`}
-              onClick={() => setActiveFilter('verified')}
-            >
-              ✓ Verified ({verifiedCount})
-            </button>
-            <button 
-              className={`filter-tab ${activeFilter === 'tagged' ? 'active' : ''}`}
-              onClick={() => setActiveFilter('tagged')}
-            >
-              👀 Tagged ({taggedUsers.size})
-            </button>
-          </div>
-
-          <div className="storylister-tabs">
-            <button 
-              className={`tab-btn ${activeTab === 'following' ? 'active' : ''}`}
-              onClick={() => setActiveTab('following')}
-            >
-              Following
-            </button>
-            <button 
-              className={`tab-btn ${activeTab === 'followers' ? 'active' : ''}`}
-              onClick={() => setActiveTab('followers')}
-            >
-              Followers
-            </button>
-            <button 
-              className={`tab-btn ${activeTab === 'non-followers' ? 'active' : ''}`}
-              onClick={() => setActiveTab('non-followers')}
-            >
-              Non-followers
-            </button>
-          </div>
-
-          <div className="storylister-results">
-            <div className="storylister-results-header">
-              <span>{filteredViewers.length} viewers found</span>
-              <button className="storylister-newest">↓ Newest</button>
+      {/* Exact copy of mock-instagram's Storylister panel */}
+      <div id="storylister-right-rail">
+        <div className="storylister-panel">
+          <div className="storylister-header">
+            <div className="storylister-logo">
+              <span>👁️ Storylister</span>
             </div>
-            {filteredViewers.map(viewer => (
-              <div key={viewer.username} className="storylister-viewer-item">
-                <div className="storylister-viewer-left">
-                  <img 
-                    src={viewer.profilePic} 
-                    alt={viewer.username}
-                    className="viewer-avatar"
-                  />
+            <div className="storylister-header-actions">
+              <button className="storylister-pro-toggle">
+                PRO - Track Analytics
+              </button>
+              <button className="storylister-close">×</button>
+            </div>
+          </div>
+
+          <div className="storylister-content">
+            <div className="storylister-search-section">
+              <input
+                type="text"
+                placeholder="Search viewers..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+              />
+            </div>
+
+            <div className="storylister-filters">
+              <select 
+                value={categoryFilter}
+                onChange={(e) => setCategoryFilter(e.target.value)}
+              >
+                <option value="all">All viewers</option>
+                <option value="following">Following</option>
+                <option value="followers">Followers</option>
+                <option value="verified">Verified ({verifiedCount})</option>
+              </select>
+              <select>
+                <option>Recently viewed</option>
+                <option>Most engaged</option>
+                <option>New viewers</option>
+              </select>
+            </div>
+
+            {taggedUsers.size > 0 && (
+              <div className="storylister-tag-filter">
+                <select
+                  value={tagFilter}
+                  onChange={(e) => setTagFilter(e.target.value)}
+                >
+                  <option value="all">All viewers</option>
+                  <option value="tagged">👀 Tagged viewers ({taggedUsers.size})</option>
+                </select>
+              </div>
+            )}
+
+            <div className="storylister-stats">
+              <span>
+                Showing {filteredViewers.length} of {mockViewers.length} viewers
+              </span>
+              <div className="storylister-actions">
+                <button onClick={() => setShowTagManager(true)}>👀 Manage Tags</button>
+                <button onClick={() => setShowInsights(true)}>📊 Export</button>
+              </div>
+            </div>
+
+            <div className="storylister-results">
+              {filteredViewers.map(viewer => (
+                <div key={viewer.username} className="storylister-viewer-item">
+                  <div className="storylister-viewer-avatar">
+                    <img src={viewer.profilePic} alt={viewer.username} />
+                  </div>
                   <div className="storylister-viewer-info">
-                    <div className="storylister-viewer-name">
+                    <div className="storylister-viewer-username">
                       {viewer.username}
                       {viewer.isVerified && (
-                        <svg className="verified-badge" viewBox="0 0 24 24">
-                          <path fill="#1877F2" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
-                        </svg>
+                        <span className="storylister-verified">✓</span>
                       )}
                     </div>
-                    <div className="storylister-viewer-meta">
-                      {viewer.displayName && `${viewer.displayName} · `}{viewer.timeAgo}
-                    </div>
+                    {viewer.displayName && (
+                      <div className="storylister-viewer-display-name">
+                        {viewer.displayName}
+                      </div>
+                    )}
+                  </div>
+                  <div className="storylister-viewer-tags">
+                    <button 
+                      className={`storylister-tag ${taggedUsers.has(viewer.username) ? 'active' : ''}`}
+                      onClick={() => toggleTag(viewer.username)}
+                    >
+                      👀
+                    </button>
                   </div>
                 </div>
-                <div className="storylister-viewer-actions">
-                  <button className="viewer-action-btn">👁️</button>
-                  <button 
-                    className={`viewer-tag-btn ${taggedUsers.has(viewer.username) ? 'active' : ''}`}
-                    onClick={() => toggleTag(viewer.username)}
-                  >
-                    👀
-                  </button>
-                  <button className="viewer-action-btn">⋯</button>
-                </div>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
-        </div>
 
-        <div className="storylister-footer">
-          <button 
-            className="storylister-btn secondary"
-            onClick={() => setShowTagManager(true)}
-          >
-            👀 Manage Tags
-          </button>
-          <button 
-            className="storylister-btn primary"
-            onClick={() => setShowInsights(true)}
-          >
-            📊 Export &<br />Track
-          </button>
+          <div className="storylister-footer">
+            <button className="storylister-btn secondary">
+              👀 Manage Tags
+            </button>
+            <button className="storylister-btn primary">
+              📊 Analytics
+            </button>
+          </div>
         </div>
       </div>
     </div>
