@@ -1,0 +1,401 @@
+Got it. Here’s a **backend‑only recovery plan** you can hand to another engineer. It keeps your existing UI **pixel‑perfect** and focuses only on the code that makes the extension actually work on instagram.com.
+
+---
+
+## 0) TL;DR (what’s broken + the fixes)
+
+**Root causes observed:**
+
+1. **Syntax garbage at end of content scripts**
+   The “Invalid left‑hand side in assignment” and “Invalid/Unexpected token” errors you reported happen when a file ends with stray characters (e.g., `---`, a trailing backslash, or an unclosed template string) after the closing `})();`. This aborts the content script before anything runs.
+
+2. **Message type mismatch (no data reaches UI)**
+   You have *two* network hooks with **different message types**:
+
+   * `network-interceptor.js` posts `STORYLIST_VIEWERS_DATA` (no “ER”).&#x20;
+   * `injected.js` posts `STORYLISTER_VIEWERS_CHUNK` (with “ER”).&#x20;
+     Your newer content code listens for `STORYLISTER_VIEWERS_CHUNK`. If only the former fires, the UI never populates.
+
+3. **Wrong file loaded / name mismatch**
+   The manifest points at **`content.js`** (MV3, `document_idle`). If you dropped in a file named `content-backend.js` (or similar) but didn’t update the manifest (or rename the file), Chrome won’t load the backend you intended. See your manifest: content script = `content.js`, `web_accessible_resources = ["injected.js","network-interceptor.js"]`.&#x20;
+
+4. **Injection not guaranteed / race-prone**
+   If the page‑world interceptor (`injected.js`) isn’t actually injected before you click **Seen by**, you won’t capture *any* responses. The current setup relies on the content script injecting a `<script src=chrome-extension://.../injected.js>`. Any silent failure there → no data.
+
+5. **Fragile “Seen by” discovery & scroll**
+   Using selectors like `:contains()` (not supported) or relying on a single DOM shape causes “auto‑open viewers modal” to miss. When the dialog opens, finding the *scrollable* list must not assume a class name; it should search for the first descendant with `overflow-y: auto|scroll` and height.
+
+6. **UI depends on legacy localStorage keys**
+   Your **existing UI code** reads/writes these keys:
+
+   * `panel_story_store` (per‑story viewers)
+   * `panel_viewer_cache` (global viewers map)
+   * `panel_global_seen` (IDs you’ve “seen” globally)
+     You can see the loader/cleaner logic in the old panel script that hydrates these keys on startup. If the backend doesn’t mirror into these keys, your **existing UI will show nothing**. &#x20;
+
+7. **Popup “Check status” expects a reply**
+   The popup sends `checkStoryViewer` to the content script and expects `{hasViewer: boolean}` back; otherwise it shows “Refresh the page”. Ensure the content script responds to that message (your popup code is already wired this way).&#x20;
+
+---
+
+## 1) Minimal, **backend‑only** patch set (no UI changes)
+
+### (A) Sanity/lint pass (fix the fatal parse error)
+
+Open your `content.js` and **strip anything after** the final `})();`. Make sure there’s:
+
+* No stray `---`
+* No stray backslash `\`
+* No unmatched backticks or quotes
+
+**Why:** The parse error happens before any of your logic runs, so nothing else will work until this file parses.
+
+---
+
+### (B) Unify the message bus (one type only)
+
+Pick **one** message name and use it everywhere. Recommendation: keep the newer one:
+
+* **Canonical message name:** `STORYLISTER_VIEWERS_CHUNK`
+  (it’s what your newer `injected.js` already sends)&#x20;
+
+**Option 1 (simplest):** stop using `network-interceptor.js`. Use **only** `injected.js`.
+**Option 2:** keep both, but make `network-interceptor.js` post the *same* type:
+
+```js
+// In network-interceptor.js (change postMessage payload)
+window.postMessage({
+  type: 'STORYLISTER_VIEWERS_CHUNK',
+  data: {
+    mediaId: currentStoryId,
+    viewers: updatedViewers.map(u => ({
+      id: u.pk || u.id,
+      username: u.username,
+      full_name: u.full_name,
+      profile_pic_url: u.profile_pic_url,
+      is_verified: !!u.is_verified,
+      is_private: !!u.is_private,
+      follows_viewer: !!(u.friendship_status && u.friendship_status.following),
+      followed_by_viewer: !!(u.friendship_status && u.friendship_status.followed_by)
+    })),
+    pageInfo: { has_next_page: hasMore, end_cursor: nextCursor },
+    totalCount: updatedViewers.length
+  }
+}, '*');
+```
+
+(Your current `network-interceptor.js` posts `STORYLIST_VIEWERS_DATA` with different shape; that’s why nothing reaches your renderer. )
+
+---
+
+### (C) Make sure the **right file** loads
+
+Your manifest currently loads **`content.js`** as the content script. If you’ve split backend from UI or renamed files, either:
+
+* Rename your backend content to **`content.js`**, or
+* Update the manifest to the real name(s).
+
+Reference from your manifest:
+`"content_scripts":[{ "matches":["https://www.instagram.com/*"], "js":["content.js"], "run_at":"document_idle"}]`.&#x20;
+
+> ✅ **Recommendation:** Keep your existing UI content script as `content.js` (unchanged visually). If you created a separate backend content (e.g., `backend.js`) that only injects the page‑world interceptor and bridges data to the UI, add **another** content script entry that runs at `document_start`:
+
+```json
+"content_scripts": [
+  {
+    "matches": ["https://www.instagram.com/*"],
+    "js": ["backend.js"],
+    "run_at": "document_start"
+  },
+  {
+    "matches": ["https://www.instagram.com/*"],
+    "js": ["content.js"],
+    "run_at": "document_idle"
+  }
+]
+```
+
+Keep `injected.js` listed in `web_accessible_resources` (you already do).&#x20;
+
+---
+
+### (D) Harden the page‑world injection (idempotent + logs)
+
+Add an **idempotent injector** to your backend content script so the page‑world `injected.js` is guaranteed to load once:
+
+```js
+function injectPageWorldOnce() {
+  const TAG = 'storylister-injected';
+  if (document.querySelector(`script[data-${TAG}]`)) { 
+    console.debug('[SL] already injected'); 
+    return; 
+  }
+  const s = document.createElement('script');
+  s.src = chrome.runtime.getURL('injected.js');
+  s.setAttribute(`data-${TAG}`, '1');
+  s.onload = () => s.remove();
+  s.onerror = (e) => console.error('[SL] failed to load injected.js', e);
+  (document.head || document.documentElement).appendChild(s);
+}
+```
+
+Call `injectPageWorldOnce()` on:
+
+* initial load,
+* every SPA navigation (via `MutationObserver` watching `location.pathname`), and
+* just before you programmatically click **Seen by**, as a belt‑and‑suspenders.
+
+---
+
+### (E) Robust **Seen by** detection and click (no `:contains`)
+
+Avoid unsupported selectors; scan text instead:
+
+```js
+function findSeenBy() {
+  // most reliable: button/anchor with text 'Seen by'
+  const candidates = Array.from(document.querySelectorAll('a,button,div[role="button"],span'))
+    .filter(n => (n.textContent || '').trim().toLowerCase().startsWith('seen by'));
+  if (candidates[0]) return candidates[0];
+
+  // fallback: look for 'Viewers' label in the story chrome
+  const viewers = Array.from(document.querySelectorAll('a,button,div[role="button"],span'))
+    .find(n => /viewers/i.test((n.textContent || '').trim()));
+  if (viewers) return viewers;
+
+  // last resort: heuristic, near the bottom overlay
+  const dlg = document.querySelector('div[role="dialog"]');
+  if (dlg) return null; // dialog already open
+  return null;
+}
+
+async function openViewersModal() {
+  injectPageWorldOnce();
+  const el = findSeenBy();
+  if (!el) return false;
+
+  // human-ish click sequence (short jitter)
+  const delay = (ms) => new Promise(r => setTimeout(r, ms));
+  const micro = () => 30 + Math.random()*90|0;
+  ['mouseenter','mouseover','mousedown','mouseup','click'].forEach((t,i)=>{
+    setTimeout(()=>{
+      const r = el.getBoundingClientRect();
+      el.dispatchEvent(new MouseEvent(t, {bubbles:true,cancelable:true,
+        clientX: r.left + Math.random()*r.width,
+        clientY: r.top  + Math.random()*r.height
+      }));
+    }, i*micro());
+  });
+  await delay(micro()*4);
+  return true;
+}
+```
+
+---
+
+### (F) Robust **scroll container** detection (to trigger pagination)
+
+```js
+function getViewersScrollable() {
+  const dialog = Array.from(document.querySelectorAll('div[role="dialog"]'))
+    .find(d => /viewers|seen by/i.test(d.textContent || ''));
+  if (!dialog) return null;
+
+  // Find first descendant with overflow-y scroll
+  for (const el of dialog.querySelectorAll('*')) {
+    const cs = getComputedStyle(el);
+    if ((cs.overflowY === 'auto' || cs.overflowY === 'scroll') && el.scrollHeight > el.clientHeight) {
+      return el;
+    }
+  }
+  return dialog;
+}
+
+function startAutoScrollFor(ms=10_000) {
+  const area = getViewersScrollable();
+  if (!area) return;
+
+  const start = Date.now();
+  const timer = setInterval(() => {
+    area.scrollTop = area.scrollHeight;
+    if (Date.now() - start >= ms) clearInterval(timer);
+  }, 120);
+}
+```
+
+---
+
+### (G) **Mirror** data into the legacy localStorage keys your UI already uses
+
+Your old UI loads from `panel_story_store`, `panel_viewer_cache`, and `panel_global_seen` (see the hydration/cleanup code that reads those keys). To keep the UI **unchanged**, mirror every viewer chunk you receive from `injected.js` into those keys.&#x20;
+
+```js
+// in the backend content (not touching UI DOM)
+const storyStore = {}; // mediaId -> { viewerMap: Map, fetchedAt: ts }
+
+function savePanelStores() {
+  // panel_story_store
+  const serial = {};
+  Object.entries(storyStore).forEach(([mid, bucket]) => {
+    serial[mid] = {
+      viewers: Array.from(bucket.viewerMap.entries()), // [id, viewer]
+      generation: 0,
+      fetchedAt: bucket.fetchedAt
+    };
+  });
+  localStorage.setItem('panel_story_store', JSON.stringify(serial));
+
+  // panel_viewer_cache (cap ~5k by lastSeen)
+  const cache = new Map();
+  Object.values(storyStore).forEach(b=>{
+    b.viewerMap.forEach((v,id)=>{
+      const prev = cache.get(id) || {};
+      cache.set(id, {...prev, ...v, lastSeen: Date.now()});
+    });
+  });
+  const limited = Array.from(cache.entries())
+    .sort((a,b)=> (b[1].lastSeen||0) - (a[1].lastSeen||0))
+    .slice(0,5000);
+  localStorage.setItem('panel_viewer_cache', JSON.stringify(limited));
+
+  // panel_global_seen – optional: persist a Set of IDs you’ve already surfaced
+  // localStorage.setItem('panel_global_seen', JSON.stringify([...seenIds]));
+}
+
+window.addEventListener('message', (evt) => {
+  if (evt.source !== window || !evt.data) return;
+  if (evt.data.type !== 'STORYLISTER_VIEWERS_CHUNK') return; // unified type
+
+  const { mediaId, viewers } = evt.data.data;
+  if (!mediaId || !Array.isArray(viewers)) return;
+
+  const bucket = storyStore[mediaId] || (storyStore[mediaId] = {
+    viewerMap: new Map(),
+    fetchedAt: Date.now()
+  });
+
+  for (const u of viewers) {
+    const id = String(u.id || u.pk);
+    const v = {
+      id,
+      username: u.username || '',
+      full_name: u.full_name || '',
+      profile_pic_url: u.profile_pic_url || '',
+      is_verified: !!u.is_verified,
+      is_private: !!u.is_private,
+      lastSeen: Date.now()
+    };
+    if (!bucket.viewerMap.has(id)) bucket.viewerMap.set(id, v);
+  }
+  savePanelStores(); // UI will render from its own timer / existing triggers
+});
+```
+
+Why this matters: your old panel code explicitly **loads these keys**, builds Maps, and renders from them. Keeping those keys up to date means **zero UI changes** while you swap in a more reliable backend.&#x20;
+
+---
+
+### (H) Keep popup “Check Status” working
+
+Your popup calls the content script with `{action: 'checkStoryViewer'}` and expects `{hasViewer}`. Ensure your content script responds (it can be backend or UI content; backend is fine). Popup code reference: it sends that message and reads the boolean.&#x20;
+
+```js
+chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg && msg.action === 'checkStoryViewer') {
+    // “hasViewer” can be as simple as “is the dialog open” or “did we inject”
+    const hasViewer = !!document.querySelector('div[role="dialog"]');
+    sendResponse({ hasViewer });
+    return false;
+  }
+});
+```
+
+---
+
+### (I) Logging you can toggle on/off (to see it working)
+
+Add visible, non‑noisy logs in the backend:
+
+```js
+const LOG = (...a)=>console.log('[Storylister]', ...a);
+
+LOG('backend content loaded');
+injectPageWorldOnce();
+
+window.addEventListener('message', (evt)=>{
+  if (evt.data?.type === 'STORYLISTER_VIEWERS_CHUNK') {
+    LOG('chunk viewers:', evt.data.data.viewers?.length, 'mediaId:', evt.data.data.mediaId);
+  }
+});
+
+new MutationObserver(()=> {
+  const p = location.pathname;
+  if (p !== window.__sl_lastPath) {
+    window.__sl_lastPath = p;
+    LOG('nav →', p);
+    injectPageWorldOnce();
+  }
+}).observe(document.documentElement, {subtree:true, childList:true, attributes:true});
+```
+
+---
+
+## 2) Verification checklist (5 minutes)
+
+1. **Reload extension** (chrome://extensions → reload).
+2. **Open story** on your own account; **click “Seen by”** once.
+3. **DevTools Console** on that tab: expect logs `[Storylister]` from backend content and “intercepted data” logs from `injected.js`.
+4. **Observe localStorage** keys update (`Application` panel → Local Storage → instagram.com):
+
+   * `panel_story_store` updates per story ID,
+   * `panel_viewer_cache` fills with recent viewers,
+   * (optional) `panel_global_seen`.
+     (Those are exactly the keys your old UI code reads when rendering.)&#x20;
+5. **Popup → Check Status** shows a green check once your content replies to `checkStoryViewer`.&#x20;
+
+---
+
+## 3) Optional improvements that don’t touch UI
+
+* **Run the backend content at `document_start`** (and keep the UI content at `document_idle`) so the interceptor is present before the user opens the dialog. (Do this by adding a second content script entry as shown in §1C.)&#x20;
+* **Guard against double‑hooking fetch/XMLHttpRequest** in `injected.js` with a global flag (e.g., `if (window.__sl_hooked) return; window.__sl_hooked = true;`) so multiple injections don’t rewrap fetch repeatedly.&#x20;
+* **Extend GraphQL shapes** as you already started: the `xdt_api__v1__media__story_viewers` path is correct and current, keep that in `injected.js`.&#x20;
+* **Auto‑pagination pause**: keep it in backend (10s) but only emit a `window.postMessage({type:'STORYLISTER_PAGINATION_PAUSED'})`; your UI can choose whether/how to show a prompt later.
+
+---
+
+## 4) Why Replit didn’t see anything (and how this plan fixes it)
+
+* If **content.js failed to parse**, nothing else runs → no injection → no data → popup “Refresh page”.
+* If **message types don’t match**, your UI never receives viewer chunks → empty lists.
+* If **injection isn’t guaranteed**, you might click “Seen by” before hooks exist → you miss all network responses.
+* If **backend doesn’t mirror to `panel_*` keys**, your **unchanged** UI has no data source.
+
+This plan fixes all four without changing a single pixel of UI.
+
+---
+
+## 5) Exact files you already have (for reference)
+
+* **manifest.json** (MV3; loads `content.js` at `document_idle`; exposes `injected.js` & `network-interceptor.js`).&#x20;
+* **popup.html / popup.js** (sends `checkStoryViewer` and expects a `{hasViewer}` response). &#x20;
+* **injected.js** (page‑world network interceptor; already posting `STORYLISTER_VIEWERS_CHUNK`).&#x20;
+* **network-interceptor.js** (alternate interceptor posting `STORYLIST_VIEWERS_DATA`; recommend unifying or removing).&#x20;
+* **old panel code** that reads `panel_story_store`, `panel_viewer_cache`, `panel_global_seen` and renders from them.&#x20;
+
+---
+
+### Hand‑off message you can give your engineer
+
+> **Goal:** Keep the current UI/UX **unchanged**. Make the backend reliable.
+> **Do:**
+>
+> 1. Fix parse errors in `content.js` (strip any stray chars after the last `})();`).
+> 2. Inject `injected.js` idempotently from a backend content (can be `backend.js` at `document_start`).
+> 3. Use **one** message type: `STORYLISTER_VIEWERS_CHUNK` (change `network-interceptor.js` or disable it).
+> 4. On every chunk, **mirror** into `panel_story_store` and `panel_viewer_cache` so the existing UI starts rendering immediately.
+> 5. Reply to popup’s `checkStoryViewer` message with `{hasViewer}`.
+> 6. Harden “Seen by” discovery and scrolling with the helper functions above.
+> 7. Add concise console logs and a MutationObserver that re‑injects on SPA nav.
+
+If you want, I can turn the snippets above into a **one‑file `backend.js`** and a **three‑line patch** for `manifest.json` + a **two‑line patch** you tack on to the end of your existing `content.js` to register the message listener / save to `panel_*` keys—without touching any UI function names or CSS.

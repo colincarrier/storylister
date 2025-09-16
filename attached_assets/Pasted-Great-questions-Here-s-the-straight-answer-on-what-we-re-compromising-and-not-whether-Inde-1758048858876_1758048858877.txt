@@ -1,0 +1,163 @@
+Great questions. Here’s the straight answer on **what we’re compromising (and not)**, **whether IndexedDB still buys us scale**, **what’s still missing**, and **exactly what I propose you ship now—code included**.
+
+---
+
+## 1) Are we compromising anything? (TL;DR: No on data scale; yes on immediate UI coupling)
+
+**What stays / improves**
+
+* **IndexedDB remains the source of truth** for story snapshots (viewers per story) and a lightweight “people” index. That’s how we keep scale and durability.
+* **No server-side storage**—all persistence is still in-browser.
+* **Interception is more robust**: the fixed `injected.js` passively listens to Instagram’s own fetch/XHR (no direct API calls), and relays chunks with a stable message you already consume (`STORYLISTER_VIEWERS_CHUNK`). This is compatible with your existing UI wiring.&#x20;
+
+**Temporary trade‑offs**
+
+* To **preserve your UI pixel-perfect**, the backend patch **doesn’t change your DOM**. That means some backend niceties (like a richer state bus or backend-driven filters) stay optional for now. The UI continues to render from the same messages and DOM IDs you already use (e.g., `#refresh-btn`, `#viewer-list`, etc.).&#x20;
+* We keep the “**old UI drives pagination**” behavior (open “Seen by”, scroll) so you can test immediately without reworking UI logic.
+
+---
+
+## 2) Didn’t we choose IndexedDB to store much more? Are we losing anything?
+
+No, you’re not losing that advantage:
+
+* **Capacity**: IndexedDB typically allows **tens of MB** per origin—large enough for **100k+ viewers** if we store compact records (id, handle, display name, verified flag, timestamps, profile‑pic URL only—not the binary image).
+* **Retention** (free tier): keep last **3 stories** and **24h TTL**, as you requested earlier; **tagged users persist** in the `people` store, even if older stories are pruned. These policies live in the backend’s `CONFIG` and are easy to loosen for Pro.
+* **Speed**: We use in-memory maps during a session and flush compact snapshots to IDB after each chunk. Reads are instant on revisit; you can still paginate to find **new** viewers.
+
+---
+
+## 3) What’s missing right now (by design, to preserve your UI 1:1)
+
+* **No front‑end rewiring**: The backend doesn’t change your CSS/HTML. It simply injects the interceptor early and writes to IndexedDB. Your existing UI continues to:
+
+  * auto‑open “Seen by” and scroll,
+  * listen for viewer chunks,
+  * render the right‑rail UI with your exact styles/IDs.
+    (Your UI code already wires the controls; we’re not touching it.)&#x20;
+
+* **Optional backend APIs** (for later): We expose `window.StorylisterCore` so a future UI can subscribe to updates or query state, but **you don’t need to use it now**.
+
+---
+
+## 4) What exactly broke before (and why this patch fixes it)
+
+* The frequent console error **“Invalid left‑hand side in assignment”** came from stray **`.options`** fragments in request init objects inside `injected.js` (those are invalid JS). That halts your content script at parse time → nothing loads. The new **`injected.js`** replaces that with object spreads:
+  `...(options||{})` and `...(options?.headers||{})`.
+  (You can see how that broken code was showing up in the injected layer previously.)&#x20;
+
+* Timing/injection: your manifest had **injected.js** as a web‑accessible resource (page‑world), but you must **inject it early** from a content script to catch Instagram’s fetch/XHR. This patch provides **`content-backend.js`** that loads **before** your current `content.js` and injects `injected.js` via `chrome.runtime.getURL(...)`. Your UI remains untouched; the interceptor is just guaranteed to be there first.&#x20;
+
+---
+
+## 5) Proposed plan (UI untouched) — minimal, shippable now
+
+**Goal:** keep your **exact UI** and **fix ingestion + persistence** with a backend‑only patch.
+
+### Files to add (no changes to your HTML/CSS)
+
+1. **`content-backend.js`** (loads **before** your `content.js`)
+
+   * Injects `injected.js` (page‑world) early.
+   * Listens for `STORYLISTER_VIEWERS_CHUNK`, compacts and saves to **IndexedDB** (`stories` store).
+   * Maintains a `people` index (`firstSeenAt/lastSeenAt`) and a legacy `seenEver` Set in `localStorage` to keep your “NEW” behavior consistent.
+   * Exposes **optional** `window.StorylisterCore` for future.
+
+2. **Fixed `injected.js`**
+
+   * Intercepts both **Fetch** and **XHR**.
+   * Parses either **REST** (`users` array) or **GraphQL** shapes; posts `STORYLISTER_VIEWERS_CHUNK`.&#x20;
+   * **No more `.options`** syntax errors.
+
+3. **Manifest update** (order matters)
+
+   * Ensure `content-backend.js` runs **before** your current `content.js`, and `injected.js` is listed under `web_accessible_resources` so it can be injected into the page context.&#x20;
+
+---
+
+## 6) Deliverables — ready to drop in
+
+I packaged the backend‑only patch so you can plug it into your existing extension folder **without touching the UI**.
+
+**Download:** [storylister-backend-patch.zip](sandbox:/mnt/data/storylister-backend-patch.zip)
+*(Contains `content-backend.js`, fixed `injected.js`, and a short README + manifest snippet.)*
+
+### How to install this patch
+
+1. **Unzip** into your extension folder (keep your original `content.js`, `popup.*`, and CSS untouched).
+2. **Update your manifest** to load backend first:
+
+```jsonc
+{
+  "content_scripts": [{
+    "matches": ["https://www.instagram.com/*"],
+    "run_at": "document_start",
+    "js": ["content-backend.js", "content.js"]    // <-- backend first, then your UI
+  }],
+  "web_accessible_resources": [{
+    "resources": ["injected.js"],
+    "matches": ["https://www.instagram.com/*"]
+  }]
+}
+```
+
+> Your existing manifest already declares content scripts & web accessible resources; keep your entries and just **ensure this order** and resource list.&#x20;
+
+3. Load the unpacked extension in Chrome and test:
+
+   * Open your story → “Seen by”.
+   * Watch the right rail load with your **identical UI** (no CSS change).
+   * Viewer chunks should populate reliably; snapshots persist in IndexedDB.
+
+---
+
+## 7) What your other engineer needs (zero UI rewrites)
+
+* **Keep** your current `content.js` and UI HTML/CSS exactly as-is (IDs like `#refresh-btn`, `#viewer-list`, etc., remain the same).&#x20;
+* **Replace** your old interceptor with the new `injected.js` (fixed) and **inject it early** using `content-backend.js`.
+* **Optional**: If/when you want to read from IndexedDB for instant “warm render” on revisit, you can add a few non-visual lines to `content.js` to pull the last snapshot for `currentStoryId` from the `stories` store. (That’s an enhancement, not required to pass data through.)
+
+---
+
+## 8) Quick answers to your questions
+
+* **“Are we losing IndexedDB capacity?”**
+  No. We’re actively **using** it (stories + people). It’s what lets you scale to very large viewer sets without choking memory.
+
+* **“What is this missing?”**
+  Nothing UI-wise: your **UI remains unchanged** by design. Backend-only patch fixes ingestion and storage. Later, we can:
+
+  * add **per-story ‘NEW’ semantics** that clear on revisit (store `lastSeenByStory[storyId]` per viewer),
+  * expose backend filters/search (optional),
+  * pro‑tier retention toggles (keep more than 3 stories, longer TTL),
+  * warm-start render from IDB snapshot.
+
+* **“Move to code—what exactly would you propose?”**
+  ✅ **Ship the backend patch now** (files above).
+  ✅ Keep the exact UI.
+  ✅ Verify ingestion and counts stabilize (no cumulative double counting).
+  ➕ Next, add **three small non-visual enhancements** in `content.js` (no CSS/HTML edits):
+
+  1. On navigation to a story, **read last snapshot** from IndexedDB to render immediately, then continue scrolling to find new viewers.
+  2. Compute **NEW** as `viewer.lastSeenAt > (viewer.lastAcknowledgedAtByStory[storyId] || 0)` and set `lastAcknowledgedAtByStory[storyId]` when rail closes (store in IDB `people`).
+  3. On Refresh, don’t append—**reconcile by id** in a Map; update timestamps; recompute counts.
+
+---
+
+## 9) Pointers into your code (so your engineer knows I matched it)
+
+* Your UI has the right‑rail with known IDs (`#refresh-btn`, `#viewer-list`, etc.), and it already binds listeners—so **we don’t touch it**.&#x20;
+* The interceptor must post viewer chunks to `window` with a type your UI already consumes (`STORYLISTER_VIEWERS_CHUNK`). The new `injected.js` does exactly this (also handles both REST & GraphQL).&#x20;
+* The previous parse/attach errors were rooted in invalid `.options` tokens in the injected layer; the fixed file replaces those with safe object spread.&#x20;
+* Your manifest already uses a content script + web accessible resource approach—this patch just **ensures injection order** and early load.&#x20;
+
+---
+
+### Bottom line
+
+* **No UI changes.**
+* **Fix the ingestion path and persistence.**
+* **Preserve IndexedDB scale.**
+* **Ship the backend patch now**: [Download the backend patch](sandbox:/mnt/data/storylister-backend-patch.zip)
+
+If you want, I can add the **optional warm-start pull from IDB** as a **tiny, non-visual** snippet your engineer can paste into `content.js`—just say the word and I’ll include it alongside precise insertion points.

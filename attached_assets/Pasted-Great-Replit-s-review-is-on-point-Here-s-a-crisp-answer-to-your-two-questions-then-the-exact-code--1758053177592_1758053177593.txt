@@ -1,0 +1,583 @@
+Great—Replit’s review is on-point. Here’s a crisp answer to your two questions, then the exact code I recommend you drop in **without touching your UI**.
+
+---
+
+## 1) What are we compromising on?
+
+**Nothing critical.**
+We’re not replacing IndexedDB; we’re **adding a thin, backward‑compatibility mirror** into `localStorage` so your **existing UI** keeps working exactly as-is while the new backend handles scale and reliability.
+
+* **IndexedDB stays the source of truth** for large data, retention, and pruning (24h + last 3 stories).
+* **localStorage is a small compatibility cache** for the legacy UI keys your front-end already reads (`panel_story_store`, `panel_viewer_cache`, `panel_global_seen`).
+* **Trade-off:** localStorage is \~5MB max. So we mirror only the last few stories + a capped global viewer cache (e.g., 5k entries), while keeping the full detail in IndexedDB. That’s the only “compromise”—it’s deliberate to avoid quota errors and UI breakage.
+
+Your current popup already depends on a content script response (`checkStoryViewer`) and your existing content script/UI loads on instagram.com with the manifest you shared. We’ll keep that intact. &#x20;
+
+---
+
+## 2) What is missing & what I propose (code-ready)
+
+**Missing today (why your UI shows empty/erratic):**
+
+* The new backend wasn’t **mirroring data into the legacy keys** your UI reads (`panel_story_store`, `panel_viewer_cache`, `panel_global_seen`). Your old UI code loads from those keys and/or expects them to exist at startup.&#x20;
+* Injection order wasn’t guaranteed: we need the **backend to start at `document_start`** and the **UI to load at `document_idle`** so the backend’s globals & mirroring are available before your UI initializes.
+* Your interceptor should consistently post **`STORYLISTER_VIEWERS_CHUNK`** (which your UI can consume), and the backend should also **auto-open “Seen by” and auto-scroll** for 10s bursts.&#x20;
+
+**What I propose (drop-in, backend-only):**
+
+1. Add **`content-backend.js`** (new file) that:
+
+   * Injects `injected.js` early (`document_start`), listens for `STORYLISTER_VIEWERS_CHUNK`, updates an internal Map per story and **writes IndexedDB**.
+   * **Mirrors to the legacy localStorage keys** after each chunk so your **existing UI renders immediately**.
+   * Provides a small `StorylisterCore` API (optional), doesn’t change the UI.
+   * Auto-opens **“Seen by”** and gently auto-scrolls for \~10s, pauses, and can resume.
+
+2. Replace your **`injected.js`** with a hardened version that:
+
+   * Intercepts `fetch`/XHR viewer responses (REST + GraphQL), normalizes to viewer objects, and posts `STORYLISTER_VIEWERS_CHUNK`.&#x20;
+
+3. Update **`manifest.json`** to load **both** content scripts in the correct order:
+
+   * `content-backend.js` at `document_start`
+   * your **existing** `content.js` at `document_idle`
+   * keep `injected.js` in `web_accessible_resources` so the backend can inject it.
+
+That’s it. Your UI remains pixel-perfect; we only fix the plumbing.
+
+---
+
+# Drop‑in Patch Kit (backend only, no UI changes)
+
+> **You will keep your current `content.js` (the old UI) as-is.**
+> Add the file below, replace `injected.js`, and update the manifest.
+
+### A) `content-backend.js` (new)
+
+```js
+// content-backend.js
+(() => {
+  'use strict';
+
+  // -------- Config (short jitter; 10s bursts) --------
+  const CONFIG = {
+    HUMAN_DELAY_MS: { min: 90, max: 650 },     // keep < 1.3s
+    MICRO_DELAY_MS: { min: 30, max: 90 },
+    SCROLL_BURST_MS: 10000,                    // pause after ~10s
+    FREE_RETENTION_MS: 24*60*60*1000,          // 24h
+    FREE_STORY_LIMIT: 3,
+    LEGACY_CACHE_LIMIT: 5000                   // cap legacy viewer cache
+  };
+
+  const jitter = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const now = () => Date.now();
+
+  // -------- IndexedDB (stories) --------
+  const idb = {
+    db: null,
+    async open() {
+      if (this.db) return this.db;
+      this.db = await new Promise((resolve, reject) => {
+        const req = indexedDB.open('storylister-db', 1);
+        req.onupgradeneeded = () => {
+          const db = req.result;
+          if (!db.objectStoreNames.contains('stories')) {
+            const st = db.createObjectStore('stories', { keyPath: 'storyId' });
+            st.createIndex('fetchedAt', 'fetchedAt');
+          }
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+      return this.db;
+    },
+    async put({ storyId, viewers, fetchedAt }) {
+      const db = await this.open();
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction('stories', 'readwrite');
+        tx.objectStore('stories').put({ storyId, viewers, fetchedAt });
+        tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
+      });
+      await this.prune();
+    },
+    async get(storyId) {
+      const db = await this.open();
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction('stories', 'readonly');
+        const req = tx.objectStore('stories').get(storyId);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => reject(req.error);
+      });
+    },
+    async newestIds() {
+      const db = await this.open();
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction('stories', 'readonly');
+        const idx = tx.objectStore('stories').index('fetchedAt');
+        const ids = [];
+        idx.openCursor(null, 'prev').onsuccess = e => {
+          const c = e.target.result;
+          if (c) { ids.push(c.value.storyId); c.continue(); } else resolve(ids);
+        };
+        tx.onerror = () => reject(tx.error);
+      });
+    },
+    async prune() {
+      const nowTs = Date.now();
+      const ids = await this.newestIds();
+      const toDelete = [];
+      if (ids.length > CONFIG.FREE_STORY_LIMIT) {
+        toDelete.push(...ids.slice(CONFIG.FREE_STORY_LIMIT));
+      }
+      for (const id of ids) {
+        const doc = await this.get(id);
+        if (doc && nowTs - (doc.fetchedAt || 0) > CONFIG.FREE_RETENTION_MS) toDelete.push(id);
+      }
+      if (toDelete.length) {
+        const db = await this.open();
+        await new Promise((resolve, reject) => {
+          const tx = db.transaction('stories', 'readwrite');
+          const st = tx.objectStore('stories');
+          toDelete.forEach(id => st.delete(id));
+          tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
+        });
+      }
+    }
+  };
+
+  // -------- State --------
+  const state = {
+    stories: new Map(),      // storyId -> Map<viewerId, viewer>
+    seenEver: new Set(JSON.parse(localStorage.getItem('panel_global_seen') || '[]')),
+    currentStoryId: null,
+    autoScrollTimer: null,
+  };
+
+  // -------- Page Injector (injected.js) --------
+  function inject() {
+    if (document.querySelector('script[data-storylister-injected]')) return;
+    const s = document.createElement('script');
+    s.src = chrome.runtime.getURL('injected.js');
+    s.setAttribute('data-storylister-injected', '1');
+    s.onload = () => s.remove();
+    (document.head || document.documentElement).appendChild(s);
+  }
+
+  // -------- Legacy localStorage mirror (critical for your UI) --------
+  let mirrorScheduled = false;
+  function mirrorToLegacyStorage() {
+    if (mirrorScheduled) return;
+    mirrorScheduled = true;
+    // Debounce to avoid excessive writes
+    setTimeout(() => {
+      const storyStore = {};
+      // Keep at most the newest FREE_STORY_LIMIT stories mirrored
+      const storyEntries = Array.from(state.stories.entries());
+      const newest = storyEntries.slice(-CONFIG.FREE_STORY_LIMIT);
+
+      newest.forEach(([storyId, vmap]) => {
+        // Your old UI expects an array of [id, viewer] pairs for viewerMap,
+        // stored under panel_story_store[storyId].viewers
+        const legacyPairs = Array.from(vmap.entries()).map(([id, v]) => {
+          return [id, {
+            id: v.id,
+            username: v.username,
+            full_name: v.displayName,          // map back to old field
+            profile_pic_url: v.profilePic,     // map back to old field
+            is_verified: !!v.isVerified,
+            is_private: !!v.isPrivate,
+            follows_viewer: !!v.followsViewer,
+            followed_by_viewer: !!v.followedByViewer,
+            lastSeen: v.viewedAt || Date.now()
+          }];
+        });
+        storyStore[storyId] = {
+          viewers: legacyPairs,
+          generation: 0,
+          fetchedAt: Date.now(),
+        };
+      });
+
+      localStorage.setItem('panel_story_store', JSON.stringify(storyStore));
+
+      // Build global viewer cache with cap
+      const cacheEntries = [];
+      state.stories.forEach(vmap => {
+        vmap.forEach(v => {
+          cacheEntries.push([v.id, {
+            id: v.id,
+            username: v.username,
+            full_name: v.displayName,
+            profile_pic_url: v.profilePic,
+            is_verified: !!v.isVerified,
+            lastSeen: v.viewedAt || Date.now()
+          }]);
+        });
+      });
+      cacheEntries.sort((a, b) => (b[1].lastSeen || 0) - (a[1].lastSeen || 0));
+      localStorage.setItem('panel_viewer_cache', JSON.stringify(cacheEntries.slice(0, CONFIG.LEGACY_CACHE_LIMIT)));
+
+      // Mirror seen set
+      localStorage.setItem('panel_global_seen', JSON.stringify(Array.from(state.seenEver)));
+
+      mirrorScheduled = false;
+    }, 150);
+  }
+
+  // -------- Helpers for UI friendliness --------
+  function ensureBucket(storyId) {
+    if (!state.stories.has(storyId)) {
+      state.stories.set(storyId, new Map());
+    }
+    state.currentStoryId = storyId;
+  }
+
+  function upsertChunk({ mediaId, viewers }) {
+    if (!mediaId || !Array.isArray(viewers)) return;
+    ensureBucket(mediaId);
+    const bucket = state.stories.get(mediaId);
+
+    for (const u of viewers) {
+      const id = String(u.id || u.pk);
+      const v = {
+        id,
+        username: u.username || '',
+        displayName: u.full_name || '',
+        profilePic: u.profile_pic_url || u.profile_pic_url_hd || '',
+        isVerified: !!u.is_verified,
+        isPrivate: !!u.is_private,
+        followsViewer: !!(u.follows_viewer || (u.friendship_status && u.friendship_status.following)),
+        followedByViewer: !!(u.followed_by_viewer || (u.friendship_status && u.friendship_status.followed_by)),
+        viewedAt: now()
+      };
+      // Keep first-seen ordering by not overwriting if exists
+      if (!bucket.has(id)) bucket.set(id, v);
+    }
+
+    // Persist compact version to IDB
+    idb.put({
+      storyId: mediaId,
+      viewers: Array.from(bucket.values()),
+      fetchedAt: Date.now()
+    }).catch(() => {});
+
+    // Mirror to legacy storage for your UI
+    mirrorToLegacyStorage();
+  }
+
+  // -------- Auto open & scroll "Seen by" --------
+  function findSeenByEl() {
+    // conservative: try common selectors/text
+    let el = document.querySelector('a[href*="/seen_by/"]');
+    if (el) return el;
+    const candidates = Array.from(document.querySelectorAll('button, a, div[role="button"], span'));
+    return candidates.find(n => /^(seen by|viewers)/i.test((n.textContent || '').trim())) || null;
+  }
+
+  async function openViewersModal() {
+    await sleep(jitter(CONFIG.HUMAN_DELAY_MS.min, CONFIG.HUMAN_DELAY_MS.max));
+    const el = findSeenByEl();
+    if (!el) return false;
+    // light hover then click
+    ['mouseenter','mouseover','mousedown','mouseup','click'].forEach((t,i)=>{
+      setTimeout(()=> {
+        const r = el.getBoundingClientRect();
+        el.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,clientX:r.left+Math.random()*r.width,clientY:r.top+Math.random()*r.height}));
+      }, i * CONFIG.MICRO_DELAY_MS.min);
+    });
+    return true;
+  }
+
+  function getViewersScrollable() {
+    const dialog = Array.from(document.querySelectorAll('div[role="dialog"]')).find(d => /viewers/i.test(d.textContent || ''));
+    if (!dialog) return null;
+    const nodes = dialog.querySelectorAll('*');
+    for (const n of nodes) {
+      const cs = getComputedStyle(n);
+      if ((cs.overflowY === 'auto' || cs.overflowY === 'scroll') && n.scrollHeight > n.clientHeight) return n;
+    }
+    return dialog;
+  }
+
+  function autoScrollBurst(ms = CONFIG.SCROLL_BURST_MS) {
+    const list = getViewersScrollable();
+    if (!list) return;
+    const t0 = Date.now();
+    if (state.autoScrollTimer) clearInterval(state.autoScrollTimer);
+    state.autoScrollTimer = setInterval(() => {
+      list.scrollTop = list.scrollHeight;
+      if (Date.now() - t0 >= ms) {
+        clearInterval(state.autoScrollTimer);
+        state.autoScrollTimer = null;
+      }
+    }, 120);
+  }
+
+  // -------- Message bridge (from injected.js) --------
+  window.addEventListener('message', (evt) => {
+    if (evt.source !== window || !evt.data) return;
+    const msg = evt.data;
+
+    // New format we standardize on
+    if (msg.type === 'STORYLISTER_VIEWERS_CHUNK' && msg.data) {
+      const { mediaId, viewers } = msg.data;
+      upsertChunk({ mediaId, viewers });
+    }
+
+    // Legacy support (if some pages still emit this)
+    if (msg.type === 'STORYLIST_VIEWERS_DATA' && msg.viewers) {
+      upsertChunk({ mediaId: msg.storyId || state.currentStoryId, viewers: msg.viewers });
+    }
+  });
+
+  // -------- Navigation detection --------
+  let lastPath = null;
+  function onNav() {
+    inject();  // ensure injected.js is present
+
+    const p = location.pathname;
+    if (p === lastPath) return;
+    lastPath = p;
+
+    const m = p.match(/\/stories\/[^/]+\/(\d+)/);
+    if (m) {
+      const sid = m[1];
+      ensureBucket(sid);
+      // Open viewers & scroll
+      openViewersModal().then(() => autoScrollBurst());
+    }
+  }
+
+  const mo = new MutationObserver(onNav);
+  mo.observe(document.documentElement, { childList: true, subtree: true, attributes: true });
+  onNav();
+
+  // -------- Message responder for popup (kept for compatibility) --------
+  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    if (msg && msg.action === 'checkStoryViewer') {
+      // Consider the viewer "active" if we’re on a story path and we have a bucket or a dialog
+      const hasDialog = !!getViewersScrollable();
+      const onStory = /\/stories\//.test(location.pathname);
+      sendResponse({ hasViewer: onStory && (hasDialog || !!state.currentStoryId) });
+      return false;
+    }
+  });
+
+  // -------- Public API (optional; does not change your UI) --------
+  window.StorylisterCore = {
+    getState() {
+      return {
+        storyIds: Array.from(state.stories.keys()),
+        currentStoryId: state.currentStoryId,
+        seenEverCount: state.seenEver.size
+      };
+    },
+    openViewers: openViewersModal,
+    startAutoScroll: () => autoScrollBurst(),
+    stopAutoScroll: () => { if (state.autoScrollTimer) clearInterval(state.autoScrollTimer); state.autoScrollTimer = null; },
+    markCurrentAsSeen: () => {
+      const bucket = state.currentStoryId && state.stories.get(state.currentStoryId);
+      if (!bucket) return;
+      bucket.forEach((_, id) => state.seenEver.add(id));
+      localStorage.setItem('panel_global_seen', JSON.stringify(Array.from(state.seenEver)));
+      mirrorToLegacyStorage();
+    }
+  };
+})();
+```
+
+### B) `injected.js` (replace with this hardened interceptor)
+
+This matches your prior intent, normalizes REST/GraphQL, and emits `STORYLISTER_VIEWERS_CHUNK`. (It’s the same event your code path already uses.)&#x20;
+
+```js
+// injected.js
+(function() {
+  if (window.__sl_injected__) return;
+  window.__sl_injected__ = true;
+
+  const origFetch = window.fetch;
+  const origXHROpen = XMLHttpRequest.prototype.open;
+  const origXHRSend = XMLHttpRequest.prototype.send;
+
+  function extractMediaId() {
+    const m = location.pathname.match(/\/stories\/[^\/]+\/(\d+)/);
+    return m ? m[1] : null;
+  }
+
+  function postChunk(viewers, pageInfo = {}, totalCount = null) {
+    if (!Array.isArray(viewers) || viewers.length === 0) return;
+    window.postMessage({
+      type: 'STORYLISTER_VIEWERS_CHUNK',
+      data: {
+        mediaId: extractMediaId(),
+        viewers,
+        pageInfo,
+        totalCount
+      }
+    }, '*');
+  }
+
+  function parseGraphQL(json) {
+    const vData =
+      json?.data?.xdt_api__v1__media__story_viewers ||
+      json?.data?.xdt_api__v1__media__likers ||
+      json?.data?.viewer ||
+      json?.data?.story?.viewers ||
+      json?.data?.media?.story_viewers;
+
+    if (!vData) return false;
+
+    const edges = vData.edges || [];
+    const viewers = edges.map(e => ({
+      id: e?.node?.id || e?.node?.pk,
+      username: e?.node?.username || '',
+      full_name: e?.node?.full_name || '',
+      profile_pic_url: e?.node?.profile_pic_url || e?.node?.profile_pic_url_hd || '',
+      is_verified: !!e?.node?.is_verified,
+      is_private: !!e?.node?.is_private,
+      follows_viewer: !!e?.node?.follows_viewer,
+      followed_by_viewer: !!e?.node?.followed_by_viewer
+    }));
+
+    const pageInfo = vData.page_info || {};
+    postChunk(viewers, pageInfo, null);
+    return true;
+  }
+
+  function parseREST(json) {
+    if (!Array.isArray(json?.users)) return false;
+    const viewers = json.users.map(u => ({
+      id: u?.pk || u?.id,
+      username: u?.username || '',
+      full_name: u?.full_name || '',
+      profile_pic_url: u?.profile_pic_url || u?.profile_pic_url_hd || '',
+      is_verified: !!u?.is_verified,
+      is_private: !!u?.is_private,
+      follows_viewer: !!(u?.friendship_status?.following),
+      followed_by_viewer: !!(u?.friendship_status?.followed_by)
+    }));
+    const pageInfo = { has_next_page: !!json?.next_max_id, end_cursor: json?.next_max_id || null };
+    const totalCount = json?.total_viewer_count || json?.viewer_count || null;
+    postChunk(viewers, pageInfo, totalCount);
+    return true;
+  }
+
+  // fetch
+  window.fetch = async function(...args) {
+    const res = await origFetch.apply(this, args);
+    try {
+      const url = (typeof args[0] === 'string') ? args[0] : args[0].toString();
+      if (url.includes('/list_reel_media_viewer') || url.includes('/api/graphql')) {
+        const clone = res.clone();
+        const json = await clone.json().catch(() => null);
+        if (json) { if (!parseREST(json)) parseGraphQL(json); }
+      }
+    } catch {}
+    return res;
+  };
+
+  // XHR
+  XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+    this.__sl_url = url;
+    return origXHROpen.apply(this, [method, url, ...rest]);
+  };
+  XMLHttpRequest.prototype.send = function(body) {
+    this.addEventListener('load', () => {
+      try {
+        if (this.__sl_url && (this.__sl_url.includes('/list_reel_media_viewer') || this.__sl_url.includes('/api/graphql'))) {
+          const json = JSON.parse(this.responseText);
+          if (!parseREST(json)) parseGraphQL(json);
+        }
+      } catch {}
+    });
+    return origXHRSend.apply(this, [body]);
+  };
+})();
+```
+
+### C) `manifest.json` (only the minimal changes)
+
+Load backend first, **UI second**. Keep `injected.js` web‑accessible so backend can inject it. Your popup remains unchanged.
+
+```json
+{
+  "manifest_version": 3,
+  "name": "Storylister",
+  "description": "Instagram Story Viewer Enhancement - Search and analyze your story viewers",
+  "version": "1.0.1",
+  "permissions": ["storage", "activeTab"],
+  "host_permissions": ["https://www.instagram.com/*"],
+  "content_scripts": [
+    {
+      "matches": ["https://www.instagram.com/*"],
+      "js": ["content-backend.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://www.instagram.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Storylister Settings"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["injected.js"],
+      "matches": ["https://www.instagram.com/*"]
+    }
+  ]
+}
+```
+
+> Your **popup** stays as-is; it pings `checkStoryViewer` which the backend now answers if the UI hasn’t yet, preserving existing behavior.&#x20;
+
+---
+
+## Why this keeps everything you want
+
+* **Pixel-perfect UI preserved.** We don’t touch your HTML/CSS or DOM structure at all. Your existing `content.js` keeps rendering the exact rail and controls you built.
+* **Scale via IndexedDB.** We still store the full viewer set in IDB (24h retention + 3-story limit). The localStorage mirror only exists to satisfy legacy UI expectations—it’s capped and pruned to avoid quota issues.
+* **Data flow fixed.** `injected.js` → posts `STORYLISTER_VIEWERS_CHUNK` → backend updates IDB + **mirrors panel\_* keys*\* → your current UI reads what it expects and renders immediately. &#x20;
+* **Order of scripts fixed.** Backend at `document_start`, UI at `document_idle`. No race conditions.
+
+---
+
+## Smoke test checklist (2 minutes)
+
+1. Load unpacked with these three files added/changed.
+
+2. Open your story → “Seen by”.
+
+3. **DevTools > Application > Storage > Local Storage**: verify keys:
+
+   * `panel_story_store` (has at most 3 story objects)
+   * `panel_viewer_cache` (≤ 5000 entries)
+   * `panel_global_seen` (array of ids)
+
+4. In **Console** type:
+
+   * `window.StorylisterCore && window.StorylisterCore.getState()` → shows current story id(s).
+
+5. Click **Refresh** in your UI rail; backend will auto-open “Seen by” and scroll for \~10s, pause.
+
+---
+
+## If anything still looks “off”
+
+* **Syntax error / unexpected token at line 1** means a bad paste (smart quotes, en-dashes) snuck in. Re-paste from the blocks above—ASCII only.
+* **UI doesn’t populate:** check that `panel_story_store` and `panel_viewer_cache` are non-empty in DevTools → Application → Local Storage. If empty, confirm `injected.js` loaded (look for console log: “Storylister: Network interceptor injected”).&#x20;
+* **Popup says not ready:** The popup sends `{action:'checkStoryViewer'}` to the tab; backend now responds even before the UI mounts.&#x20;
+
+---
+
+### Bottom line
+
+* **We’re not losing IndexedDB.** We’re keeping it and adding a lean mirroring layer for compatibility.
+* **What was missing** was the bridge to your legacy `panel_*` keys and guaranteed script order.
+* **The proposal above is production-ready**: it preserves your UI, fixes data flow, and scales.
+
+If you want, I can also produce a ZIP that includes **only** these three files (backend, injected, manifest) so you can drop them into your existing extension folder and reload—your `content.js`/UI and popup stay untouched.
