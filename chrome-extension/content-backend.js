@@ -209,6 +209,19 @@
     const msg = evt.data;
     if (!msg || typeof msg !== 'object') return;
 
+    // Only process data on our own stories
+    if (!isOwnStoryView()) return;
+    
+    // Block data collection on non-primary accounts in Free mode
+    const owner = detectStoryOwnerFromURL();
+    if (!Settings.cache.proMode && owner) {
+      const saved = Settings.cache.accountHandle;
+      if (saved && saved !== owner) {
+        // Don't process data for non-primary accounts
+        return;
+      }
+    }
+
     if (msg.type === 'STORYLISTER_VIEWERS_CHUNK' && msg.data) {
       const { mediaId, viewers, totalCount } = msg.data;
       const bucket = ensureBucket(mediaId || 'unknown');
@@ -239,6 +252,13 @@
   // Auto-open viewers (optional)
   // -----------------------------------
   function autoOpenIfAllowed() {
+    // Check if we're allowed to use the extension on this account
+    const owner = detectStoryOwnerFromURL();
+    if (shouldShowFreeToast(owner)) {
+      // Don't auto-open on non-primary accounts in Free mode
+      return;
+    }
+    
     if (!Settings.cache.autoOpen) return;
     if (!isOwnStoryView()) return;
 
@@ -266,7 +286,15 @@
 
     // Observe SPA navigations and DOM changes
     const mo = new MutationObserver(() => {
-      injectNetworkScriptOnce();
+      // Only inject network script if allowed on this account AND we're on our own story
+      if (!isOwnStoryView()) return; // Only work on our own stories
+      
+      const owner = detectStoryOwnerFromURL();
+      if (!Settings.cache.proMode && owner && Settings.cache.accountHandle && Settings.cache.accountHandle !== owner) {
+        // Don't inject on non-primary accounts in Free mode
+      } else {
+        injectNetworkScriptOnce();
+      }
 
       // Watch story id from URL
       const m = location.pathname.match(/\/stories\/[^\/]+\/(\d+)/);
@@ -315,7 +343,7 @@
   // -----------------------------------
   (async function init() {
     await Settings.load();
-    injectNetworkScriptOnce();
+    // Don't inject network script here - let the observer handle it with proper gating
     startObservers();
   })();
 })();

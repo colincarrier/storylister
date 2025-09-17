@@ -73,24 +73,22 @@
     return !!current && storyOwner === current;
   }
   
-  function canUseExtension() {
+  async function canUseExtension() {
     const current = detectActiveUsername();
     if (!current) return false;
     
-    // Load free account binding
-    if (!freeAccountUsername) {
-      freeAccountUsername = localStorage.getItem('storylister_free_account');
-    }
+    // Get settings from chrome.storage.sync
+    const settings = await loadSettingsSync();
     
-    // If no free account set yet, set it
-    if (!freeAccountUsername) {
-      freeAccountUsername = current;
-      localStorage.setItem('storylister_free_account', current);
-      return true;
-    }
+    // Check if Pro mode is enabled
+    if (settings.proMode) return true;
     
-    // Check if current account is the free account
-    return freeAccountUsername === current;
+    // For Free mode, check if this is the primary account
+    const saved = settings.accountHandle;
+    if (!saved) return true; // Will be set by backend on first use
+    
+    // Check if current account is the saved account
+    return saved === current;
   }
   
   function getAccountPrefix() {
@@ -137,8 +135,8 @@
   }
   
   // Auto-pause videos
-  function pauseVideos() {
-    const settings = JSON.parse(localStorage.getItem('storylister_settings') || '{}');
+  async function pauseVideos() {
+    const settings = await loadSettingsSync();
     if (settings.pauseVideos === false) return;
     
     document.querySelectorAll('video').forEach(video => {
@@ -851,11 +849,14 @@
   }
   
   // Show right rail
-  function showRightRail() {
+  async function showRightRail() {
     // Check if we can use the extension
-    if (!canUseExtension()) {
+    if (!(await canUseExtension())) {
       console.log('[Storylister] Cannot use extension on this account (Pro required for multiple accounts)');
-      showUpgradePrompt();
+      const settings = await loadSettingsSync();
+      if (settings.accountHandle) {
+        showUpgradePrompt(settings.accountHandle);
+      }
       return;
     }
     
@@ -898,14 +899,14 @@
   }
   
   // Show upgrade prompt
-  function showUpgradePrompt() {
+  function showUpgradePrompt(savedHandle) {
     const prompt = document.createElement('div');
     prompt.className = 'storylister-upgrade-prompt';
     prompt.innerHTML = `
       <div class="upgrade-content">
         <h3>Multiple Account Support</h3>
         <p>Storylister Free works with one Instagram account. Upgrade to Pro to use with multiple accounts.</p>
-        <p>Currently active on: <strong>@${freeAccountUsername}</strong></p>
+        <p>Currently active on: <strong>@${savedHandle}</strong></p>
         <button class="upgrade-close" onclick="this.parentElement.parentElement.remove()">OK</button>
       </div>
     `;
@@ -928,16 +929,16 @@
     });
     
     // Settings checkboxes
-    document.getElementById('sl-auto-open')?.addEventListener('change', (e) => {
-      const settings = JSON.parse(localStorage.getItem('storylister_settings') || '{}');
+    document.getElementById('sl-auto-open')?.addEventListener('change', async (e) => {
+      const settings = await loadSettingsSync();
       settings.autoOpen = e.target.checked;
-      localStorage.setItem('storylister_settings', JSON.stringify(settings));
+      chrome.storage.sync.set({ [SETTINGS_KEY]: settings });
     });
     
-    document.getElementById('sl-pause-videos')?.addEventListener('change', (e) => {
-      const settings = JSON.parse(localStorage.getItem('storylister_settings') || '{}');
+    document.getElementById('sl-pause-videos')?.addEventListener('change', async (e) => {
+      const settings = await loadSettingsSync();
       settings.pauseVideos = e.target.checked;
-      localStorage.setItem('storylister_settings', JSON.stringify(settings));
+      chrome.storage.sync.set({ [SETTINGS_KEY]: settings });
     });
     
     // Pro toggle
@@ -1034,13 +1035,13 @@
   }
   
   // Check if on stories page
-  function checkForStories() {
+  async function checkForStories() {
     const isStoriesPage = window.location.pathname.includes('/stories/');
     const isOwnStory = isOnOwnStory();
     
     if (isStoriesPage && isOwnStory && !isActive) {
       // Load settings to check if auto-open is enabled
-      const settings = JSON.parse(localStorage.getItem('storylister_settings') || '{}');
+      const settings = await loadSettingsSync();
       if (settings.autoOpen !== false) { // Default true
         showRightRail();
       }
@@ -1054,6 +1055,13 @@
     console.log('[Storylister] Data updated:', e.detail);
     loadViewersFromStorage();
     updateViewerList();
+  });
+  
+  // Listen for settings updates from chrome.storage
+  window.addEventListener('storylister:settings_updated', (e) => {
+    console.log('[Storylister] Settings updated:', e.detail);
+    // Re-check if we should show/hide based on new settings
+    checkForStories();
   });
   
   // Monitor URL changes
@@ -1407,13 +1415,13 @@
   }
   
   // Initialize when DOM is ready
-  function initialize() {
+  async function initialize() {
     console.log('[Storylister] Extension ready');
     
     // Load account-specific data
     currentUsername = detectActiveUsername();
-    freeAccountUsername = localStorage.getItem('storylister_free_account');
-    loadTaggedUsers();
+    const settings = await loadSettingsSync();
+    await loadTaggedUsers();
     
     // Inject styles
     injectStyles();
