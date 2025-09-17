@@ -122,7 +122,7 @@
   let currentFilters = {
     query: '',
     type: 'all',
-    sort: 'recent',
+    sort: 'recent', // 'recent', 'oldest', 'original'
     showTagged: false
   };
   let taggedUsers = new Set();
@@ -315,10 +315,18 @@
     }
 
     // Apply sorting
-    if (currentFilters.sort === 'oldest') {
-      filteredViewers.sort((a, b) => (a.timestamp || a.viewedAt) - (b.timestamp || b.viewedAt));
-    } else {
-      filteredViewers.sort((a, b) => (b.timestamp || b.viewedAt) - (a.timestamp || a.viewedAt));
+    switch (currentFilters.sort) {
+      case 'oldest':
+        filteredViewers.sort((a, b) => (a.viewedAt || a.capturedAt || 0) - (b.viewedAt || b.capturedAt || 0));
+        break;
+      case 'original':
+        // Preserve Instagram's original order
+        filteredViewers.sort((a, b) => (a.originalIndex || 0) - (b.originalIndex || 0));
+        break;
+      case 'recent':
+      default:
+        filteredViewers.sort((a, b) => (b.viewedAt || b.capturedAt || 0) - (a.viewedAt || a.capturedAt || 0));
+        break;
     }
 
     return filteredViewers;
@@ -381,6 +389,7 @@
                   // Handle both formats ([id, viewer] or just viewer)
                   const viewer = Array.isArray(item) ? item[1] : item;
                   
+                  const viewerIndex = Array.isArray(item) ? i : (viewer.originalIndex || i);
                   viewers.set(viewer.username, {
                     id: viewer.id || viewer.pk || viewer.username,
                     username: viewer.username || '',
@@ -392,7 +401,9 @@
                     isTagged: taggedUsers.has(viewer.username),
                     isNew: viewer.isNew || false,
                     reaction: viewer.reaction || viewer.reacted || null,
-                    viewedAt: viewer.viewedAt || viewer.timestamp || Date.now()
+                    originalIndex: viewer.originalIndex || viewerIndex,
+                    viewedAt: viewer.viewedAt || viewer.capturedAt || viewer.timestamp || Date.now(),
+                    capturedAt: viewer.capturedAt || Date.now()
                   });
                 });
                 resolve();
@@ -1141,10 +1152,18 @@
       updateViewerList();
     });
     
-    // Sort toggle
+    // Sort toggle - three-way: newest -> oldest -> original
     document.getElementById('sl-sort')?.addEventListener('click', (e) => {
-      currentFilters.sort = currentFilters.sort === 'recent' ? 'oldest' : 'recent';
-      e.target.textContent = currentFilters.sort === 'recent' ? '↓ Newest' : '↑ Oldest';
+      const sorts = ['recent', 'oldest', 'original'];
+      const labels = {
+        'recent': '↓ Newest',
+        'oldest': '↑ Oldest',
+        'original': '📝 Original'
+      };
+      
+      const currentIndex = sorts.indexOf(currentFilters.sort);
+      currentFilters.sort = sorts[(currentIndex + 1) % 3];
+      e.target.textContent = labels[currentFilters.sort];
       updateViewerList();
     });
     

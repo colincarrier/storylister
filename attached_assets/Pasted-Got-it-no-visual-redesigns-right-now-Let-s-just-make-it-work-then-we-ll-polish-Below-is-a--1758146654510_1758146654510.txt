@@ -1,0 +1,579 @@
+Got it—no visual redesigns right now. Let’s just make it **work**, then we’ll polish.
+
+Below is a **minimal, surgical patch set** that:
+
+* **Stops** the multi‑account popup from appearing on other people’s stories
+* **Auto‑opens** *Seen by* only on your own stories
+* **Pages fast** with the **End** key (no slow “gentle” scroll)
+* **Streams viewer chunks** to the panel so your list populates
+* **Adds 3‑way sorting** (Newest ▸ Oldest ▸ Original)
+* **Wires up** the **Manage Tags** and **Story to Story Insights** buttons so the existing modals actually open (no styling changes)
+* **Caches timestamps** we can reliably capture (when we first saw each viewer) and preserves **Instagram’s original order**
+* Keeps **IndexedDB** for scale later, but uses **localStorage** for this session so the panel updates instantly
+
+---
+
+## 0) One root cause you should fix first
+
+Your **manifest** currently injects **only `content.js`** as a content script. That means any “backend” logic (auto‑open, message bridge, etc.) that lives in another file never ran—hence the panel not receiving data or opening *Seen by*. Update it to register **both** content scripts (backend first) and expose `injected.js`.&#x20;
+
+---
+
+## 1) `manifest.json` – minimal fix
+
+**Replace** your `content_scripts` block with this (keep the rest of the file as-is):
+
+```json
+{
+  "content_scripts": [
+    {
+      "matches": ["https://www.instagram.com/*"],
+      "js": ["content-backend.js", "content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["injected.js"],
+      "matches": ["https://www.instagram.com/*"]
+    }
+  ]
+}
+```
+
+> Why: `content-backend.js` must run (to inject `injected.js`, auto‑open *Seen by*, bridge viewer data → storage → panel). Without this, auto‑open and data flow won’t work.
+
+---
+
+## 2) `content-backend.js` – own‑story detection, auto‑open, data bridge
+
+Add/replace the file with this **lean** version (no styling, no UI changes):
+
+```js
+// content-backend.js
+(() => {
+  'use strict';
+
+  // ---------------- Settings (storage) ----------------
+  const Settings = {
+    cache: { accountHandle: null, pro: false, autoOpen: true },
+    async load() {
+      try {
+        const s = await chrome.storage.sync.get(['accountHandle','pro','autoOpen']);
+        this.cache.accountHandle = s.accountHandle || null;
+        this.cache.pro = !!s.pro;
+        this.cache.autoOpen = s.autoOpen !== false;
+      } catch {}
+    },
+    async save(patch) {
+      Object.assign(this.cache, patch);
+      try { await chrome.storage.sync.set(patch); } catch {}
+    }
+  };
+
+  // ---------------- Helpers ----------------
+  const state = { currentStoryId: null, injected: false };
+
+  const getOwnerFromPath = () => {
+    const m = location.pathname.match(/\/stories\/([^\/]+)/);
+    return m ? decodeURIComponent(m[1]) : null;
+  };
+
+  const hasSeenByUI = () => (
+    !!document.querySelector('a[href*="/seen_by/"]') ||
+    Array.from(document.querySelectorAll('span,div'))
+      .some(el => /^seen by( \d+)?$/i.test((el.textContent || '').trim()))
+  );
+
+  const isOnStories = () => location.pathname.includes('/stories/');
+
+  // Only our own story: (1) we're in /stories/, (2) the "Seen by" UI exists,
+  // (3) if a primary account is set and not Pro, it must match the handle in the URL.
+  const isOwnStory = () => {
+    if (!isOnStories()) return false;
+    if (!hasSeenByUI()) return false;
+    const owner = getOwnerFromPath();
+    if (!owner) return false;
+
+    // First detection → set as primary if none saved
+    if (!Settings.cache.accountHandle) {
+      Settings.save({ accountHandle: owner });
+      return true;
+    }
+
+    // Free users work on one account; Pro users bypass this
+    if (!Settings.cache.pro && Settings.cache.accountHandle !== owner) return false;
+    return true;
+  };
+
+  // Inject page-level script once (fetch interceptor & fast pagination)
+  const ensureInjected = () => {
+    if (state.injected) return;
+    const s = document.createElement('script');
+    s.src = chrome.runtime.getURL('injected.js');
+    s.dataset.storylisterInjected = '1';
+    s.onload = () => s.remove();
+    (document.head || document.documentElement).appendChild(s);
+    state.injected = true;
+  };
+
+  // Find the clickable "Seen by" element
+  const findSeenByClickable = () => {
+    const a = document.querySelector('a[href*="/seen_by/"]');
+    if (a) return a;
+    const candidate = Array.from(document.querySelectorAll('span,div'))
+      .find(el => /^seen by( \d+)?$/i.test((el.textContent || '').trim()));
+    return candidate
+      ? (candidate.closest('[role="button"],[tabindex],button,a') || candidate)
+      : null;
+  };
+
+  // Auto-open viewers (no random timers; frame-aligned)
+  const autoOpenViewers = () => {
+    if (!Settings.cache.autoOpen) return;
+    if (!isOwnStory()) return;
+    if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+
+    const t = findSeenByClickable();
+    if (!t) return;
+    requestAnimationFrame(() => t.click());
+  };
+
+  // Receive viewer chunks from injected.js and mirror to localStorage
+  window.addEventListener('message', (evt) => {
+    if (evt.source !== window) return;
+    if (evt.data?.type !== 'STORYLISTER_VIEWERS_CHUNK') return;
+
+    const { mediaId, viewers, totalCount } = evt.data.data || {};
+    if (!mediaId || !Array.isArray(viewers)) return;
+
+    const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+    if (!store[mediaId]) store[mediaId] = { viewers: [], fetchedAt: Date.now() };
+
+    const present = new Set(store[mediaId].viewers.map(([k]) => k));
+    viewers.forEach((v) => {
+      const key = v.username || String(v.id || v.pk);
+      if (present.has(key)) return;
+      store[mediaId].viewers.push([key, {
+        id: String(v.id || v.pk || key),
+        username: v.username || key,
+        full_name: v.full_name || '',
+        profile_pic_url: v.profile_pic_url || '',
+        is_verified: !!v.is_verified,
+        originalIndex: typeof v.originalIndex === 'number'
+          ? v.originalIndex
+          : store[mediaId].viewers.length,
+        capturedAt: v.capturedAt || Date.now()
+      }]);
+      present.add(key);
+    });
+
+    store[mediaId].totalCount = totalCount ?? store[mediaId].totalCount;
+
+    try {
+      localStorage.setItem('panel_story_store', JSON.stringify(store));
+      window.dispatchEvent(new CustomEvent('storylister:data_updated', {
+        detail: { storyId: mediaId }
+      }));
+    } catch {}
+  });
+
+  // ---------------- Boot ----------------
+  const start = async () => {
+    await Settings.load();
+
+    const mo = new MutationObserver(() => {
+      const m = location.pathname.match(/\/stories\/[^\/]+\/(\d+)/);
+      const sid = m ? m[1] : null;
+      if (!sid) return;
+
+      if (sid !== state.currentStoryId) {
+        state.currentStoryId = sid;
+        if (isOwnStory()) {
+          ensureInjected();
+          autoOpenViewers();
+        }
+      }
+    });
+
+    mo.observe(document.documentElement, { childList: true, subtree: true });
+
+    // Initial try
+    if (isOnStories()) {
+      ensureInjected();
+      autoOpenViewers();
+    }
+  };
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', start);
+  } else {
+    start();
+  }
+})();
+```
+
+**What this fixes**
+
+* The **multi‑account popup will not show** unless it’s actually your story (we require the *Seen by* UI + matching owner handle).
+* *Seen by* **auto‑opens** once on your own story.
+* Viewer chunks are **mirrored to `localStorage.panel_story_store`** and we fire `storylister:data_updated` so your panel refreshes.
+
+---
+
+## 3) `injected.js` – fast pagination + viewer chunk extraction
+
+Drop in this **page‑level** script (no UI). It presses **End** repeatedly until the list stops growing and grabs viewers from Instagram JSON responses. No `Math.random()` anywhere.
+
+```js
+// injected.js
+(() => {
+  'use strict';
+
+  // --------- Intercept fetch to capture viewers ---------
+  const origFetch = window.fetch;
+  window.fetch = async function(...args) {
+    const res = await origFetch.apply(this, args);
+
+    try {
+      const url = (typeof args[0] === 'string') ? args[0] : args[0]?.url || '';
+      const clone = res.clone();
+
+      // Heuristic: viewer endpoints contain "viewers" or similar and return { users: [...] }
+      if (/viewers?|reel|story/i.test(url)) {
+        clone.json().then(json => {
+          if (!json) return;
+          const users = Array.isArray(json.users) ? json.users : null;
+          if (!users) return;
+
+          // Try to derive a story/media id from response or URL
+          const mediaId =
+            json.media_id ||
+            json.reel?.id ||
+            new URL(url, location.href).searchParams.get('story_media_id') ||
+            document.location.pathname.match(/\/stories\/[^/]+\/(\d+)/)?.[1];
+
+          if (!mediaId) return;
+
+          const viewers = users.map((u, idx) => ({
+            id: String(u.id || u.pk || idx),
+            username: u.username,
+            full_name: u.full_name,
+            profile_pic_url: u.profile_pic_url,
+            is_verified: !!u.is_verified,
+            // keep IG's original order and when we captured it
+            originalIndex: idx,
+            capturedAt: Date.now()
+          }));
+
+          window.postMessage({
+            type: 'STORYLISTER_VIEWERS_CHUNK',
+            data: {
+              mediaId,
+              viewers,
+              totalCount: json.user_count || json.total_viewer_count || users.length
+            }
+          }, '*');
+        }).catch(() => {});
+      }
+    } catch {}
+    return res;
+  };
+
+  // --------- Fast pagination by "End" key ---------
+  const scrollerInDialog = () => {
+    const dlg = document.querySelector('[role="dialog"]');
+    if (!dlg) return null;
+    // find the scrollable child if there is one
+    return dlg.querySelector('[style*="overflow-y"]') || dlg;
+  };
+
+  let paginating = false;
+  function fastPaginate() {
+    const el = scrollerInDialog();
+    if (!el) { paginating = false; return; }
+
+    let lastH = -1;
+    let stable = 0;
+
+    const tick = () => {
+      if (!document.contains(el)) { paginating = false; return; }
+
+      const h = el.scrollHeight;
+      stable = (h === lastH) ? (stable + 1) : 0;
+      lastH = h;
+
+      // End key + explicit bottom scroll (what a user would do)
+      const ev = new KeyboardEvent('keydown', { key: 'End', code: 'End', keyCode: 35, which: 35, bubbles: true, cancelable: true });
+      el.dispatchEvent(ev);
+      el.scrollTop = el.scrollHeight;
+
+      if (stable >= 3) { paginating = false; return; }
+      setTimeout(tick, 150);
+    };
+
+    if (!paginating) { paginating = true; tick(); }
+  }
+
+  const mo = new MutationObserver(() => {
+    const dlg = document.querySelector('[role="dialog"]');
+    if (dlg && !paginating) setTimeout(fastPaginate, 300);
+  });
+  mo.observe(document.documentElement, { childList: true, subtree: true });
+})();
+```
+
+**What this fixes**
+
+* **Very fast** pagination that matches a real user hammering **End**.
+* We **preserve IG’s original order** (`originalIndex`).
+* We **cache timestamps we control** (`capturedAt`: when we first saw the viewer). Instagram does **not** expose per‑viewer “viewed\_at” in the public story viewers payload; this `capturedAt` is the reliable timestamp we can cache now.
+
+---
+
+## 4) `content.js` – make the current UI actually work
+
+You said “no UI changes”—so we won’t change your HTML/CSS. We’ll just **wire it up**. The two most common reasons your buttons do nothing:
+
+1. The elements exist but the **listeners aren’t attached** yet (race/timing).
+2. The panel doesn’t **refresh** when new viewer chunks arrive.
+
+Also, your current file includes several “human delay” helpers that use `Math.random()` and fake mouse moves (this can look bot‑y and slow things down). We won’t touch the visuals, but we’ll add **deterministic** scheduling and the missing handlers.&#x20;
+
+Add the following **near the top** (once) to track state and sorting:
+
+```js
+// --- state + helpers (add near top of content.js) ---
+const SL = {
+  storyId: null,
+  viewers: new Map(),
+  sort: 'recent', // 'recent' | 'oldest' | 'original'
+};
+
+function currentStoryIdFromURL() {
+  return location.pathname.match(/\/stories\/[^/]+\/(\d+)/)?.[1] || null;
+}
+```
+
+### A) Panel data sync (populate the list)
+
+**Add** this function and call it from your existing render/update code (or drop it after your DOM is ready):
+
+```js
+function sl_loadViewersFromStorageAndRender() {
+  const sid = currentStoryIdFromURL();
+  if (!sid) return;
+
+  SL.storyId = sid;
+  SL.viewers.clear();
+
+  const raw = localStorage.getItem('panel_story_store');
+  if (!raw) return;
+
+  const store = JSON.parse(raw);
+  const pack = store[sid];
+  if (!pack || !Array.isArray(pack.viewers)) return;
+
+  pack.viewers.forEach(([_, v], i) => {
+    SL.viewers.set(v.username, {
+      id: v.id,
+      username: v.username,
+      full_name: v.full_name || '',
+      profile_pic_url: v.profile_pic_url || '',
+      is_verified: !!v.is_verified,
+      // keep both for sorting
+      originalIndex: (typeof v.originalIndex === 'number') ? v.originalIndex : i,
+      capturedAt: v.capturedAt || Date.now()
+    });
+  });
+
+  sl_renderViewerList(); // <- use your existing list render function if you have one
+}
+```
+
+**Listen** for updates (the backend fires this event whenever new chunks arrive):
+
+```js
+window.addEventListener('storylister:data_updated', sl_loadViewersFromStorageAndRender);
+```
+
+### B) 3‑way sorting (Newest ▸ Oldest ▸ Original)
+
+Add this **sort cycle** handler and call it from your current “sort” button’s click:
+
+```js
+function sl_cycleSort(e) {
+  const order = ['recent', 'oldest', 'original'];
+  SL.sort = order[(order.indexOf(SL.sort) + 1) % order.length];
+
+  // If your button displays the label, update it:
+  if (e?.target) {
+    const labels = { recent: '↓ Newest', oldest: '↑ Oldest', original: '📝 Original' };
+    e.target.textContent = labels[SL.sort];
+  }
+  sl_renderViewerList();
+}
+```
+
+Update your **render** to apply the chosen sort (use your own render; here’s the key bit to insert before you map to DOM):
+
+```js
+function sl_sortedViewersArray() {
+  const arr = Array.from(SL.viewers.values());
+  if (SL.sort === 'oldest') {
+    arr.sort((a, b) => (a.capturedAt) - (b.capturedAt));
+  } else if (SL.sort === 'original') {
+    arr.sort((a, b) => (a.originalIndex) - (b.originalIndex));
+  } else { // recent
+    arr.sort((a, b) => (b.capturedAt) - (a.capturedAt));
+  }
+  return arr;
+}
+
+// Example
+function sl_renderViewerList() {
+  const data = sl_sortedViewersArray();
+  // ... your existing DOM update using `data` ...
+}
+```
+
+### C) Wire up buttons (no styling changes)
+
+**Attach listeners** to the existing buttons—support your current ids *and* a data‑attribute fallback:
+
+```js
+function sl_bindPanelButtons() {
+  const sortBtn = document.querySelector('#sl-sort,[data-sl-action="sort"]');
+  if (sortBtn && !sortBtn.dataset.slBound) {
+    sortBtn.addEventListener('click', sl_cycleSort);
+    sortBtn.dataset.slBound = '1';
+  }
+
+  const tagsBtn = document.querySelector('#sl-manage-tags,[data-sl-action="manage-tags"]');
+  if (tagsBtn && !tagsBtn.dataset.slBound) {
+    tagsBtn.addEventListener('click', () => {
+      // If you already have a modal, trigger it; otherwise create a minimal one
+      const existing = document.getElementById('sl-manage-tags-modal');
+      if (existing) {
+        existing.style.display = 'block';
+        existing.removeAttribute('hidden');
+      } else {
+        sl_createMinimalManageTagsModal(); // minimal scaffolding, see below
+      }
+    });
+    tagsBtn.dataset.slBound = '1';
+  }
+
+  const insightsBtn = document.querySelector('#sl-insights,[data-sl-action="insights"]');
+  if (insightsBtn && !insightsBtn.dataset.slBound) {
+    insightsBtn.addEventListener('click', () => {
+      const existing = document.getElementById('sl-insights-modal');
+      if (existing) {
+        existing.style.display = 'block';
+        existing.removeAttribute('hidden');
+      } else {
+        sl_createMinimalInsightsModal(); // minimal scaffolding, see below
+      }
+    });
+    insightsBtn.dataset.slBound = '1';
+  }
+}
+```
+
+**Minimal scaffolds** (only if your current modals aren’t present yet; these are plain, functional, and easy to replace with your styled versions later):
+
+```js
+function sl_createMinimalManageTagsModal() {
+  const el = document.createElement('div');
+  el.id = 'sl-manage-tags-modal';
+  el.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:2147483647;display:flex;align-items:center;justify-content:center;';
+  el.innerHTML = `
+    <div style="background:#fff;border-radius:12px;max-height:80vh;width:520px;overflow:auto;padding:16px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <h3 style="margin:0">Manage Tagged Users</h3>
+        <button id="sl-manage-close" style="border:none;background:#eee;border-radius:6px;padding:6px 10px;cursor:pointer">Close</button>
+      </div>
+      <div id="sl-tag-list"></div>
+    </div>`;
+  document.body.appendChild(el);
+  el.querySelector('#sl-manage-close').addEventListener('click', () => el.remove());
+  // You can populate #sl-tag-list from SL.viewers here (no styling changes).
+}
+
+function sl_createMinimalInsightsModal() {
+  const el = document.createElement('div');
+  el.id = 'sl-insights-modal';
+  el.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:2147483647;display:flex;align-items:center;justify-content:center;';
+  el.innerHTML = `
+    <div style="background:#fff;border-radius:12px;max-height:80vh;width:640px;overflow:auto;padding:16px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <h3 style="margin:0">Story to Story Insights</h3>
+        <button id="sl-insights-close" style="border:none;background:#eee;border-radius:6px;padding:6px 10px;cursor:pointer">Close</button>
+      </div>
+      <div id="sl-insights-body">Insights coming from currently collected stories…</div>
+    </div>`;
+  document.body.appendChild(el);
+  el.querySelector('#sl-insights-close').addEventListener('click', () => el.remove());
+}
+```
+
+Finally, **ensure** the panel binds and renders when the page is ready and whenever new data arrives:
+
+```js
+function sl_bootOnceDOMReady() {
+  sl_bindPanelButtons();
+  sl_loadViewersFromStorageAndRender();
+}
+
+// If your code already has a DOM ready block, call these inside it.
+// Otherwise:
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', sl_bootOnceDOMReady);
+} else {
+  sl_bootOnceDOMReady();
+}
+
+// Keep rebinding in case the panel is rebuilt dynamically
+const slBindObserver = new MutationObserver(sl_bindPanelButtons);
+slBindObserver.observe(document.body || document.documentElement, { childList: true, subtree: true });
+```
+
+---
+
+## 5) About timestamps
+
+* Instagram’s viewer list **does not** provide a reliable per‑viewer *viewed\_at* in the standard responses the web app uses.
+* We therefore capture a **`capturedAt`** timestamp for each viewer **when we first see them** (from `injected.js`).
+* We also preserve **Instagram’s original order** via `originalIndex`, so your **“Original”** sort faithfully matches the IG list ordering.
+
+This gives you **Newest / Oldest / Original** today and leaves the door open to augment with true view times if Instagram ever exposes them via the web.
+
+---
+
+## 6) Quick test plan
+
+1. **Other people’s stories** → **no** popup/panel.
+2. Your own story → panel appears, *Seen by* **auto‑opens**, the viewer dialog **rapidly paginates** to the bottom.
+3. The right‑rail list **starts to populate** as chunks land.
+4. Click **Sort** → cycles **Newest → Oldest → Original** (list reorders).
+5. Click **Manage Tags** → **modal opens** (plain scaffold if your styled one isn’t present).
+6. Click **Story to Story Insights** → **modal opens** (plain scaffold if not present).
+
+---
+
+## Why these specific changes?
+
+* The **manifest** omission is the prime suspect for “nothing happens” (backend never executed).&#x20;
+* `content.js` currently contains “human‑like” randomization and synthetic mouse moves (not needed + can look bot‑y); we leave visuals alone and only add safe, deterministic wiring & sorting.&#x20;
+
+---
+
+### Hand‑off summary (what to give Claude)
+
+* **Update `manifest.json`** content\_scripts as shown.
+* **Replace `content-backend.js`** with the snippet above.
+* **Replace `injected.js`** with the snippet above.
+* **Patch `content.js`** with the state/helpers, the three added functions (`sl_loadViewersFromStorageAndRender`, `sl_cycleSort`, `sl_renderViewerList` integration), event bindings, and the two minimal modal scaffolds (only if your styled ones aren’t present yet).
+
+This keeps your current UI intact, fixes the blockers, and gets the feature set you asked for working now.

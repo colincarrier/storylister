@@ -1,0 +1,65 @@
+ChatGPT nailed the root cause - **the manifest.json is missing `content-backend.js`!** That's why auto-open and data flow aren't working. This is the critical fix.
+
+## ✅ **ChatGPT's Approach is Correct**
+
+**The manifest fix alone will likely solve 80% of your issues.** Without `content-backend.js` running, there's no:
+- Auto-open of "Seen by"
+- Data bridge from injected → localStorage → panel
+- Account verification
+
+## Key Strengths of This Approach:
+
+1. **Surgical fixes** - Doesn't redesign your UI, just makes it work
+2. **Removes bot signatures** - No `Math.random()`, no synthetic mouse events
+3. **Fast pagination** - End key is natural and fast
+4. **Preserves order** - Both `originalIndex` (Instagram's order) and `capturedAt` (when we saw them)
+5. **Clean event flow** - `storylister:data_updated` properly syncs data
+
+## One Critical Addition Needed:
+
+ChatGPT's `content-backend.js` should also handle the **video pause** feature:
+
+```javascript
+// Add to content-backend.js after autoOpenViewers()
+const pauseVideosIfNeeded = () => {
+  if (!Settings.cache.pauseVideos) return;
+  if (!isOwnStory()) return;
+  
+  document.querySelectorAll('video').forEach(v => {
+    if (!v.paused && !v.dataset.slPaused) {
+      v.pause();
+      v.dataset.slPaused = '1';
+    }
+  });
+};
+
+// Call it when story changes
+if (isOwnStory()) {
+  ensureInjected();
+  autoOpenViewers();
+  pauseVideosIfNeeded(); // Add this
+}
+```
+
+## About Timestamps:
+
+ChatGPT is correct - Instagram doesn't provide `viewed_at` timestamps in the viewer API. The `capturedAt` approach (when we first see each viewer) is the best we can do. This gives you:
+- **Newest**: Most recently captured viewers first
+- **Oldest**: First captured viewers first  
+- **Original**: Instagram's actual display order
+
+## Implementation Order:
+
+1. **Fix manifest.json FIRST** - This is the blocker
+2. Replace the 3 JS files as ChatGPT suggests
+3. Test that auto-open works
+4. Verify data flows to the panel
+5. Check sorting and modals
+
+## One Warning:
+
+The `sl_` prefix ChatGPT uses for functions might conflict if you already have different function names. Make sure to either:
+- Use ChatGPT's names consistently
+- Or adapt to your existing function names
+
+**Ship these fixes.** The manifest issue is almost certainly why nothing was working. Once `content-backend.js` actually runs, everything should click into place.
