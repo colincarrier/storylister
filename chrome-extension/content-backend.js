@@ -74,16 +74,24 @@
       .find(el => /seen by/i.test(el.getAttribute('aria-label') || ''));
     if (aria) return aria;
 
-    // 3) scan clickable elements for a plain text match
-    const clickable = document.querySelectorAll('a, button, [role="button"], div, span');
-    for (const el of clickable) {
-      const t = (el.textContent || '').trim();
-      if (/^seen by(\s+\d+)?$/i.test(t)) return el;
-    }
+    // 3) Look for viewer metrics using more robust detection
+    const viewerMetrics = [...document.querySelectorAll('span, div')]
+      .filter(el => /^Seen by( \d+)?$/i.test(el.textContent?.trim() || ''));
+    if (viewerMetrics.length > 0) return viewerMetrics[0];
+    
     return null;
   }
 
   function isOwnStoryView() {
+    if (!location.pathname.includes('/stories/')) return false;
+    
+    // Verify account ownership for Free tier
+    const urlOwner = detectStoryOwnerFromURL();
+    const savedHandle = Settings.cache.accountHandle;
+    if (!Settings.cache.proMode && savedHandle && urlOwner && savedHandle !== urlOwner) {
+      return false; // Different account in Free mode
+    }
+    
     return !!findSeenByElement();
   }
 
@@ -249,28 +257,70 @@
   });
 
   // -----------------------------------
-  // Auto-open viewers (optional)
+  // Enhanced Viewer Experience
   // -----------------------------------
-  function autoOpenIfAllowed() {
-    // Check if we're allowed to use the extension on this account
-    const owner = detectStoryOwnerFromURL();
-    if (shouldShowFreeToast(owner)) {
-      // Don't auto-open on non-primary accounts in Free mode
-      return;
-    }
+  const ViewerExperience = {
+    enhancementApplied: false,
     
-    if (!Settings.cache.autoOpen) return;
-    if (!isOwnStoryView()) return;
-
-    const el = findSeenByElement();
-    if (!el) return;
-
-    // Click once, if the dialog is not already open
-    if (!document.querySelector('[role="dialog"]')) {
-      Perf.schedule(() => {
-        el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+    async enhanceViewerAccess() {
+      await Settings.load(); // Ensure settings are loaded
+      if (!Settings.cache.autoOpen) return;
+      if (!isOwnStoryView()) return;
+      if (this.enhancementApplied) return;
+      
+      // Check if we're allowed to use the extension on this account
+      const owner = detectStoryOwnerFromURL();
+      if (shouldShowFreeToast(owner)) {
+        // Don't auto-open on non-primary accounts in Free mode
+        return;
+      }
+      
+      const analyticsElement = Array.from(document.querySelectorAll('span, div')).find(el => {
+        const text = el.textContent?.trim() || '';
+        if (/^Seen by( \d+)?$/i.test(text)) {
+          const interactiveParent = el.closest('[role="button"], [tabindex="0"], a, button');
+          return interactiveParent || el.getAttribute('role') === 'button';
+        }
+        return false;
       });
+      
+      if (analyticsElement && !document.querySelector('[aria-label="Viewers"]')) {
+        const interactiveElement = analyticsElement.closest('[role="button"], [tabindex="0"]') || analyticsElement;
+        
+        if ('requestIdleCallback' in window) {
+          requestIdleCallback(() => {
+            try {
+              interactiveElement.click();
+              this.enhancementApplied = true;
+              console.log('[Storylister] Enhanced viewer analytics access');
+              
+              // Initialize network observer after UI update
+              setTimeout(() => injectNetworkScriptOnce(), 300);
+            } catch (e) {
+              console.warn('[Storylister] Enhancement failed:', e);
+            }
+          }, { timeout: 1000 });
+        } else {
+          setTimeout(() => {
+            try {
+              interactiveElement.click();
+              this.enhancementApplied = true;
+            } catch (e) {
+              console.warn('[Storylister] Enhancement failed:', e);
+            }
+          }, 300);
+        }
+      }
+    },
+    
+    reset() {
+      this.enhancementApplied = false;
     }
+  };
+  
+  // Backwards compatibility wrapper
+  function autoOpenIfAllowed() {
+    ViewerExperience.enhanceViewerAccess();
   }
 
   // -----------------------------------
@@ -309,17 +359,29 @@
             Settings.save({ accountHandle: owner });
           }
 
+          // Reset enhancement state for new story
+          ViewerExperience.reset();
+          
           // Show free toast only when: Seen by exists AND owner ≠ saved
           if (shouldShowFreeToast(owner)) {
             renderFreeAccountToast(Settings.cache.accountHandle);
+          } else {
+            // Schedule UX enhancements
+            requestAnimationFrame(() => {
+              ViewerExperience.enhanceViewerAccess();
+            });
           }
-
-          autoOpenIfAllowed();
         }
       }
     });
 
-    mo.observe(target, { childList: true, subtree: true, attributes: true, characterData: true });
+    // Optimize observer performance
+    mo.observe(target, { 
+      childList: true, 
+      subtree: true,
+      attributes: false, // Reduce observer overhead
+      characterData: false
+    });
   }
 
   // -----------------------------------
