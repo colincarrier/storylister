@@ -193,8 +193,21 @@
     }
   }
   
+  // Debounce helper
+  function debounce(func, wait) {
+    let timeout;
+    return function executedFunction(...args) {
+      const later = () => {
+        clearTimeout(timeout);
+        func(...args);
+      };
+      clearTimeout(timeout);
+      timeout = setTimeout(later, wait);
+    };
+  }
+  
   // Mirror data to localStorage for UI compatibility
-  async function mirrorToLocalStorage() {
+  async function _mirrorToLocalStorage() {
     try {
       const storyOwner = extractStoryOwner();
       const checkpoint = await loadCheckpoint(storyOwner);
@@ -272,7 +285,7 @@
           totalCount: domViewerCount || currentViewers.size,
           storyIndex: storyMeta.current,
           storyTotal: storyMeta.total,
-          isComplete: domViewerCount && currentViewers.size >= domViewerCount
+          isComplete: domViewerCount != null ? currentViewers.size >= domViewerCount : false
         }
       }));
       
@@ -280,6 +293,9 @@
       console.error('[SL:backend] Error mirroring to localStorage:', error);
     }
   }
+  
+  // Debounced version to avoid excessive writes
+  const mirrorToLocalStorage = debounce(_mirrorToLocalStorage, 500);
   
   // Process viewer chunks from interceptor
   function processViewerChunk(data) {
@@ -516,7 +532,10 @@
   window.addEventListener('storylister:panel_opened', () => {
     const storyOwner = extractStoryOwner();
     if (storyOwner) {
+      console.log('[SL:backend] Panel opened, saving checkpoint for', storyOwner);
       saveCheckpoint(storyOwner);
+      // Reload data to update NEW flags
+      setTimeout(() => mirrorToLocalStorage(), 100);
     }
   });
   

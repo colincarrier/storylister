@@ -19,7 +19,7 @@
   
   // Override fetch - ONLY to observe responses, never to make requests
   window.fetch = async function(...args) {
-    const urlString = args[0]?.toString() || '';
+    const urlString = typeof args[0] === 'string' ? args[0] : args[0]?.url || '';
     
     // Call original fetch - we ONLY observe Instagram's own requests
     const response = await originalFetch.apply(this, args);
