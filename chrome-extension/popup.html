@@ -1,217 +1,47 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Storylister Settings</title>
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Storylister</title>
     <style>
-        body {
-            width: 320px;
-            min-height: 400px;
-            margin: 0;
-            padding: 0;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            background: #f9fafb;
-        }
-
-        .popup-container {
-            background: white;
-            border-radius: 8px;
-            margin: 12px;
-            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-            overflow: hidden;
-        }
-
-        .header {
-            background: linear-gradient(135deg, #8b5cf6 0%, #3b82f6 100%);
-            color: white;
-            padding: 16px;
-            text-align: center;
-        }
-
-        .header h1 {
-            margin: 0;
-            font-size: 18px;
-            font-weight: 600;
-        }
-
-        .header p {
-            margin: 4px 0 0 0;
-            font-size: 12px;
-            opacity: 0.9;
-        }
-
-        .content {
-            padding: 16px;
-        }
-
-        .status {
-            background: #f0f9ff;
-            border: 1px solid #0ea5e9;
-            border-radius: 6px;
-            padding: 12px;
-            margin-bottom: 16px;
-            text-align: center;
-        }
-
-        .status.active {
-            background: #f0fdf4;
-            border-color: #10b981;
-            color: #065f46;
-        }
-
-        .status.inactive {
-            background: #fef2f2;
-            border-color: #ef4444;
-            color: #991b1b;
-        }
-
-        .feature-list {
-            margin: 16px 0;
-        }
-
-        .feature-item {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            margin-bottom: 8px;
-            font-size: 14px;
-            color: #374151;
-        }
-
-        .feature-item .checkmark {
-            color: #10b981;
-            font-weight: bold;
-        }
-
-        .instructions {
-            background: #f9fafb;
-            border-radius: 6px;
-            padding: 12px;
-            margin: 16px 0;
-            font-size: 13px;
-            color: #6b7280;
-            line-height: 1.4;
-        }
-
-        .instructions strong {
-            color: #374151;
-        }
-
-        .buttons {
-            display: flex;
-            gap: 8px;
-            margin-top: 16px;
-        }
-
-        .btn {
-            flex: 1;
-            padding: 8px 12px;
-            border: none;
-            border-radius: 6px;
-            cursor: pointer;
-            font-size: 12px;
-            font-weight: 500;
-            transition: all 0.2s;
-        }
-
-        .btn-primary {
-            background: #8b5cf6;
-            color: white;
-        }
-
-        .btn-primary:hover {
-            background: #7c3aed;
-        }
-
-        .btn-secondary {
-            background: #f3f4f6;
-            color: #374151;
-            border: 1px solid #d1d5db;
-        }
-
-        .btn-secondary:hover {
-            background: #e5e7eb;
-        }
-
-        .footer {
-            padding: 12px 16px;
-            background: #f9fafb;
-            border-top: 1px solid #e5e7eb;
-            font-size: 11px;
-            color: #6b7280;
-            text-align: center;
-        }
-
-        .version {
-            margin-top: 8px;
-            opacity: 0.7;
-        }
-
-        #current-tab {
-            margin-top: 8px;
-            padding: 8px;
-            background: #f3f4f6;
-            border-radius: 4px;
-            font-size: 11px;
-            color: #6b7280;
-            word-break: break-all;
-        }
+      body { margin: 0; font: 13px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial; width: 340px; }
+      .wrap { padding: 14px; }
+      .h { font-weight: 700; margin-bottom: 8px; }
+      .row { display: flex; align-items: center; justify-content: space-between; margin: 8px 0; gap: 10px; }
+      .label { color: #333; }
+      input[type="text"] { width: 180px; padding: 6px 8px; border: 1px solid #ddd; border-radius: 8px; }
+      button { padding: 6px 10px; border: 0; border-radius: 8px; cursor: pointer; background: #8b5cf6; color: #fff; }
+      button:disabled { opacity: .5; cursor: default; }
+      .muted { color: #666; font-size: 12px; margin-top: 6px; }
+      .switch { display: inline-flex; align-items: center; gap: 6px; }
     </style>
-</head>
-<body>
-    <div class="popup-container">
-        <div class="header">
-            <h1>Storylister</h1>
-            <p>Instagram Story Viewer Enhancement</p>
-        </div>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="h">Storylister</div>
 
-        <div class="content">
-            <div class="status" id="extension-status">
-                <strong>Checking status...</strong>
-            </div>
+      <div class="row">
+        <div class="label">IG handle (auto-detected)</div>
+        <input id="sl-handle" type="text" placeholder="@your_handle" />
+        <button id="sl-erase">Erase</button>
+      </div>
+      <div class="muted">Erasing the handle will also erase your tags on the Free plan.</div>
 
-            <div class="feature-list">
-                <div class="feature-item">
-                    <span class="checkmark">✓</span>
-                    <span>Search story viewers in real-time</span>
-                </div>
-                <div class="feature-item">
-                    <span class="checkmark">✓</span>
-                    <span>Filter by followers, verified users</span>
-                </div>
-                <div class="feature-item">
-                    <span class="checkmark">✓</span>
-                    <span>Sort viewers by activity</span>
-                </div>
-                <div class="feature-item">
-                    <span class="checkmark">✓</span>
-                    <span>Capture snapshots & export data</span>
-                </div>
-            </div>
+      <div class="row">
+        <label class="switch">
+          <input id="sl-auto" type="checkbox" />
+          <span>Auto-open viewer list</span>
+        </label>
+      </div>
 
-            <div class="instructions">
-                <strong>How to use:</strong><br>
-                1. Navigate to any Instagram story<br>
-                2. Click "Seen by" to open the viewer list<br>
-                3. The Storylister panel will appear on the right<br>
-                4. Use search and filters to find specific viewers
-            </div>
-
-            <div id="current-tab"></div>
-
-            <div class="buttons">
-                <button class="btn btn-secondary" id="open-instagram">Open Instagram</button>
-                <button class="btn btn-primary" id="refresh-tab">Refresh Page</button>
-            </div>
-        </div>
-
-        <div class="footer">
-            Privacy-first • Local data only • No automation
-            <div class="version">v1.0.0</div>
-        </div>
+      <div class="row">
+        <label class="switch">
+          <input id="sl-pro" type="checkbox" />
+          <span>Pro mode (keep tags when switching accounts)</span>
+        </label>
+      </div>
     </div>
 
-    <script src="popup-simple.js"></script>
-</body>
+    <script src="popup.js"></script>
+  </body>
 </html>

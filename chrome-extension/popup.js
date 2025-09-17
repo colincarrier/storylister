@@ -1,62 +1,47 @@
-// Popup script for Storylister Chrome Extension
+// popup.js
+const SETTINGS_KEY = 'storylister_settings';
+const $ = (id) => document.getElementById(id);
 
-// Check if we're on Instagram
-function checkStatus() {
-    if (typeof chrome !== 'undefined' && chrome.tabs) {
-        chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
-            const currentTab = tabs[0];
-            const statusDiv = document.getElementById('extension-status');
-            const currentTabDiv = document.getElementById('current-tab');
-            
-            if (currentTab && currentTab.url && currentTab.url.includes('instagram.com')) {
-                statusDiv.className = 'status active';
-                statusDiv.innerHTML = '<strong>✓ Active on Instagram</strong><br>Ready to enhance your story viewing experience!';
-                
-                if (currentTab.url.includes('/stories/')) {
-                    statusDiv.innerHTML = '<strong>🎯 Story detected!</strong><br>Click "Seen by" to start using Storylister';
-                }
-            } else {
-                statusDiv.className = 'status inactive';
-                statusDiv.innerHTML = '<strong>⚠ Not on Instagram</strong><br>Navigate to Instagram to use Storylister';
-            }
-            
-            currentTabDiv.textContent = 'Current page: ' + (currentTab && currentTab.url ? currentTab.url : 'Unknown');
-        });
-    } else {
-        const statusDiv = document.getElementById('extension-status');
-        statusDiv.className = 'status active';
-        statusDiv.innerHTML = '<strong>Extension Loaded</strong><br>Navigate to Instagram stories to begin';
-    }
+function loadSettings() {
+  chrome.storage.sync.get([SETTINGS_KEY], (obj) => {
+    const s = obj[SETTINGS_KEY] || {};
+    $('sl-handle').value = s.accountHandle || '';
+    $('sl-auto').checked = !!s.autoOpen;
+    $('sl-pro').checked = !!s.proMode;
+  });
 }
 
-// Wait for DOM to load
-document.addEventListener('DOMContentLoaded', function() {
-    // Open Instagram in current tab
-    document.getElementById('open-instagram').addEventListener('click', function() {
-        if (typeof chrome !== 'undefined' && chrome.tabs) {
-            chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
-                chrome.tabs.update(tabs[0].id, {url: 'https://www.instagram.com'});
-                window.close();
-            });
-        }
-    });
+function save(partial) {
+  chrome.storage.sync.get([SETTINGS_KEY], (obj) => {
+    const next = { ...(obj[SETTINGS_KEY] || {}), ...partial };
+    chrome.storage.sync.set({ [SETTINGS_KEY]: next });
+  });
+}
 
-    // Refresh current tab
-    document.getElementById('refresh-tab').addEventListener('click', function() {
-        if (typeof chrome !== 'undefined' && chrome.tabs) {
-            chrome.tabs.query({active: true, currentWindow: true}, function(tabs) {
-                chrome.tabs.reload(tabs[0].id);
-                window.close();
-            });
-        }
-    });
-
-    // Check status when popup opens
-    checkStatus();
-    
-    // Update status when tab changes
-    if (typeof chrome !== 'undefined' && chrome.tabs) {
-        chrome.tabs.onUpdated.addListener(checkStatus);
-        chrome.tabs.onActivated.addListener(checkStatus);
-    }
+$('sl-handle').addEventListener('change', (e) => {
+  save({ accountHandle: (e.target.value || '').replace(/^@/, '') });
 });
+
+$('sl-auto').addEventListener('change', (e) => {
+  save({ autoOpen: !!e.target.checked });
+});
+
+$('sl-pro').addEventListener('change', (e) => {
+  save({ proMode: !!e.target.checked });
+});
+
+$('sl-erase').addEventListener('click', () => {
+  // Clear handle and (if Free) erase tags for that handle in the page context
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    const tabId = tabs[0]?.id;
+    if (!tabId) return;
+    chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => window.postMessage({ type: 'SL_CLEAR_ACCOUNT_HANDLE' }, '*')
+    });
+  });
+  save({ accountHandle: '' }); // also clear in sync storage
+  setTimeout(loadSettings, 200);
+});
+
+document.addEventListener('DOMContentLoaded', loadSettings);
