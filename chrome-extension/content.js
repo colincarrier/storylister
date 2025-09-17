@@ -19,6 +19,8 @@
   let taggedUsers = new Set();
   let isProMode = false;
   let pausedVideos = new Set();
+  let currentUsername = null;
+  let freeAccountUsername = null;
   
   // Custom tags for Pro mode
   const customTags = [
@@ -28,30 +30,73 @@
     { id: 'coworker', emoji: '💼', label: 'Coworker' }
   ];
   
-  // Load tagged users from localStorage
+  // ---------- Account Management ----------
+  function detectActiveUsername() {
+    // 1) From story URL: /stories/<username>/<id>
+    const m = location.pathname.match(/\/stories\/([^\/]+)(?:\/|$)/);
+    if (m) return m[1];
+
+    // 2) From profile link in header
+    const link = document.querySelector('a[href^="/"][href$="/"] img[alt*="profile picture"]')?.parentElement;
+    if (link?.getAttribute('href')) return link.getAttribute('href').replace(/\//g, '') || null;
+
+    // 3) From profile picture alt text
+    const img = Array.from(document.querySelectorAll('img[alt]'))
+      .find(el => /'s profile picture$/.test(el.alt));
+    if (img) return img.alt.replace(/'s profile picture$/, '');
+
+    return null;
+  }
+  
+  function isOnOwnStory() {
+    const m = location.pathname.match(/\/stories\/([^\/]+)\//);
+    if (!m) return false;
+    const storyOwner = m[1];
+    const current = detectActiveUsername();
+    currentUsername = current;
+    return !!current && storyOwner === current;
+  }
+  
+  function canUseExtension() {
+    const current = detectActiveUsername();
+    if (!current) return false;
+    
+    // Load free account binding
+    if (!freeAccountUsername) {
+      freeAccountUsername = localStorage.getItem('storylister_free_account');
+    }
+    
+    // If no free account set yet, set it
+    if (!freeAccountUsername) {
+      freeAccountUsername = current;
+      localStorage.setItem('storylister_free_account', current);
+      return true;
+    }
+    
+    // Check if current account is the free account
+    return freeAccountUsername === current;
+  }
+  
+  function getAccountPrefix() {
+    const username = detectActiveUsername() || 'default';
+    return `sl_${username}_`;
+  }
+  
+  // Load tagged users from localStorage (account-specific)
   function loadTaggedUsers() {
     try {
-      const stored = localStorage.getItem('storylister_tagged_users');
+      const prefix = getAccountPrefix();
+      const stored = localStorage.getItem(prefix + 'tagged_users');
       taggedUsers = stored ? new Set(JSON.parse(stored)) : new Set();
     } catch (e) {
       taggedUsers = new Set();
     }
   }
   
-  // Save tagged users to localStorage
+  // Save tagged users to localStorage (account-specific)
   function saveTaggedUsers() {
-    localStorage.setItem('storylister_tagged_users', JSON.stringify(Array.from(taggedUsers)));
-  }
-  
-  // Inject the network interceptor
-  function injectInterceptor() {
-    const script = document.createElement('script');
-    script.src = chrome.runtime.getURL('injected.js');
-    script.onload = function() {
-      this.remove();
-    };
-    (document.head || document.documentElement).appendChild(script);
-    console.log('[Storylister] Injected network interceptor');
+    const prefix = getAccountPrefix();
+    localStorage.setItem(prefix + 'tagged_users', JSON.stringify(Array.from(taggedUsers)));
   }
   
   // Format time ago
@@ -69,6 +114,9 @@
   
   // Auto-pause videos
   function pauseVideos() {
+    const settings = JSON.parse(localStorage.getItem('storylister_settings') || '{}');
+    if (settings.pauseVideos === false) return;
+    
     document.querySelectorAll('video').forEach(video => {
       if (!video.paused) {
         video.pause();
@@ -174,8 +222,8 @@
               isFollowing: viewer.follows_viewer || false,
               isTagged: taggedUsers.has(viewer.username),
               isNew: viewer.isNew || false,
-              reaction: viewer.reaction || null,
-              viewedAt: viewer.timestamp || Date.now()
+              reaction: viewer.reaction || viewer.reacted || null,
+              viewedAt: viewer.viewedAt || viewer.timestamp || Date.now()
             });
           });
           
@@ -259,9 +307,13 @@
     }
     
     // Update stats
-    document.getElementById('sl-viewer-count').textContent = totalViewers;
-    document.getElementById('sl-verified-count').textContent = totalVerified;
-    document.getElementById('sl-tagged-count').textContent = `${taggedInCurrentStory}/${taggedUsers.size}`;
+    const viewerCount = document.getElementById('sl-viewer-count');
+    const verifiedCount = document.getElementById('sl-verified-count');
+    const taggedCount = document.getElementById('sl-tagged-count');
+    
+    if (viewerCount) viewerCount.textContent = totalViewers;
+    if (verifiedCount) verifiedCount.textContent = totalVerified;
+    if (taggedCount) taggedCount.textContent = `${taggedInCurrentStory}/${taggedUsers.size}`;
     
     // Update filtered count with DOM total if available
     let countText = `${filteredViewers.length} viewers`;
@@ -271,7 +323,8 @@
     if (newViewersCount > 0) {
       countText += ` (${newViewersCount} new)`;
     }
-    document.getElementById('sl-filtered-count').textContent = countText;
+    const filteredCount = document.getElementById('sl-filtered-count');
+    if (filteredCount) filteredCount.textContent = countText;
     
     // Clear and rebuild list
     listElement.innerHTML = '';
@@ -354,11 +407,23 @@
               <span>Storylister</span>
             </div>
             <div class="storylister-header-actions">
+              <button id="sl-settings-btn" class="storylister-settings-btn" title="Settings">⚙️</button>
               <button id="sl-pro-toggle" class="storylister-pro-toggle">
                 ${isProMode ? 'Pro' : 'Free'}
               </button>
               <button id="sl-close" class="storylister-close">×</button>
             </div>
+          </div>
+          
+          <div class="storylister-settings-dropdown" id="sl-settings-dropdown" style="display: none;">
+            <label class="settings-toggle">
+              <input type="checkbox" id="sl-auto-open" checked>
+              <span>Auto-open panel on your stories</span>
+            </label>
+            <label class="settings-toggle">
+              <input type="checkbox" id="sl-pause-videos" checked>
+              <span>Pause videos when panel opens</span>
+            </label>
           </div>
           
           <div class="storylister-story-section">
@@ -427,7 +492,7 @@
           
           <div class="storylister-bottom-sections">
             <div class="bottom-section">
-              <button class="storylister-manage-tags">
+              <button class="storylister-manage-tags" id="sl-manage-tags">
                 🏷️ Manage Tags
               </button>
             </div>
@@ -445,8 +510,331 @@
     return rail;
   }
   
+  // Create manage tags modal
+  function createManageTagsModal() {
+    const modal = document.createElement('div');
+    modal.className = 'storylister-manage-tags-modal';
+    modal.id = 'storylister-tags-modal';
+    modal.innerHTML = `
+      <div class="storylister-modal-header">
+        <h3 style="margin: 0; font-size: 18px;">Manage Tagged Users</h3>
+        <button class="storylister-close" id="sl-tags-close" style="position: absolute; top: 20px; right: 20px;">×</button>
+      </div>
+      <div class="storylister-modal-content" id="sl-tags-list">
+        <!-- Tagged users will be listed here -->
+      </div>
+    `;
+    document.body.appendChild(modal);
+    return modal;
+  }
+  
+  // Show manage tags modal
+  function showManageTagsModal() {
+    let modal = document.getElementById('storylister-tags-modal');
+    if (!modal) {
+      modal = createManageTagsModal();
+      
+      // Setup close button
+      document.getElementById('sl-tags-close')?.addEventListener('click', () => {
+        modal.classList.remove('active');
+      });
+    }
+    
+    // Populate tagged users
+    const listEl = document.getElementById('sl-tags-list');
+    if (!listEl) return;
+    
+    if (taggedUsers.size === 0) {
+      listEl.innerHTML = '<div style="text-align: center; color: #9ca3af;">No tagged users yet</div>';
+    } else {
+      listEl.innerHTML = '';
+      taggedUsers.forEach(username => {
+        const itemEl = document.createElement('div');
+        itemEl.className = 'storylister-tag-item';
+        itemEl.innerHTML = `
+          <span class="storylister-tag-username">@${username}</span>
+          <button class="storylister-tag-remove" data-username="${username}">Remove</button>
+        `;
+        listEl.appendChild(itemEl);
+      });
+      
+      // Add remove listeners
+      listEl.querySelectorAll('.storylister-tag-remove').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          const username = e.target.dataset.username;
+          taggedUsers.delete(username);
+          saveTaggedUsers();
+          showManageTagsModal(); // Refresh
+          updateViewerList(); // Update main list
+        });
+      });
+    }
+    
+    modal.classList.add('active');
+  }
+  
+  // Create Story Insights Modal
+  function createStoryInsightsModal() {
+    const modal = document.createElement('div');
+    modal.className = 'storylister-insights-modal';
+    modal.id = 'storylister-insights-modal';
+    modal.innerHTML = `
+      <div class="storylister-modal-overlay" id="sl-insights-overlay"></div>
+      <div class="storylister-modal-container">
+        <div class="storylister-modal-header">
+          <h2 style="margin: 0; font-size: 20px; font-weight: 600;">📊 Story to Story Insights</h2>
+          <button class="storylister-close" id="sl-insights-close">×</button>
+        </div>
+        <div class="storylister-insights-content">
+          <div class="insights-summary">
+            <h3>Current Session Analytics</h3>
+            <div class="insights-grid">
+              <div class="insight-card">
+                <div class="insight-value" id="total-stories-viewed">0</div>
+                <div class="insight-label">Stories Analyzed</div>
+              </div>
+              <div class="insight-card">
+                <div class="insight-value" id="total-unique-viewers">0</div>
+                <div class="insight-label">Unique Viewers</div>
+              </div>
+              <div class="insight-card">
+                <div class="insight-value" id="avg-viewers-per-story">0</div>
+                <div class="insight-label">Avg Viewers/Story</div>
+              </div>
+              <div class="insight-card">
+                <div class="insight-value" id="viewer-retention">0%</div>
+                <div class="insight-label">Viewer Retention</div>
+              </div>
+            </div>
+          </div>
+          
+          <div class="insights-breakdown">
+            <h3>Story Breakdown</h3>
+            <div id="story-breakdown-list" class="story-list">
+              <!-- Story data will be populated here -->
+            </div>
+          </div>
+          
+          <div class="insights-viewers">
+            <h3>Top Engaged Viewers</h3>
+            <div id="top-viewers-list" class="viewers-analysis">
+              <!-- Top viewers will be listed here -->
+            </div>
+          </div>
+          
+          <div class="insights-footer">
+            <button class="export-insights-btn" id="export-insights">
+              💾 Export Insights Data
+            </button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    return modal;
+  }
+  
+  // Calculate and show insights
+  function showStoryInsights() {
+    let modal = document.getElementById('storylister-insights-modal');
+    if (!modal) {
+      modal = createStoryInsightsModal();
+      
+      // Setup close handlers
+      document.getElementById('sl-insights-close')?.addEventListener('click', () => {
+        modal.style.display = 'none';
+      });
+      document.getElementById('sl-insights-overlay')?.addEventListener('click', () => {
+        modal.style.display = 'none';
+      });
+      
+      // Export button
+      document.getElementById('export-insights')?.addEventListener('click', exportInsights);
+    }
+    
+    // Get all story data from localStorage
+    const storyStore = localStorage.getItem('panel_story_store');
+    const allStories = storyStore ? JSON.parse(storyStore) : {};
+    
+    // Calculate metrics
+    const storyIds = Object.keys(allStories);
+    const totalStories = storyIds.length;
+    const allViewers = new Set();
+    const viewerFrequency = new Map();
+    let totalViewerCount = 0;
+    
+    // Process each story
+    storyIds.forEach(storyId => {
+      const story = allStories[storyId];
+      if (story.viewers) {
+        story.viewers.forEach(([compositeId, viewer]) => {
+          allViewers.add(viewer.username);
+          totalViewerCount++;
+          
+          // Track viewer frequency
+          const freq = viewerFrequency.get(viewer.username) || {
+            username: viewer.username,
+            displayName: viewer.full_name || viewer.username,
+            count: 0,
+            stories: [],
+            isVerified: viewer.is_verified
+          };
+          freq.count++;
+          freq.stories.push(storyId);
+          viewerFrequency.set(viewer.username, freq);
+        });
+      }
+    });
+    
+    const uniqueViewers = allViewers.size;
+    const avgViewers = totalStories > 0 ? Math.round(totalViewerCount / totalStories) : 0;
+    
+    // Calculate retention (viewers who viewed multiple stories)
+    const loyalViewers = Array.from(viewerFrequency.values()).filter(v => v.count > 1).length;
+    const retention = uniqueViewers > 0 ? Math.round((loyalViewers / uniqueViewers) * 100) : 0;
+    
+    // Update summary metrics
+    document.getElementById('total-stories-viewed').textContent = totalStories;
+    document.getElementById('total-unique-viewers').textContent = uniqueViewers;
+    document.getElementById('avg-viewers-per-story').textContent = avgViewers;
+    document.getElementById('viewer-retention').textContent = retention + '%';
+    
+    // Story breakdown
+    const breakdownList = document.getElementById('story-breakdown-list');
+    if (breakdownList) {
+      breakdownList.innerHTML = '';
+      
+      if (storyIds.length === 0) {
+        breakdownList.innerHTML = '<div class="no-data">No story data available yet. View some stories first!</div>';
+      } else {
+        storyIds.forEach((storyId, index) => {
+          const story = allStories[storyId];
+          const viewerCount = story.viewers ? story.viewers.length : 0;
+          const newCount = story.viewers ? story.viewers.filter(([,v]) => v.isNew).length : 0;
+          
+          const storyEl = document.createElement('div');
+          storyEl.className = 'story-item';
+          storyEl.innerHTML = `
+            <div class="story-number">Story ${index + 1}</div>
+            <div class="story-stats">
+              <span>${viewerCount} viewers</span>
+              ${newCount > 0 ? `<span class="new-badge">${newCount} new</span>` : ''}
+              <span class="story-time">${formatTimeAgo(story.fetchedAt || Date.now())}</span>
+            </div>
+          `;
+          breakdownList.appendChild(storyEl);
+        });
+      }
+    }
+    
+    // Top engaged viewers
+    const topViewersList = document.getElementById('top-viewers-list');
+    if (topViewersList) {
+      topViewersList.innerHTML = '';
+      
+      const sortedViewers = Array.from(viewerFrequency.values())
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 10);
+      
+      if (sortedViewers.length === 0) {
+        topViewersList.innerHTML = '<div class="no-data">No viewer data yet</div>';
+      } else {
+        sortedViewers.forEach(viewer => {
+          const viewerEl = document.createElement('div');
+          viewerEl.className = 'engaged-viewer';
+          viewerEl.innerHTML = `
+            <div class="viewer-info">
+              <span class="viewer-name">@${viewer.username}</span>
+              ${viewer.isVerified ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="#1877F2" style="display: inline; vertical-align: middle;"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>' : ''}
+              <span class="viewer-display">${viewer.displayName}</span>
+            </div>
+            <div class="viewer-engagement">
+              <span class="story-count">${viewer.count} ${viewer.count === 1 ? 'story' : 'stories'}</span>
+              <div class="engagement-bar" style="width: ${Math.min((viewer.count / totalStories) * 100, 100)}%"></div>
+            </div>
+          `;
+          topViewersList.appendChild(viewerEl);
+        });
+      }
+    }
+    
+    modal.style.display = 'block';
+  }
+  
+  // Export insights data
+  function exportInsights() {
+    const storyStore = localStorage.getItem('panel_story_store');
+    const allStories = storyStore ? JSON.parse(storyStore) : {};
+    
+    const insightsData = {
+      exportDate: new Date().toISOString(),
+      account: currentUsername,
+      summary: {
+        totalStories: Object.keys(allStories).length,
+        totalViewers: 0,
+        uniqueViewers: new Set()
+      },
+      stories: [],
+      viewerEngagement: {}
+    };
+    
+    // Process stories
+    Object.entries(allStories).forEach(([storyId, story], index) => {
+      const viewers = story.viewers || [];
+      insightsData.summary.totalViewers += viewers.length;
+      
+      viewers.forEach(([, viewer]) => {
+        insightsData.summary.uniqueViewers.add(viewer.username);
+        
+        if (!insightsData.viewerEngagement[viewer.username]) {
+          insightsData.viewerEngagement[viewer.username] = {
+            username: viewer.username,
+            displayName: viewer.full_name || viewer.username,
+            storiesViewed: 0,
+            isVerified: viewer.is_verified || false,
+            reactions: []
+          };
+        }
+        insightsData.viewerEngagement[viewer.username].storiesViewed++;
+        if (viewer.reaction) {
+          insightsData.viewerEngagement[viewer.username].reactions.push(viewer.reaction);
+        }
+      });
+      
+      insightsData.stories.push({
+        storyNumber: index + 1,
+        storyId: storyId,
+        viewerCount: viewers.length,
+        timestamp: story.fetchedAt,
+        viewers: viewers.map(([, v]) => ({
+          username: v.username,
+          displayName: v.full_name,
+          isNew: v.isNew || false,
+          reaction: v.reaction || null
+        }))
+      });
+    });
+    
+    insightsData.summary.uniqueViewers = insightsData.summary.uniqueViewers.size;
+    
+    const blob = new Blob([JSON.stringify(insightsData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `storylister_insights_${currentUsername}_${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+  
   // Show right rail
   function showRightRail() {
+    // Check if we can use the extension
+    if (!canUseExtension()) {
+      console.log('[Storylister] Cannot use extension on this account (Pro required for multiple accounts)');
+      showUpgradePrompt();
+      return;
+    }
+    
     if (!rightRail) {
       rightRail = createRightRail();
       setupEventListeners();
@@ -469,11 +857,6 @@
     // Notify backend that panel opened
     window.dispatchEvent(new CustomEvent('storylister:panel_opened'));
     
-    // Update checkpoint
-    if (window.StorylisterCore) {
-      window.StorylisterCore.updateCheckpoint();
-    }
-    
     // Load viewers
     loadViewersFromStorage();
     updateViewerList();
@@ -490,10 +873,48 @@
     resumeVideos();
   }
   
+  // Show upgrade prompt
+  function showUpgradePrompt() {
+    const prompt = document.createElement('div');
+    prompt.className = 'storylister-upgrade-prompt';
+    prompt.innerHTML = `
+      <div class="upgrade-content">
+        <h3>Multiple Account Support</h3>
+        <p>Storylister Free works with one Instagram account. Upgrade to Pro to use with multiple accounts.</p>
+        <p>Currently active on: <strong>@${freeAccountUsername}</strong></p>
+        <button class="upgrade-close" onclick="this.parentElement.parentElement.remove()">OK</button>
+      </div>
+    `;
+    document.body.appendChild(prompt);
+    setTimeout(() => prompt.remove(), 5000);
+  }
+  
   // Setup event listeners
   function setupEventListeners() {
     // Close button
     document.getElementById('sl-close')?.addEventListener('click', hideRightRail);
+    
+    // Settings toggle
+    const settingsBtn = document.getElementById('sl-settings-btn');
+    const settingsDropdown = document.getElementById('sl-settings-dropdown');
+    
+    settingsBtn?.addEventListener('click', (e) => {
+      e.stopPropagation();
+      settingsDropdown.style.display = settingsDropdown.style.display === 'none' ? 'block' : 'none';
+    });
+    
+    // Settings checkboxes
+    document.getElementById('sl-auto-open')?.addEventListener('change', (e) => {
+      const settings = JSON.parse(localStorage.getItem('storylister_settings') || '{}');
+      settings.autoOpen = e.target.checked;
+      localStorage.setItem('storylister_settings', JSON.stringify(settings));
+    });
+    
+    document.getElementById('sl-pause-videos')?.addEventListener('change', (e) => {
+      const settings = JSON.parse(localStorage.getItem('storylister_settings') || '{}');
+      settings.pauseVideos = e.target.checked;
+      localStorage.setItem('storylister_settings', JSON.stringify(settings));
+    });
     
     // Pro toggle
     document.getElementById('sl-pro-toggle')?.addEventListener('click', (e) => {
@@ -543,10 +964,10 @@
     document.getElementById('sl-export')?.addEventListener('click', exportData);
     
     // Insights button
-    document.getElementById('sl-insights')?.addEventListener('click', () => {
-      console.log('[Storylister] Story insights clicked - feature coming soon');
-      alert('Story to Story Insights - Coming in next update!');
-    });
+    document.getElementById('sl-insights')?.addEventListener('click', showStoryInsights);
+    
+    // Manage tags button
+    document.getElementById('sl-manage-tags')?.addEventListener('click', showManageTagsModal);
     
     // Tag clicks (delegated)
     document.getElementById('sl-list')?.addEventListener('click', (e) => {
@@ -579,15 +1000,27 @@
         }
       }
     });
+    
+    // Close dropdowns on outside click
+    document.addEventListener('click', () => {
+      if (settingsDropdown) {
+        settingsDropdown.style.display = 'none';
+      }
+    });
   }
   
   // Check if on stories page
   function checkForStories() {
     const isStoriesPage = window.location.pathname.includes('/stories/');
+    const isOwnStory = isOnOwnStory();
     
-    if (isStoriesPage && !isActive) {
-      showRightRail();
-    } else if (!isStoriesPage && isActive) {
+    if (isStoriesPage && isOwnStory && !isActive) {
+      // Load settings to check if auto-open is enabled
+      const settings = JSON.parse(localStorage.getItem('storylister_settings') || '{}');
+      if (settings.autoOpen !== false) { // Default true
+        showRightRail();
+      }
+    } else if ((!isStoriesPage || !isOwnStory) && isActive) {
       hideRightRail();
     }
   }
@@ -609,49 +1042,370 @@
   }, 1000);
   
   // Add styles for new elements
-  const style = document.createElement('style');
-  style.textContent = `
-    .viewer-reaction {
-      margin-left: 6px;
-      font-size: 14px;
-    }
+  function injectStyles() {
+    const style = document.createElement('style');
+    style.textContent = `
+      .viewer-reaction {
+        margin-left: 6px;
+        font-size: 14px;
+      }
+      
+      .viewer-new-badge {
+        display: inline-block;
+        background: #10b981;
+        color: white;
+        font-size: 10px;
+        font-weight: 600;
+        padding: 2px 4px;
+        border-radius: 3px;
+        margin-left: 6px;
+        text-transform: uppercase;
+      }
+      
+      .storylister-empty {
+        text-align: center;
+        padding: 40px 20px;
+        color: #9ca3af;
+      }
+      
+      .storylister-empty-icon {
+        font-size: 48px;
+        margin-bottom: 12px;
+      }
+      
+      .storylister-empty-text {
+        font-size: 14px;
+      }
+      
+      .storylister-settings-btn {
+        background: none;
+        border: none;
+        font-size: 18px;
+        cursor: pointer;
+        padding: 4px;
+      }
+      
+      .storylister-settings-dropdown {
+        position: absolute;
+        top: 100%;
+        right: 10px;
+        background: white;
+        border: 1px solid #e5e7eb;
+        border-radius: 8px;
+        padding: 12px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        z-index: 1000;
+        min-width: 200px;
+      }
+      
+      .settings-toggle {
+        display: flex;
+        align-items: center;
+        margin-bottom: 8px;
+        cursor: pointer;
+      }
+      
+      .settings-toggle input {
+        margin-right: 8px;
+      }
+      
+      .settings-toggle span {
+        font-size: 14px;
+        color: #4b5563;
+      }
+      
+      .storylister-upgrade-prompt {
+        position: fixed;
+        top: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: white;
+        border: 2px solid #8b5cf6;
+        border-radius: 12px;
+        padding: 20px;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        z-index: 100002;
+      }
+      
+      .upgrade-content {
+        text-align: center;
+      }
+      
+      .upgrade-close {
+        background: #8b5cf6;
+        color: white;
+        border: none;
+        padding: 8px 20px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-weight: 600;
+        margin-top: 10px;
+      }
+      
+      /* Manage Tags Modal Styles */
+      .storylister-manage-tags-modal {
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        background: white;
+        border-radius: 12px;
+        box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+        z-index: 100001;
+        width: 420px;
+        max-height: 500px;
+        display: none;
+      }
+      
+      .storylister-manage-tags-modal.active {
+        display: block;
+      }
+      
+      .storylister-modal-header {
+        padding: 20px;
+        border-bottom: 1px solid #e5e7eb;
+        position: relative;
+      }
+      
+      .storylister-modal-content {
+        padding: 20px;
+        max-height: 350px;
+        overflow-y: auto;
+      }
+      
+      .storylister-tag-item {
+        display: flex;
+        align-items: center;
+        padding: 12px;
+        margin-bottom: 8px;
+        background: #f9fafb;
+        border-radius: 8px;
+        transition: background 0.2s;
+      }
+      
+      .storylister-tag-item:hover {
+        background: #f3f4f6;
+      }
+      
+      .storylister-tag-username {
+        flex: 1;
+        font-weight: 500;
+        color: #111827;
+      }
+      
+      .storylister-tag-remove {
+        background: #ef4444;
+        color: white;
+        border: none;
+        padding: 5px 10px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 12px;
+        transition: background 0.2s;
+      }
+      
+      .storylister-tag-remove:hover {
+        background: #dc2626;
+      }
+      
+      /* Story Insights Modal Styles */
+      .storylister-insights-modal {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        z-index: 100000;
+        display: none;
+      }
+      
+      .storylister-modal-overlay {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0, 0, 0, 0.5);
+      }
+      
+      .storylister-modal-container {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        background: white;
+        border-radius: 16px;
+        width: 600px;
+        max-height: 80vh;
+        overflow: hidden;
+        box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+      }
+      
+      .storylister-insights-content {
+        padding: 24px;
+        max-height: calc(80vh - 70px);
+        overflow-y: auto;
+      }
+      
+      .insights-grid {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        gap: 16px;
+        margin: 20px 0;
+      }
+      
+      .insight-card {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 20px;
+        border-radius: 12px;
+        text-align: center;
+      }
+      
+      .insight-value {
+        font-size: 32px;
+        font-weight: 700;
+        margin-bottom: 8px;
+      }
+      
+      .insight-label {
+        font-size: 14px;
+        opacity: 0.9;
+      }
+      
+      .story-item {
+        display: flex;
+        justify-content: space-between;
+        padding: 12px;
+        background: #f9fafb;
+        border-radius: 8px;
+        margin-bottom: 8px;
+      }
+      
+      .story-number {
+        font-weight: 600;
+        color: #374151;
+      }
+      
+      .story-stats {
+        display: flex;
+        gap: 12px;
+        align-items: center;
+      }
+      
+      .new-badge {
+        background: #10b981;
+        color: white;
+        padding: 2px 6px;
+        border-radius: 4px;
+        font-size: 11px;
+        font-weight: 600;
+      }
+      
+      .engaged-viewer {
+        display: flex;
+        justify-content: space-between;
+        padding: 10px;
+        background: #f9fafb;
+        border-radius: 6px;
+        margin-bottom: 6px;
+        align-items: center;
+      }
+      
+      .viewer-info {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      
+      .viewer-name {
+        font-weight: 600;
+      }
+      
+      .viewer-display {
+        color: #6b7280;
+        font-size: 14px;
+      }
+      
+      .viewer-engagement {
+        position: relative;
+        text-align: right;
+      }
+      
+      .story-count {
+        font-size: 14px;
+        color: #4b5563;
+      }
+      
+      .engagement-bar {
+        position: absolute;
+        height: 2px;
+        background: #8b5cf6;
+        bottom: -4px;
+        right: 0;
+        border-radius: 1px;
+      }
+      
+      .export-insights-btn {
+        width: 100%;
+        padding: 12px;
+        background: #8b5cf6;
+        color: white;
+        border: none;
+        border-radius: 8px;
+        font-weight: 600;
+        cursor: pointer;
+        margin-top: 20px;
+      }
+      
+      .export-insights-btn:hover {
+        background: #7c3aed;
+      }
+      
+      .no-data {
+        text-align: center;
+        color: #9ca3af;
+        padding: 20px;
+      }
+    `;
     
-    .viewer-new-badge {
-      display: inline-block;
-      background: #10b981;
-      color: white;
-      font-size: 10px;
-      font-weight: 600;
-      padding: 2px 4px;
-      border-radius: 3px;
-      margin-left: 6px;
-      text-transform: uppercase;
+    // Wait for document.head to be available
+    if (document.head) {
+      document.head.appendChild(style);
+    } else {
+      // If head isn't ready, wait for DOM
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => {
+          document.head.appendChild(style);
+        });
+      }
     }
-    
-    .storylister-empty {
-      text-align: center;
-      padding: 40px 20px;
-      color: #9ca3af;
-    }
-    
-    .storylister-empty-icon {
-      font-size: 48px;
-      margin-bottom: 12px;
-    }
-    
-    .storylister-empty-text {
-      font-size: 14px;
-    }
-  `;
-  document.head.appendChild(style);
+  }
   
-  // Initialize
-  console.log('[Storylister] Extension ready');
-  loadTaggedUsers();
-  injectInterceptor();
-  checkForStories();
+  // Initialize when DOM is ready
+  function initialize() {
+    console.log('[Storylister] Extension ready');
+    
+    // Load account-specific data
+    currentUsername = detectActiveUsername();
+    freeAccountUsername = localStorage.getItem('storylister_free_account');
+    loadTaggedUsers();
+    
+    // Inject styles
+    injectStyles();
+    
+    // Check if we should show the panel
+    checkForStories();
+    
+    // Request initial data
+    window.dispatchEvent(new CustomEvent('storylister:request_data'));
+  }
   
-  // Request initial data
-  window.dispatchEvent(new CustomEvent('storylister:request_data'));
+  // Start initialization
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initialize);
+  } else {
+    initialize();
+  }
   
 })();
