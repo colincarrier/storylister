@@ -1,0 +1,47 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Storylister</title>
+    <style>
+      body { margin: 0; font: 13px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial; width: 340px; }
+      .wrap { padding: 14px; }
+      .h { font-weight: 700; margin-bottom: 8px; }
+      .row { display: flex; align-items: center; justify-content: space-between; margin: 8px 0; gap: 10px; }
+      .label { color: #333; }
+      input[type="text"] { width: 180px; padding: 6px 8px; border: 1px solid #ddd; border-radius: 8px; }
+      button { padding: 6px 10px; border: 0; border-radius: 8px; cursor: pointer; background: #8b5cf6; color: #fff; }
+      button:disabled { opacity: .5; cursor: default; }
+      .muted { color: #666; font-size: 12px; margin-top: 6px; }
+      .switch { display: inline-flex; align-items: center; gap: 6px; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="h">Storylister</div>
+
+      <div class="row">
+        <div class="label">IG handle (auto-detected)</div>
+        <input id="sl-handle" type="text" placeholder="@your_handle" />
+        <button id="sl-erase">Erase</button>
+      </div>
+      <div class="muted">Erasing the handle will also erase your tags on the Free plan.</div>
+
+      <div class="row">
+        <label class="switch">
+          <input id="sl-auto" type="checkbox" />
+          <span>Auto-open viewer list</span>
+        </label>
+      </div>
+
+      <div class="row">
+        <label class="switch">
+          <input id="sl-pro" type="checkbox" />
+          <span>Pro mode (keep tags when switching accounts)</span>
+        </label>
+      </div>
+    </div>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

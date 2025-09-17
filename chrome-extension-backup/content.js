@@ -157,28 +157,19 @@
   
   // ---------- Account Management ----------
   function detectActiveUsername() {
-    // Get logged-in user from Instagram UI
-    // 1) From profile picture alt text (most reliable)
-    const profileImgs = document.querySelectorAll('img[alt*="profile picture"]');
-    for (const img of profileImgs) {
-      const match = img.alt.match(/^(.+?)'s profile picture/);
-      if (match) {
-        console.log('[Storylister UI] Detected user from profile pic:', match[1]);
-        return match[1];
-      }
-    }
-    
-    // 2) From profile link in nav
-    const profileLink = document.querySelector('a[href^="/"][role="link"] span')?.parentElement?.parentElement;
-    if (profileLink?.getAttribute('href')) {
-      const username = profileLink.getAttribute('href').replace(/\//g, '');
-      if (username && username !== 'direct' && username !== 'explore') {
-        console.log('[Storylister UI] Detected user from nav:', username);
-        return username;
-      }
-    }
-    
-    console.log('[Storylister UI] Could not detect logged-in user');
+    // 1) From story URL: /stories/<username>/<id>
+    const m = location.pathname.match(/\/stories\/([^\/]+)(?:\/|$)/);
+    if (m) return m[1];
+
+    // 2) From profile link in header
+    const link = document.querySelector('a[href^="/"][href$="/"] img[alt*="profile picture"]')?.parentElement;
+    if (link?.getAttribute('href')) return link.getAttribute('href').replace(/\//g, '') || null;
+
+    // 3) From profile picture alt text
+    const img = Array.from(document.querySelectorAll('img[alt]'))
+      .find(el => /'s profile picture$/.test(el.alt));
+    if (img) return img.alt.replace(/'s profile picture$/, '');
+
     return null;
   }
   
@@ -188,18 +179,7 @@
     const storyOwner = m[1];
     const current = detectActiveUsername();
     currentUsername = current;
-    
-    // Must match usernames (case-insensitive)
-    if (!current || storyOwner.toLowerCase() !== current.toLowerCase()) {
-      console.log('[Storylister UI] Not own story - owner:', storyOwner, 'user:', current);
-      return false;
-    }
-    
-    // Also check for "Seen by" UI to confirm
-    const hasViewerUI = !!document.querySelector('a[href*="/seen_by/"]');
-    console.log('[Storylister UI] Own story check - owner matches, has viewer UI:', hasViewerUI);
-    
-    return hasViewerUI;
+    return !!current && storyOwner === current;
   }
   
   async function canUseExtension() {

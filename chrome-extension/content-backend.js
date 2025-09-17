@@ -28,31 +28,86 @@
     return m ? decodeURIComponent(m[1]) : null;
   };
 
-  const hasSeenByUI = () => (
-    !!document.querySelector('a[href*="/seen_by/"]') ||
-    Array.from(document.querySelectorAll('span,div'))
-      .some(el => /^seen by( \d+)?$/i.test((el.textContent || '').trim()))
-  );
+  // Get logged-in user from Instagram UI
+  const getLoggedInUser = () => {
+    // Method 1: From profile picture alt text
+    const profileImgs = document.querySelectorAll('img[alt*="profile picture"]');
+    for (const img of profileImgs) {
+      const match = img.alt.match(/^(.+?)'s profile picture/);
+      if (match) {
+        console.log('[Storylister] Detected logged-in user from profile pic:', match[1]);
+        return match[1];
+      }
+    }
+    
+    // Method 2: From profile link in nav
+    const profileLink = document.querySelector('a[href^="/"][role="link"] span')?.parentElement?.parentElement;
+    if (profileLink?.getAttribute('href')) {
+      const username = profileLink.getAttribute('href').replace(/\//g, '');
+      if (username && username !== 'direct' && username !== 'explore') {
+        console.log('[Storylister] Detected logged-in user from nav:', username);
+        return username;
+      }
+    }
+    
+    console.log('[Storylister] Could not detect logged-in user');
+    return null;
+  };
+
+  // Check if "Seen by" exists ONLY in story area
+  const hasSeenByUI = () => {
+    // Look for the story viewer container
+    const storyContainer = document.querySelector('[aria-label*="Story"], section > div > div[style*="height"]');
+    if (!storyContainer) {
+      console.log('[Storylister] No story container found');
+      return false;
+    }
+    
+    // Look for actual "Seen by" link (most reliable)
+    const seenByLink = document.querySelector('a[href*="/seen_by/"]');
+    if (seenByLink) {
+      console.log('[Storylister] Found "Seen by" link');
+      return true;
+    }
+    
+    // Backup: Look for viewer count in story area only
+    const viewerElements = storyContainer.querySelectorAll('span, div');
+    for (const el of viewerElements) {
+      const text = (el.textContent || '').trim();
+      if (/^Seen by \d+$|^\d+ viewer/i.test(text)) {
+        console.log('[Storylister] Found viewer count text:', text);
+        return true;
+      }
+    }
+    
+    return false;
+  };
 
   const isOnStories = () => location.pathname.includes('/stories/');
 
-  // Only our own story: (1) we're in /stories/, (2) the "Seen by" UI exists,
-  // (3) if a primary account is set and not Pro, it must match the handle in the URL.
+  // Strict own-story detection
   const isOwnStory = () => {
     if (!isOnStories()) return false;
-    if (!hasSeenByUI()) return false;
-    const owner = getOwnerFromPath();
-    if (!owner) return false;
-
-    // First detection → set as primary if none saved
-    if (!Settings.cache.accountHandle) {
-      Settings.save({ accountHandle: owner });
-      return true;
+    
+    const storyOwner = getOwnerFromPath();
+    const loggedInUser = getLoggedInUser();
+    
+    console.log('[Storylister] Story owner:', storyOwner, 'Logged-in user:', loggedInUser);
+    
+    // Must have both usernames
+    if (!storyOwner || !loggedInUser) return false;
+    
+    // Must match (case-insensitive)
+    if (storyOwner.toLowerCase() !== loggedInUser.toLowerCase()) {
+      console.log('[Storylister] Not own story - owner:', storyOwner, 'user:', loggedInUser);
+      return false;
     }
-
-    // Free users work on one account; Pro users bypass this
-    if (!Settings.cache.pro && Settings.cache.accountHandle !== owner) return false;
-    return true;
+    
+    // Must have viewer UI
+    const hasViewerUI = hasSeenByUI();
+    console.log('[Storylister] Has viewer UI:', hasViewerUI);
+    
+    return hasViewerUI;
   };
 
   // Inject page-level script once (fetch interceptor & fast pagination)
@@ -64,24 +119,40 @@
     s.onload = () => s.remove();
     (document.head || document.documentElement).appendChild(s);
     state.injected = true;
+    console.log('[Storylister] Injected script loaded');
   };
 
   // Find the clickable "Seen by" element
   const findSeenByClickable = () => {
-    const a = document.querySelector('a[href*="/seen_by/"]');
-    if (a) return a;
-    const candidate = Array.from(document.querySelectorAll('span,div'))
-      .find(el => /^seen by( \d+)?$/i.test((el.textContent || '').trim()));
-    return candidate
-      ? (candidate.closest('[role="button"],[tabindex],button,a') || candidate)
-      : null;
+    // Primary: Look for the actual link
+    const link = document.querySelector('a[href*="/seen_by/"]');
+    if (link) {
+      console.log('[Storylister] Found "Seen by" link');
+      return link;
+    }
+    
+    // Backup: Look for viewer count that might be clickable
+    const candidates = Array.from(document.querySelectorAll('span, div'))
+      .filter(el => /^Seen by \d+$|^\d+ viewer/i.test((el.textContent || '').trim()));
+    
+    for (const candidate of candidates) {
+      const clickable = candidate.closest('[role="button"], [tabindex], button, a') || candidate;
+      if (clickable) {
+        console.log('[Storylister] Found clickable viewer element:', clickable.textContent);
+        return clickable;
+      }
+    }
+    
+    console.log('[Storylister] No clickable "Seen by" element found');
+    return null;
   };
 
-  // Pause videos if needed
+  // Pause videos ONLY when called by panel
   const pauseVideosIfNeeded = () => {
     if (!Settings.cache.pauseVideos) return;
-    if (!isOwnStory()) return;
+    // Don't check isOwnStory here - let the panel control this
     
+    console.log('[Storylister] Pausing videos');
     document.querySelectorAll('video').forEach(v => {
       if (!v.paused && !v.dataset.slPaused) {
         v.pause();
@@ -92,23 +163,51 @@
 
   // Resume videos
   const resumeVideos = () => {
+    console.log('[Storylister] Resuming videos');
     document.querySelectorAll('video[data-sl-paused="1"]').forEach(v => {
       v.play();
       delete v.dataset.slPaused;
     });
   };
 
-  // Auto-open viewers (no random timers; frame-aligned)
-  const autoOpenViewers = () => {
+  // Auto-open viewers with retry logic
+  const autoOpenViewers = async () => {
     if (!Settings.cache.autoOpen) return;
-    if (!isOwnStory()) return;
-    if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
-
-    const t = findSeenByClickable();
-    if (!t) return;
+    if (!isOwnStory()) {
+      console.log('[Storylister] Not own story, skipping auto-open');
+      return;
+    }
     
-    console.log('[Storylister] Auto-opening viewer dialog');
-    requestAnimationFrame(() => t.click());
+    // Don't open if dialog already exists
+    if (document.querySelector('[role="dialog"][aria-modal="true"]')) {
+      console.log('[Storylister] Dialog already open');
+      return;
+    }
+
+    console.log('[Storylister] Waiting for "Seen by" element...');
+    
+    // Try to find and click "Seen by" (up to 3 seconds)
+    let attempts = 0;
+    while (attempts < 10) {
+      const seenBy = findSeenByClickable();
+      if (seenBy) {
+        console.log('[Storylister] Clicking "Seen by" element');
+        seenBy.click();
+        
+        // Wait a bit to see if dialog opened
+        await new Promise(r => setTimeout(r, 500));
+        
+        if (document.querySelector('[role="dialog"][aria-modal="true"]')) {
+          console.log('[Storylister] Dialog opened successfully');
+          return;
+        }
+      }
+      
+      await new Promise(r => setTimeout(r, 300));
+      attempts++;
+    }
+    
+    console.log('[Storylister] Could not auto-open viewers after', attempts, 'attempts');
   };
 
   // Receive viewer chunks from injected.js and mirror to localStorage
@@ -118,6 +217,8 @@
 
     const { mediaId, viewers, totalCount } = evt.data.data || {};
     if (!mediaId || !Array.isArray(viewers)) return;
+    
+    console.log('[Storylister] Received viewer chunk:', viewers.length, 'viewers for story', mediaId);
 
     const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
     if (!store[mediaId]) store[mediaId] = { viewers: [], fetchedAt: Date.now() };
@@ -149,6 +250,7 @@
       window.dispatchEvent(new CustomEvent('storylister:data_updated', {
         detail: { storyId: mediaId, viewerCount: store[mediaId].viewers.length }
       }));
+      console.log('[Storylister] Saved', store[mediaId].viewers.length, 'viewers to storage');
     } catch (e) {
       console.error('[Storylister] Failed to save viewers:', e);
     }
@@ -156,10 +258,12 @@
 
   // Handle panel opened/closed events from content.js
   window.addEventListener('storylister:panel_opened', () => {
+    console.log('[Storylister] Panel opened event received');
     pauseVideosIfNeeded();
   });
 
   window.addEventListener('storylister:panel_closed', () => {
+    console.log('[Storylister] Panel closed event received');
     resumeVideos();
   });
 
@@ -175,22 +279,28 @@
 
       if (sid !== state.currentStoryId) {
         state.currentStoryId = sid;
+        console.log('[Storylister] Story changed to:', sid);
+        
         if (isOwnStory()) {
-          console.log('[Storylister] Own story detected, injecting and auto-opening');
+          console.log('[Storylister] Own story detected, preparing...');
           ensureInjected();
-          setTimeout(() => autoOpenViewers(), 500); // Small delay for Instagram UI
-          pauseVideosIfNeeded();
+          // Don't pause videos here! Let the panel control that
+          setTimeout(() => autoOpenViewers(), 1000);
         }
       }
     });
 
     mo.observe(document.documentElement, { childList: true, subtree: true });
 
-    // Initial try
-    if (isOnStories() && isOwnStory()) {
-      ensureInjected();
-      setTimeout(() => autoOpenViewers(), 1000);
-      pauseVideosIfNeeded();
+    // Initial check
+    if (isOnStories()) {
+      console.log('[Storylister] On stories page, checking if own story...');
+      if (isOwnStory()) {
+        console.log('[Storylister] Initial own story detected');
+        ensureInjected();
+        // Don't pause videos here! Let the panel control that
+        setTimeout(() => autoOpenViewers(), 1500);
+      }
     }
   };
 
