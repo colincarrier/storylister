@@ -1,0 +1,613 @@
+Thanks for the screenshot, the HTML you pasted, and the error. I dug through the files you loaded and found a few root causes that explain **all** the symptoms you’re seeing:
+
+---
+
+## What’s actually wrong
+
+1. **The content script that does the heavy lifting (`content‑backend.js`) isn’t even being loaded.**
+   Your `manifest.json` only injects `content.js`. That means:
+
+   * the network interceptor (`injected.js`) never gets injected
+   * the collector that listens for viewer chunks never runs
+   * nothing mirrors data into the `panel_*` localStorage keys your UI expects
+
+2. **Your CSS & popup files are broken** (they literally contain `...` placeholders and truncated rules). That’s why the “Story to Story Insights” and “Manage Tags” layouts don’t match your demo mocks.
+
+3. **The MutationObserver crash (“parameter 1 is not of type Node”)** is from observing before `document.body` exists. After the exception fires, nothing else runs on that page.
+
+4. **The “Seen by” detector uses an invalid selector** (`button:has-text("Seen by")`). That’s not a real CSS selector in Chrome; the query throws a `SyntaxError` and short‑circuits detection.
+
+5. **The one‑account popup is firing in the wrong places.** It’s currently not gated on “Seen by” and is not comparing the detected story owner vs the stored primary account.
+
+---
+
+Below is a **drop‑in fix package** you can hand to Claude. It:
+
+* loads the correct scripts in the right order,
+* guards observers so they don’t attach until a real node exists,
+* replaces the “Seen by” detector with a robust, safe scanner,
+* implements the one‑account gating exactly as you requested (only when **Seen by is present** **and** the story username is **different** from the saved handle),
+* adds a simple settings surface for the IG handle, with “erase handle” behavior (erases tags on Free; preserves on Pro),
+* mirrors viewer data to the legacy `panel_*` keys so your panel UI can render,
+* and keeps all timing fully deterministic (no `Math.random()` anywhere).
+
+---
+
+## 1) `manifest.json` (replace file)
+
+> Ensures **both** content scripts load and `injected.js` is web‑accessible.
+
+```json
+{
+  "manifest_version": 3,
+  "name": "Storylister",
+  "version": "1.0.1",
+  "description": "Story viewer insights.",
+  "permissions": ["storage", "scripting"],
+  "host_permissions": ["https://www.instagram.com/*", "https://*.instagram.com/*"],
+  "content_scripts": [
+    {
+      "matches": ["https://www.instagram.com/*"],
+      "js": ["content-backend.js", "content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["injected.js"],
+      "matches": ["https://www.instagram.com/*"]
+    }
+  ],
+  "action": { "default_popup": "popup.html" }
+}
+```
+
+---
+
+## 2) `content-backend.js` (replace file)
+
+> Robust DOM gating, viewer ingestion, “Seen by” detection, and one‑account popup logic.
+> No random timers; uses `requestIdleCallback`/`requestAnimationFrame` only.
+
+```js
+// content-backend.js — passive data & account gating (no heavy UI here)
+(() => {
+  'use strict';
+
+  // ----------------------------
+  // Settings (chrome.storage.sync)
+  // ----------------------------
+  const DEFAULT_SETTINGS = {
+    autoOpen: true,
+    pauseVideos: true,
+    proMode: false,
+    accountHandle: ""   // populated the first time we detect your own story
+  };
+  const SETTINGS_KEY = 'storylister_settings';
+
+  const Settings = {
+    cache: { ...DEFAULT_SETTINGS },
+    async load() {
+      return new Promise(resolve => {
+        chrome.storage.sync.get([SETTINGS_KEY], (obj) => {
+          const next = { ...DEFAULT_SETTINGS, ...(obj[SETTINGS_KEY] || {}) };
+          this.cache = next;
+          resolve(next);
+        });
+      });
+    },
+    async save(partial) {
+      const next = { ...this.cache, ...partial };
+      this.cache = next;
+      return new Promise(resolve => {
+        chrome.storage.sync.set({ [SETTINGS_KEY]: next }, resolve);
+      });
+    }
+  };
+
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'sync') return;
+    if (changes[SETTINGS_KEY]?.newValue) {
+      Settings.cache = { ...DEFAULT_SETTINGS, ...changes[SETTINGS_KEY].newValue };
+      window.dispatchEvent(new CustomEvent('storylister:settings_updated', { detail: Settings.cache }));
+    }
+  });
+
+  // -----------------------------------
+  // Utility: safe scheduling (no random)
+  // -----------------------------------
+  const Perf = {
+    schedule(cb, timeout = 1500) {
+      if ('requestIdleCallback' in window) {
+        requestIdleCallback(cb, { timeout });
+      } else {
+        requestAnimationFrame(() => setTimeout(cb, 0));
+      }
+    }
+  };
+
+  // -----------------------------------
+  // Account & page detection
+  // -----------------------------------
+  function detectStoryOwnerFromURL() {
+    // /stories/<username>/<mediaId>
+    const m = location.pathname.match(/\/stories\/([^\/]+)(?:\/|$)/);
+    return m ? decodeURIComponent(m[1]) : null;
+  }
+
+  // “Seen by” exists only on your own story
+  function findSeenByElement() {
+    // 1) explicit “seen_by” href Instagram uses in the viewers pill
+    const byHref = document.querySelector('a[href*="/seen_by/"]');
+    if (byHref) return byHref;
+
+    // 2) aria-label variants
+    const aria = Array.from(document.querySelectorAll('[aria-label]'))
+      .find(el => /seen by/i.test(el.getAttribute('aria-label') || ''));
+    if (aria) return aria;
+
+    // 3) scan clickable elements for a plain text match
+    const clickable = document.querySelectorAll('a, button, [role="button"], div, span');
+    for (const el of clickable) {
+      const t = (el.textContent || '').trim();
+      if (/^seen by(\s+\d+)?$/i.test(t)) return el;
+    }
+    return null;
+  }
+
+  function isOwnStoryView() {
+    return !!findSeenByElement();
+  }
+
+  // -----------------------------------
+  // One-account gating
+  // -----------------------------------
+  let shownFreeToastForThisStory = false;
+
+  function shouldShowFreeToast(currentOwner) {
+    // Show only when:
+    // 1) We are on a story that actually has “Seen by” (i.e., your own story UI is present)
+    // 2) The username in the upper-left (URL owner) is different than the stored handle
+    if (!isOwnStoryView()) return false;
+    if (!currentOwner) return false;
+
+    const saved = Settings.cache.accountHandle || "";
+    if (!saved) {
+      // First time: bind to this handle
+      Settings.save({ accountHandle: currentOwner });
+      return false;
+    }
+    return saved !== currentOwner;
+  }
+
+  function renderFreeAccountToast(savedHandle) {
+    if (shownFreeToastForThisStory) return;
+    shownFreeToastForThisStory = true;
+
+    const wrap = document.createElement('div');
+    wrap.style.cssText = `
+      position: fixed; top: 20px; right: 24px; z-index: 999999;
+      max-width: 320px; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    `;
+    const card = document.createElement('div');
+    card.style.cssText = `
+      background: #fff; border: 2px solid #8b5cf6; border-radius: 12px; padding: 14px 16px;
+      box-shadow: 0 8px 28px rgba(0,0,0,.12);
+    `;
+    card.innerHTML = `
+      <div style="font-weight:600; margin-bottom:6px;">Storylister (Free)</div>
+      <div style="font-size:13px; color:#444; line-height:1.4; margin-bottom:12px;">
+        Free plan works on one account only <b>@${savedHandle}</b>.  
+        Upgrade to Pro to use multiple accounts.
+      </div>
+      <div style="display:flex; gap:8px; justify-content:flex-end;">
+        <button id="sl-toast-close" style="border:0; padding:6px 10px; border-radius:8px; background:#8b5cf6; color:#fff; cursor:pointer;">Got it</button>
+      </div>
+    `;
+    wrap.appendChild(card);
+    document.documentElement.appendChild(wrap);
+    card.querySelector('#sl-toast-close')?.addEventListener('click', () => wrap.remove());
+    setTimeout(() => wrap.remove(), 8000);
+  }
+
+  // -----------------------------------
+  // Tag storage (per-account key)
+  // -----------------------------------
+  function tagsKey(handle) {
+    return `sl_tags_${handle || 'default'}`;
+  }
+
+  async function eraseTagsForHandleIfFree(oldHandle) {
+    if (!oldHandle) return;
+    const pro = !!Settings.cache.proMode;
+    if (pro) return; // Pro keeps tags when handle is cleared
+    return new Promise(resolve => {
+      chrome.storage.local.remove([tagsKey(oldHandle)], resolve);
+    });
+  }
+
+  // -----------------------------------
+  // Network bridge & data mirroring
+  // -----------------------------------
+  // Inject network interceptor once
+  function injectNetworkScriptOnce() {
+    if (document.getElementById('storylister-injected')) return;
+    const s = document.createElement('script');
+    s.id = 'storylister-injected';
+    s.src = chrome.runtime.getURL('injected.js');
+    s.onload = () => s.remove();
+    (document.head || document.documentElement).appendChild(s);
+  }
+
+  // Compact in-memory state
+  const state = {
+    currentStoryId: null,
+    stories: new Map(), // storyId -> Map(userId -> viewer)
+    totals: new Map()   // storyId -> total viewers from DOM or network
+  };
+
+  function ensureBucket(storyId) {
+    const sid = String(storyId);
+    if (!state.stories.has(sid)) state.stories.set(sid, new Map());
+    return state.stories.get(sid);
+  }
+
+  function mirrorToLegacy() {
+    // panel_story_store: { [storyId]: { viewers: [[id, obj]...], fetchedAt, totalReported, domTotal, collectedCount } }
+    const store = {};
+    for (const [sid, map] of state.stories.entries()) {
+      const entries = [];
+      map.forEach(v => entries.push([v.id, v]));
+      store[sid] = {
+        viewers: entries,
+        fetchedAt: Date.now(),
+        generation: 0,
+        totalReported: state.totals.get(sid) ?? null,
+        domTotal: state.totals.get(sid) ?? null,
+        collectedCount: entries.length
+      };
+    }
+    try {
+      localStorage.setItem('panel_story_store', JSON.stringify(store));
+      window.dispatchEvent(new CustomEvent('storylister:data_updated', {
+        detail: { storyId: state.currentStoryId }
+      }));
+    } catch {}
+  }
+
+  // Listen for viewer chunks from injected.js
+  window.addEventListener('message', (evt) => {
+    if (evt.source !== window) return;
+    const msg = evt.data;
+    if (!msg || typeof msg !== 'object') return;
+
+    if (msg.type === 'STORYLISTER_VIEWERS_CHUNK' && msg.data) {
+      const { mediaId, viewers, totalCount } = msg.data;
+      const bucket = ensureBucket(mediaId || 'unknown');
+      if (Number.isFinite(totalCount)) state.totals.set(String(mediaId), totalCount);
+      for (const u of viewers) {
+        const id = String(u.id || u.pk);
+        bucket.set(id, {
+          id,
+          username: u.username || '',
+          full_name: u.full_name || '',
+          profile_pic_url: u.profile_pic_url || u.profile_pic_url_hd || '',
+          is_verified: !!u.is_verified
+        });
+      }
+      mirrorToLegacy();
+    }
+
+    if (msg.type === 'STORYLISTER_DOM_TOTAL' && msg.data) {
+      const { mediaId, total } = msg.data;
+      if (Number.isFinite(total)) {
+        state.totals.set(String(mediaId), total);
+        mirrorToLegacy();
+      }
+    }
+  });
+
+  // -----------------------------------
+  // Auto-open viewers (optional)
+  // -----------------------------------
+  function autoOpenIfAllowed() {
+    if (!Settings.cache.autoOpen) return;
+    if (!isOwnStoryView()) return;
+
+    const el = findSeenByElement();
+    if (!el) return;
+
+    // Click once, if the dialog is not already open
+    if (!document.querySelector('[role="dialog"]')) {
+      Perf.schedule(() => {
+        el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+      });
+    }
+  }
+
+  // -----------------------------------
+  // Mutation observers (guarded)
+  // -----------------------------------
+  function startObservers() {
+    // Guard body existence (fixes “observe … not of type Node”)
+    const target = document.body || document.documentElement;
+    if (!target) {
+      requestAnimationFrame(startObservers);
+      return;
+    }
+
+    // Observe SPA navigations and DOM changes
+    const mo = new MutationObserver(() => {
+      injectNetworkScriptOnce();
+
+      // Watch story id from URL
+      const m = location.pathname.match(/\/stories\/[^\/]+\/(\d+)/);
+      if (m) {
+        const sid = m[1];
+        if (sid !== state.currentStoryId) {
+          state.currentStoryId = sid;
+
+          // Bind handle first time we see our own story
+          const owner = detectStoryOwnerFromURL();
+          if (isOwnStoryView() && owner && !Settings.cache.accountHandle) {
+            Settings.save({ accountHandle: owner });
+          }
+
+          // Show free toast only when: Seen by exists AND owner ≠ saved
+          if (shouldShowFreeToast(owner)) {
+            renderFreeAccountToast(Settings.cache.accountHandle);
+          }
+
+          autoOpenIfAllowed();
+        }
+      }
+    });
+
+    mo.observe(target, { childList: true, subtree: true, attributes: true, characterData: true });
+  }
+
+  // -----------------------------------
+  // Cross-script messaging for popup
+  // -----------------------------------
+  window.addEventListener('message', async (evt) => {
+    if (evt.source !== window) return;
+    if (!evt.data || typeof evt.data !== 'object') return;
+
+    // Popup requests handle clear
+    if (evt.data.type === 'SL_CLEAR_ACCOUNT_HANDLE') {
+      const old = Settings.cache.accountHandle || "";
+      await Settings.save({ accountHandle: "" });
+      await eraseTagsForHandleIfFree(old);
+      window.dispatchEvent(new CustomEvent('storylister:account_cleared'));
+    }
+  });
+
+  // -----------------------------------
+  // Initialize
+  // -----------------------------------
+  (async function init() {
+    await Settings.load();
+    injectNetworkScriptOnce();
+    startObservers();
+  })();
+})();
+```
+
+---
+
+## 3) `popup.html` (replace file)
+
+> Adds an **IG Handle** field (read‑only when auto‑detected), **Erase** button, **Pro** switch, and **Auto‑open** switch.
+
+```html
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Storylister</title>
+    <style>
+      body { margin: 0; font: 13px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial; width: 340px; }
+      .wrap { padding: 14px; }
+      .h { font-weight: 700; margin-bottom: 8px; }
+      .row { display: flex; align-items: center; justify-content: space-between; margin: 8px 0; gap: 10px; }
+      .label { color: #333; }
+      input[type="text"] { width: 180px; padding: 6px 8px; border: 1px solid #ddd; border-radius: 8px; }
+      button { padding: 6px 10px; border: 0; border-radius: 8px; cursor: pointer; background: #8b5cf6; color: #fff; }
+      button:disabled { opacity: .5; cursor: default; }
+      .muted { color: #666; font-size: 12px; margin-top: 6px; }
+      .switch { display: inline-flex; align-items: center; gap: 6px; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="h">Storylister</div>
+
+      <div class="row">
+        <div class="label">IG handle (auto-detected)</div>
+        <input id="sl-handle" type="text" placeholder="@your_handle" />
+        <button id="sl-erase">Erase</button>
+      </div>
+      <div class="muted">Erasing the handle will also erase your tags on the Free plan.</div>
+
+      <div class="row">
+        <label class="switch">
+          <input id="sl-auto" type="checkbox" />
+          <span>Auto-open viewer list</span>
+        </label>
+      </div>
+
+      <div class="row">
+        <label class="switch">
+          <input id="sl-pro" type="checkbox" />
+          <span>Pro mode (keep tags when switching accounts)</span>
+        </label>
+      </div>
+    </div>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
+```
+
+---
+
+## 4) `popup.js` (replace file)
+
+> Loads/saves settings; sends a one‑shot message to clear the handle and (on Free) erase tags.
+
+```js
+// popup.js
+const SETTINGS_KEY = 'storylister_settings';
+const $ = (id) => document.getElementById(id);
+
+function loadSettings() {
+  chrome.storage.sync.get([SETTINGS_KEY], (obj) => {
+    const s = obj[SETTINGS_KEY] || {};
+    $('sl-handle').value = s.accountHandle || '';
+    $('sl-auto').checked = !!s.autoOpen;
+    $('sl-pro').checked = !!s.proMode;
+  });
+}
+
+function save(partial) {
+  chrome.storage.sync.get([SETTINGS_KEY], (obj) => {
+    const next = { ...(obj[SETTINGS_KEY] || {}), ...partial };
+    chrome.storage.sync.set({ [SETTINGS_KEY]: next });
+  });
+}
+
+$('sl-handle').addEventListener('change', (e) => {
+  save({ accountHandle: (e.target.value || '').replace(/^@/, '') });
+});
+
+$('sl-auto').addEventListener('change', (e) => {
+  save({ autoOpen: !!e.target.checked });
+});
+
+$('sl-pro').addEventListener('change', (e) => {
+  save({ proMode: !!e.target.checked });
+});
+
+$('sl-erase').addEventListener('click', () => {
+  // Clear handle and (if Free) erase tags for that handle in the page context
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    const tabId = tabs[0]?.id;
+    if (!tabId) return;
+    chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => window.postMessage({ type: 'SL_CLEAR_ACCOUNT_HANDLE' }, '*')
+    });
+  });
+  save({ accountHandle: '' }); // also clear in sync storage
+  setTimeout(loadSettings, 200);
+});
+
+document.addEventListener('DOMContentLoaded', loadSettings);
+```
+
+---
+
+## 5) Minimal CSS fixes (replace `content.css`)
+
+> Your current `content.css` has literal `...` placeholders which break parsing. This minimal reset avoids layout explosions; keep your existing styles if you have a clean copy, but **remove the `...`**.
+
+```css
+/* content.css — minimal sane defaults, keep your own full stylesheet if you have it */
+#storylister-root, .storylister-panel, .viewer-insights-modal, .storylister-tag-manager-fullscreen {
+  font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+  box-sizing: border-box;
+}
+* { box-sizing: border-box; }
+```
+
+> If you want the modal and tag‑manager to match your demo HTML exactly, use the classes from your mock (`viewer-insights-modal`, `insights-header`, `insights-comparison`, `story-navigation`, `insights-tabs`, `storylister-tag-manager-fullscreen`, etc.). The important thing for now is to fix the broken CSS file so the panel can render at all.
+
+---
+
+## 6) One small change in `content.js` (per‑account tags)
+
+If `content.js` stores tags in a single key, switch it to use a **per‑account** key so clearing the handle on Free wipes tags for that account only.
+
+Add these helpers near the top of `content.js`:
+
+```js
+// content.js — add near your other constants
+const SETTINGS_KEY = 'storylister_settings';
+
+function tagsKeyFromSettings(settings) {
+  const handle = (settings?.accountHandle || 'default');
+  return `sl_tags_${handle}`;
+}
+
+async function loadSettingsSync() {
+  return new Promise(resolve => {
+    chrome.storage.sync.get(['storylister_settings'], data => {
+      resolve(data['storylister_settings'] || {});
+    });
+  });
+}
+```
+
+Then, wherever you **read or write tags**, do this instead of a hardcoded key:
+
+```js
+const settings = await loadSettingsSync();
+const TAGS_KEY = tagsKeyFromSettings(settings);
+
+// read
+chrome.storage.local.get([TAGS_KEY], (obj) => {
+  const tags = obj[TAGS_KEY] || {};
+  // ...
+});
+
+// write
+chrome.storage.local.set({ [TAGS_KEY]: tags });
+```
+
+This is what lets the **“Erase handle”** button clear tags on Free (because `content-backend.js` removes the matching `sl_tags_<oldHandle>` key).
+
+---
+
+## 7) Why this also fixes your three original bullets
+
+* **“It’s not auto‑opening ‘Seen by’ & not pulling viewers.”**
+  The manifest now actually loads `content-backend.js`, which injects `injected.js`. The network interceptor captures viewer responses and `content-backend.js` mirrors them into `panel_story_store` so your panel reads real data. The “Seen by” click uses a safe detector and only runs on your own stories.
+
+* **“Story to Story Insights doesn’t look like the demo.”**
+  The current `content.css` is malformed (contains `...`). Fixing it unblocks your existing panel styles. If you still want the exact mock markup, swap your panel’s class names to the ones in the mock you pasted—your CSS can target those classes.
+
+* **“Manage Tags doesn’t look right.”**
+  Same root cause as above: broken CSS prevents the layout from taking effect.
+
+* **MutationObserver crash.**
+  We now guard `document.body`/`documentElement` and only call `observe()` with a real node; this removes the `observe` TypeError and keeps the rest of the code running.
+
+* **One‑account popup shows on other people’s stories.**
+  The toast now appears **only** when `findSeenByElement()` is found **and** the detected owner (`/stories/<owner>/…`) differs from the saved `accountHandle`.
+
+---
+
+## Test checklist for Claude (use this verbatim)
+
+1. Update files exactly as provided above and reload the extension in chrome://extensions.
+2. Open **your own** story on Instagram.
+
+   * Confirm the panel auto‑opens (if “Auto‑open viewer list” is enabled).
+   * Confirm `storylister_settings.accountHandle` is populated with your handle after the first “Seen by” appears.
+   * Confirm viewer chunks appear in `localStorage.panel_story_store`.
+3. Visit **someone else’s** story.
+
+   * There should be **no** one‑account popup (no “Seen by” present).
+4. Switch back to your story but change accounts (e.g., a second account on the same browser).
+
+   * With Free (Pro off), you should see the one‑account toast saying the free plan is bound to `@<saved handle>`.
+5. Open the extension popup → click **Erase**.
+
+   * On Free, tags under `sl_tags_<oldHandle>` are removed (check chrome.storage.local).
+   * On Pro (toggle on), the tags are **not** removed.
+6. Verify the “Story to Story Insights” and “Manage Tags” look normal once `content.css` no longer contains `...`.
+
+---
+
+If you hand the code above to Claude, they’ll be able to wire it up immediately. If you want me to also supply a fuller CSS for the exact mock UI you pasted, say the word and I’ll include a ready‑to‑paste stylesheet that matches those class names.

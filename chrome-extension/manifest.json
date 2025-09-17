@@ -1,31 +1,23 @@
 {
   "manifest_version": 3,
   "name": "Storylister",
-  "description": "Instagram Story Viewer Enhancement - Search and analyze your story viewers",
-  "version": "1.0.0",
-  "permissions": [
-    "storage",
-    "activeTab"
-  ],
-  "host_permissions": [
-    "https://www.instagram.com/*"
-  ],
+  "version": "1.0.1",
+  "description": "Story viewer insights.",
+  "permissions": ["storage", "scripting"],
+  "host_permissions": ["https://www.instagram.com/*", "https://*.instagram.com/*"],
   "content_scripts": [
     {
       "matches": ["https://www.instagram.com/*"],
       "js": ["content-backend.js", "content.js"],
-      "run_at": "document_start",
-      "css": ["content.css"]
+      "css": ["content.css"],
+      "run_at": "document_idle"
     }
   ],
-  "action": {
-    "default_popup": "popup.html",
-    "default_title": "Storylister Settings"
-  },
   "web_accessible_resources": [
     {
       "resources": ["injected.js"],
       "matches": ["https://www.instagram.com/*"]
     }
-  ]
+  ],
+  "action": { "default_popup": "popup.html" }
 }

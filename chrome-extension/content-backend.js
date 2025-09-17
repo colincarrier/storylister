@@ -1,131 +1,50 @@
-// content-backend.js — passive data layer & legacy bridge (no UI changes)
+// content-backend.js — passive data & account gating (no heavy UI here)
 (() => {
   'use strict';
 
-  const DEBUG = true;
-
-  // ---------- Internal settings (no UI change yet) ----------
+  // ----------------------------
+  // Settings (chrome.storage.sync)
+  // ----------------------------
+  const DEFAULT_SETTINGS = {
+    autoOpen: true,
+    pauseVideos: true,
+    proMode: false,
+    accountHandle: ""   // populated the first time we detect your own story
+  };
   const SETTINGS_KEY = 'storylister_settings';
-  const DEFAULT_SETTINGS = { autoOpen: true, pauseVideos: true, proMode: false };
 
   const Settings = {
-    get() {
-      try { return JSON.parse(localStorage.getItem(SETTINGS_KEY)) || DEFAULT_SETTINGS; }
-      catch { return DEFAULT_SETTINGS; }
-    },
-    set(next) {
-      localStorage.setItem(SETTINGS_KEY, JSON.stringify(next));
-    }
-  };
-
-  // ---------- Account awareness (no UI change) ----------
-  function detectActiveUsername() {
-    // 1) From story URL: /stories/<username>/<id>
-    const m = location.pathname.match(/\/stories\/([^\/]+)(?:\/|$)/);
-    if (m) return m[1];
-
-    // 2) Heuristic: cursor/profile area (robust to class churn)
-    const link = document.querySelector('a[href^="/"][href$="/"] img[alt*="profile picture"]')?.parentElement;
-    if (link?.getAttribute('href')) return link.getAttribute('href').replace(/\//g, '') || null;
-
-    // 3) Last resort: look for "'s profile picture" alt text
-    const img = Array.from(document.querySelectorAll('img[alt]'))
-      .find(el => /'s profile picture$/.test(el.alt));
-    if (img) return img.alt.replace(/'s profile picture$/, '');
-
-    return null;
-  }
-
-  function isOnOwnStory() {
-    const m = location.pathname.match(/\/stories\/([^\/]+)\//);
-    if (!m) return false;
-    const storyOwner = m[1];
-    const current = detectActiveUsername();
-    return !!current && storyOwner === current;
-  }
-
-  // Free-tier binding to first account that uses it
-  const FREE_ACCOUNT_KEY = 'storylister_free_account';
-  function canUseForThisAccount() {
-    const current = detectActiveUsername();
-    if (!current) return false;
-    let bound = localStorage.getItem(FREE_ACCOUNT_KEY);
-    if (!bound) { localStorage.setItem(FREE_ACCOUNT_KEY, current); bound = current; }
-    return bound === current;
-  }
-
-  function accountPrefix() {
-    const u = detectActiveUsername() || 'default';
-    return `sl_${u}_`;
-  }
-
-  // ---------- IndexedDB (compact per-story docs) ----------
-  const idb = {
-    db: null,
-    async open() {
-      if (this.db) return this.db;
-      this.db = await new Promise((resolve, reject) => {
-        const req = indexedDB.open(`${accountPrefix()}db`, 1);
-        req.onupgradeneeded = () => {
-          const db = req.result;
-          if (!db.objectStoreNames.contains('stories')) {
-            const st = db.createObjectStore('stories', { keyPath: 'storyId' });
-            st.createIndex('fetchedAt', 'fetchedAt');
-          }
-          if (!db.objectStoreNames.contains('checkpoints')) {
-            db.createObjectStore('checkpoints', { keyPath: 'owner' });
-          }
-        };
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = () => reject(req.error);
-      });
-      return this.db;
-    },
-    async put(storeName, doc) {
-      const db = await this.open();
-      await new Promise((resolve, reject) => {
-        const tx = db.transaction(storeName, 'readwrite');
-        tx.objectStore(storeName).put(doc);
-        tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
+    cache: { ...DEFAULT_SETTINGS },
+    async load() {
+      return new Promise(resolve => {
+        chrome.storage.sync.get([SETTINGS_KEY], (obj) => {
+          const next = { ...DEFAULT_SETTINGS, ...(obj[SETTINGS_KEY] || {}) };
+          this.cache = next;
+          resolve(next);
+        });
       });
     },
-    async get(storeName, id) {
-      const db = await this.open();
-      return await new Promise((resolve, reject) => {
-        const tx = db.transaction(storeName, 'readonly');
-        const req = tx.objectStore(storeName).get(id);
-        req.onsuccess = () => resolve(req.result || null);
-        req.onerror = () => reject(req.error);
-      });
-    },
-    async getAll(storeName) {
-      const db = await this.open();
-      return await new Promise((resolve, reject) => {
-        const tx = db.transaction(storeName, 'readonly');
-        const req = tx.objectStore(storeName).getAll();
-        req.onsuccess = () => resolve(req.result || []);
-        req.onerror = () => reject(req.error);
+    async save(partial) {
+      const next = { ...this.cache, ...partial };
+      this.cache = next;
+      return new Promise(resolve => {
+        chrome.storage.sync.set({ [SETTINGS_KEY]: next }, resolve);
       });
     }
   };
 
-  // ---------- State ----------
-  const state = {
-    stories: new Map(),    // storyId -> Map(userId -> viewer)
-    seenEver: new Set(JSON.parse(localStorage.getItem(accountPrefix() + 'seenEver') || '[]')),
-    currentStoryId: null,
-    storyMeta: {},         // storyId -> { index, total }
-    totals: new Map(),     // storyId -> number (DOM total)
-    checkpoints: new Map() // owner -> timestamp
-  };
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'sync') return;
+    if (changes[SETTINGS_KEY]?.newValue) {
+      Settings.cache = { ...DEFAULT_SETTINGS, ...changes[SETTINGS_KEY].newValue };
+      window.dispatchEvent(new CustomEvent('storylister:settings_updated', { detail: Settings.cache }));
+    }
+  });
 
-  function saveSeenEver() {
-    localStorage.setItem(accountPrefix() + 'seenEver', JSON.stringify([...state.seenEver]));
-  }
-
-  // ---------- Native timing helpers (no randomness) ----------
+  // -----------------------------------
+  // Utility: safe scheduling (no random)
+  // -----------------------------------
   const Perf = {
-    // frame-aligned scheduling that looks like render budgeting
     schedule(cb, timeout = 1500) {
       if ('requestIdleCallback' in window) {
         requestIdleCallback(cb, { timeout });
@@ -135,381 +54,268 @@
     }
   };
 
-  // ---------- Checkpoint management for NEW badges ----------
-  async function loadCheckpoint(owner) {
-    if (!owner) return null;
-    const doc = await idb.get('checkpoints', owner).catch(() => null);
-    if (doc) {
-      state.checkpoints.set(owner, doc.timestamp);
-      return doc.timestamp;
+  // -----------------------------------
+  // Account & page detection
+  // -----------------------------------
+  function detectStoryOwnerFromURL() {
+    // /stories/<username>/<mediaId>
+    const m = location.pathname.match(/\/stories\/([^\/]+)(?:\/|$)/);
+    return m ? decodeURIComponent(m[1]) : null;
+  }
+
+  // "Seen by" exists only on your own story
+  function findSeenByElement() {
+    // 1) explicit "seen_by" href Instagram uses in the viewers pill
+    const byHref = document.querySelector('a[href*="/seen_by/"]');
+    if (byHref) return byHref;
+
+    // 2) aria-label variants
+    const aria = Array.from(document.querySelectorAll('[aria-label]'))
+      .find(el => /seen by/i.test(el.getAttribute('aria-label') || ''));
+    if (aria) return aria;
+
+    // 3) scan clickable elements for a plain text match
+    const clickable = document.querySelectorAll('a, button, [role="button"], div, span');
+    for (const el of clickable) {
+      const t = (el.textContent || '').trim();
+      if (/^seen by(\s+\d+)?$/i.test(t)) return el;
     }
     return null;
   }
 
-  async function saveCheckpoint(owner) {
-    if (!owner) return;
-    const now = Date.now();
-    state.checkpoints.set(owner, now);
-    await idb.put('checkpoints', { owner, timestamp: now }).catch(e => {
-      console.error('[SL:backend] Error saving checkpoint:', e);
+  function isOwnStoryView() {
+    return !!findSeenByElement();
+  }
+
+  // -----------------------------------
+  // One-account gating
+  // -----------------------------------
+  let shownFreeToastForThisStory = false;
+
+  function shouldShowFreeToast(currentOwner) {
+    // Show only when:
+    // 1) We are on a story that actually has "Seen by" (i.e., your own story UI is present)
+    // 2) The username in the upper-left (URL owner) is different than the stored handle
+    if (!isOwnStoryView()) return false;
+    if (!currentOwner) return false;
+
+    const saved = Settings.cache.accountHandle || "";
+    if (!saved) {
+      // First time: bind to this handle
+      Settings.save({ accountHandle: currentOwner });
+      return false;
+    }
+    return saved !== currentOwner;
+  }
+
+  function renderFreeAccountToast(savedHandle) {
+    if (shownFreeToastForThisStory) return;
+    shownFreeToastForThisStory = true;
+
+    const wrap = document.createElement('div');
+    wrap.style.cssText = `
+      position: fixed; top: 20px; right: 24px; z-index: 999999;
+      max-width: 320px; font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    `;
+    const card = document.createElement('div');
+    card.style.cssText = `
+      background: #fff; border: 2px solid #8b5cf6; border-radius: 12px; padding: 14px 16px;
+      box-shadow: 0 8px 28px rgba(0,0,0,.12);
+    `;
+    card.innerHTML = `
+      <div style="font-weight:600; margin-bottom:6px;">Storylister (Free)</div>
+      <div style="font-size:13px; color:#444; line-height:1.4; margin-bottom:12px;">
+        Free plan works on one account only <b>@${savedHandle}</b>.  
+        Upgrade to Pro to use multiple accounts.
+      </div>
+      <div style="display:flex; gap:8px; justify-content:flex-end;">
+        <button id="sl-toast-close" style="border:0; padding:6px 10px; border-radius:8px; background:#8b5cf6; color:#fff; cursor:pointer;">Got it</button>
+      </div>
+    `;
+    wrap.appendChild(card);
+    document.documentElement.appendChild(wrap);
+    card.querySelector('#sl-toast-close')?.addEventListener('click', () => wrap.remove());
+    setTimeout(() => wrap.remove(), 8000);
+  }
+
+  // -----------------------------------
+  // Tag storage (per-account key)
+  // -----------------------------------
+  function tagsKey(handle) {
+    return `sl_tags_${handle || 'default'}`;
+  }
+
+  async function eraseTagsForHandleIfFree(oldHandle) {
+    if (!oldHandle) return;
+    const pro = !!Settings.cache.proMode;
+    if (pro) return; // Pro keeps tags when handle is cleared
+    return new Promise(resolve => {
+      chrome.storage.local.remove([tagsKey(oldHandle)], resolve);
     });
   }
 
-  // ---------- Legacy mirror (keeps current UI working) ----------
-  const LEGACY_CACHE_CAP = 5000;
-  let mirrorTimer = null;
-
-  function scheduleMirror() {
-    if (mirrorTimer) return;
-    mirrorTimer = setTimeout(mirrorToLegacy, 150);
+  // -----------------------------------
+  // Network bridge & data mirroring
+  // -----------------------------------
+  // Inject network interceptor once
+  function injectNetworkScriptOnce() {
+    if (document.getElementById('storylister-injected')) return;
+    const s = document.createElement('script');
+    s.id = 'storylister-injected';
+    s.src = chrome.runtime.getURL('injected.js');
+    s.onload = () => s.remove();
+    (document.head || document.documentElement).appendChild(s);
   }
 
-  async function mirrorToLegacy() {
-    mirrorTimer = null;
+  // Compact in-memory state
+  const state = {
+    currentStoryId: null,
+    stories: new Map(), // storyId -> Map(userId -> viewer)
+    totals: new Map()   // storyId -> total viewers from DOM or network
+  };
 
-    const storyStore = {};
-    const aggregate = [];
-    const storyOwner = detectActiveUsername();
-    const checkpoint = state.checkpoints.get(storyOwner) || 0;
+  function ensureBucket(storyId) {
+    const sid = String(storyId);
+    if (!state.stories.has(sid)) state.stories.set(sid, new Map());
+    return state.stories.get(sid);
+  }
 
+  function mirrorToLegacy() {
+    // panel_story_store: { [storyId]: { viewers: [[id, obj]...], fetchedAt, totalReported, domTotal, collectedCount } }
+    const store = {};
     for (const [sid, map] of state.stories.entries()) {
       const entries = [];
-      map.forEach(v => {
-        const isNew = v.viewedAt > checkpoint;
-        entries.push([v.id, {
-          id: v.id,
-          username: v.username,
-          full_name: v.displayName,
-          profile_pic_url: v.profilePic,
-          is_verified: !!v.isVerified,
-          is_private: !!v.isPrivate,
-          follows_viewer: !!v.followsViewer,
-          followed_by_viewer: !!v.followedByViewer,
-          viewedAt: v.viewedAt,
-          timestamp: v.viewedAt,
-          isNew: isNew,
-          reaction: v.reaction || null
-        }]);
-        aggregate.push([v.id, {
-          id: v.id,
-          username: v.username,
-          full_name: v.displayName,
-          profile_pic_url: v.profilePic,
-          is_verified: !!v.isVerified,
-          lastSeen: v.viewedAt
-        }]);
-        
-        // Track in seenEver
-        state.seenEver.add(v.id);
-      });
-
-      storyStore[sid] = { 
-        viewers: entries, 
-        fetchedAt: Date.now(), 
-        generation: 0, 
+      map.forEach(v => entries.push([v.id, v]));
+      store[sid] = {
+        viewers: entries,
+        fetchedAt: Date.now(),
+        generation: 0,
         totalReported: state.totals.get(sid) ?? null,
         domTotal: state.totals.get(sid) ?? null,
         collectedCount: entries.length
       };
     }
-
-    aggregate.sort((a, b) => (b[1].lastSeen || 0) - (a[1].lastSeen || 0));
-    const trimmed = aggregate.slice(0, LEGACY_CACHE_CAP);
-
-    // Add story metadata
-    const meta = {
-      currentStoryId: state.currentStoryId,
-      storyIndex: state.storyMeta[state.currentStoryId]?.index || 1,
-      storyTotal: state.storyMeta[state.currentStoryId]?.total || 0,
-      domTotal: state.totals.get(state.currentStoryId) ?? null
-    };
-
     try {
-      localStorage.setItem('panel_story_store', JSON.stringify(storyStore));
-      localStorage.setItem('panel_viewer_cache', JSON.stringify(trimmed));
-      localStorage.setItem('panel_global_seen', JSON.stringify([...state.seenEver]));
-      localStorage.setItem('panel_story_meta', JSON.stringify(meta));
-      saveSeenEver();
-      if (DEBUG) console.log('[SL:backend] mirrored panel_* keys');
-    } catch (e) {
-      console.warn('[SL:backend] mirror failed', e);
-    }
-
-    // Notify UI
-    window.dispatchEvent(new CustomEvent('storylister:data_updated', { 
-      detail: { storyId: state.currentStoryId, count: storyStore[state.currentStoryId]?.viewers?.length || 0 } 
-    }));
+      localStorage.setItem('panel_story_store', JSON.stringify(store));
+      window.dispatchEvent(new CustomEvent('storylister:data_updated', {
+        detail: { storyId: state.currentStoryId }
+      }));
+    } catch {}
   }
 
-  // ---------- Viewer ingestion ----------
-  function normalizeViewer(u) {
-    const id = String(u.id || u.pk);
-    return {
-      id,
-      username: u.username || '',
-      displayName: u.full_name || '',
-      profilePic: u.profile_pic_url || u.profile_pic_url_hd || '',
-      isVerified: !!u.is_verified,
-      isPrivate: !!u.is_private,
-      followsViewer: !!(u.follows_viewer || u?.friendship_status?.following),
-      followedByViewer: !!(u.followed_by_viewer || u?.friendship_status?.followed_by),
-      reaction: u.reaction || u.quick_reaction_emoji || u.reel_reaction || null,
-      viewedAt: Date.now()
-    };
-  }
-
-  function ensureBucket(storyId) {
-    const sid = String(storyId);
-    if (!state.stories.has(sid)) state.stories.set(sid, new Map());
-    state.currentStoryId = sid;
-    return state.stories.get(sid);
-  }
-
-  function extractStoryId() {
-    const m = location.pathname.match(/\/stories\/[^\/]+\/(\d+)/);
-    return m ? m[1] : null;
-  }
-
-  // Message bridge from injected.js
+  // Listen for viewer chunks from injected.js
   window.addEventListener('message', (evt) => {
-    if (evt.source !== window || !evt.data) return;
+    if (evt.source !== window) return;
     const msg = evt.data;
+    if (!msg || typeof msg !== 'object') return;
 
     if (msg.type === 'STORYLISTER_VIEWERS_CHUNK' && msg.data) {
       const { mediaId, viewers, totalCount } = msg.data;
-      const sid = String(mediaId || extractStoryId() || 'unknown');
-      const bucket = ensureBucket(sid);
-
-      if (Number.isFinite(totalCount)) state.totals.set(sid, totalCount);
-
+      const bucket = ensureBucket(mediaId || 'unknown');
+      if (Number.isFinite(totalCount)) state.totals.set(String(mediaId), totalCount);
       for (const u of viewers) {
-        const v = normalizeViewer(u);
-        if (!bucket.has(v.id)) {
-          bucket.set(v.id, v);
-        }
+        const id = String(u.id || u.pk);
+        bucket.set(id, {
+          id,
+          username: u.username || '',
+          full_name: u.full_name || '',
+          profile_pic_url: u.profile_pic_url || u.profile_pic_url_hd || '',
+          is_verified: !!u.is_verified
+        });
       }
-      
-      // persist compact doc
-      idb.put('stories', { 
-        storyId: sid, 
-        viewers: Array.from(bucket.values()), 
-        fetchedAt: Date.now(), 
-        total: state.totals.get(sid) ?? null 
-      }).catch(() => {});
-      
-      scheduleMirror();
+      mirrorToLegacy();
     }
 
     if (msg.type === 'STORYLISTER_DOM_TOTAL' && msg.data) {
       const { mediaId, total } = msg.data;
-      const sid = String(mediaId || extractStoryId() || 'unknown');
       if (Number.isFinite(total)) {
-        state.totals.set(sid, total);
-        scheduleMirror();
+        state.totals.set(String(mediaId), total);
+        mirrorToLegacy();
       }
-    }
-
-    if (msg.type === 'STORYLISTER_STORY_CHANGED' && msg.data) {
-      const { storyId } = msg.data;
-      state.currentStoryId = String(storyId);
-      ensureBucket(state.currentStoryId);
-      scheduleMirror();
     }
   });
 
-  // ---------- DOM observers for story metadata ----------
-  function parseStoryCount() {
-    // Parse progress bars to get story count
-    const progressBars = document.querySelectorAll('[role="progressbar"], [aria-label*="Story"] div[style*="width"]');
-    if (progressBars.length > 0) {
-      const index = Array.from(progressBars).findIndex(bar => {
-        const style = window.getComputedStyle(bar);
-        return style.width !== '0px' && style.width !== '100%';
-      });
-      
-      if (state.currentStoryId) {
-        state.storyMeta[state.currentStoryId] = {
-          index: index >= 0 ? index + 1 : 1,
-          total: progressBars.length
-        };
-      }
-      
-      return { index: index + 1, total: progressBars.length };
-    }
-    return null;
-  }
-
-  function parseViewerCount() {
-    // Look for "Seen by X" in the DOM
-    const patterns = [
-      /Seen by (\d+)/i,
-      /(\d+) viewers?/i,
-      /Viewed by (\d+)/i
-    ];
-    
-    const walker = document.createTreeWalker(
-      document.body,
-      NodeFilter.SHOW_TEXT,
-      null,
-      false
-    );
-    
-    let node;
-    while (node = walker.nextNode()) {
-      const text = node.textContent || '';
-      for (const pattern of patterns) {
-        const match = text.match(pattern);
-        if (match) {
-          const count = parseInt(match[1], 10);
-          if (count > 0) {
-            if (state.currentStoryId) {
-              state.totals.set(state.currentStoryId, count);
-            }
-            return count;
-          }
-        }
-      }
-    }
-    return null;
-  }
-
-  // ---------- Native-timing auto-open (no randomness), gated ----------
-  function findSeenBy() {
-    // Multiple selectors for robustness
-    return document.querySelector('a[href*="/seen_by/"]') ||
-           document.querySelector('[aria-label*="Seen by"]') ||
-           document.querySelector('button:has-text("Seen by")') ||
-           Array.from(document.querySelectorAll('div[role="button"]')).find(el => 
-             el.textContent?.includes('Seen by'));
-  }
-
+  // -----------------------------------
+  // Auto-open viewers (optional)
+  // -----------------------------------
   function autoOpenIfAllowed() {
-    const settings = Settings.get();
-    if (!settings.autoOpen) return;
-    if (!isOnOwnStory()) return;
-    if (!canUseForThisAccount()) return;
+    if (!Settings.cache.autoOpen) return;
+    if (!isOwnStoryView()) return;
 
-    const el = findSeenBy();
-    if (!el) {
-      // Try again in a moment
-      Perf.schedule(autoOpenIfAllowed, 2000);
+    const el = findSeenByElement();
+    if (!el) return;
+
+    // Click once, if the dialog is not already open
+    if (!document.querySelector('[role="dialog"]')) {
+      Perf.schedule(() => {
+        el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+      });
+    }
+  }
+
+  // -----------------------------------
+  // Mutation observers (guarded)
+  // -----------------------------------
+  function startObservers() {
+    // Guard body existence (fixes "observe … not of type Node")
+    const target = document.body || document.documentElement;
+    if (!target) {
+      requestAnimationFrame(startObservers);
       return;
     }
 
-    // Let the browser choose a natural moment to act
-    Perf.schedule(() => {
-      // click via a standard, frame-aligned event (no mouse jitter)
-      el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-      if (DEBUG) console.log('[SL:backend] Auto-opened viewer list');
-      
-      // Save checkpoint when opening
-      const owner = detectActiveUsername();
-      if (owner) {
-        saveCheckpoint(owner);
+    // Observe SPA navigations and DOM changes
+    const mo = new MutationObserver(() => {
+      injectNetworkScriptOnce();
+
+      // Watch story id from URL
+      const m = location.pathname.match(/\/stories\/[^\/]+\/(\d+)/);
+      if (m) {
+        const sid = m[1];
+        if (sid !== state.currentStoryId) {
+          state.currentStoryId = sid;
+
+          // Bind handle first time we see our own story
+          const owner = detectStoryOwnerFromURL();
+          if (isOwnStoryView() && owner && !Settings.cache.accountHandle) {
+            Settings.save({ accountHandle: owner });
+          }
+
+          // Show free toast only when: Seen by exists AND owner ≠ saved
+          if (shouldShowFreeToast(owner)) {
+            renderFreeAccountToast(Settings.cache.accountHandle);
+          }
+
+          autoOpenIfAllowed();
+        }
       }
     });
+
+    mo.observe(target, { childList: true, subtree: true, attributes: true, characterData: true });
   }
 
-  // ---------- Script injection (with retry safety) ----------
-  function injectScript() {
-    if (document.getElementById('storylister-injected')) return;
-    
-    const script = document.createElement('script');
-    script.id = 'storylister-injected';
-    script.src = chrome.runtime.getURL('injected.js');
-    script.onload = function() { this.remove(); };
-    
-    (document.head || document.documentElement).appendChild(script);
-    if (DEBUG) console.log('[SL:backend] Injected script');
-  }
+  // -----------------------------------
+  // Cross-script messaging for popup
+  // -----------------------------------
+  window.addEventListener('message', async (evt) => {
+    if (evt.source !== window) return;
+    if (!evt.data || typeof evt.data !== 'object') return;
 
-  // ---------- Initialization ----------
-  // Observe navigation to trigger auto-open once per story
-  let lastPath = null;
-  const navObserver = new MutationObserver(() => {
-    const p = location.pathname;
-    if (p === lastPath) return;
-    lastPath = p;
-
-    // Parse story metadata when navigating
-    parseStoryCount();
-    parseViewerCount();
-
-    // only on your own story
-    if (/^\/stories\//.test(p) && isOnOwnStory()) {
-      state.currentStoryId = extractStoryId();
-      Perf.schedule(autoOpenIfAllowed);
-    }
-  });
-  
-  navObserver.observe(document.documentElement, { childList: true, subtree: true, attributes: true });
-
-  // DOM observer for viewer counts
-  const domObserver = new MutationObserver(() => {
-    const count = parseViewerCount();
-    const storyMeta = parseStoryCount();
-    if (count !== null || storyMeta !== null) {
-      scheduleMirror();
-    }
-  });
-  
-  domObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
-
-  // Listen for panel events
-  window.addEventListener('storylister:panel_opened', () => {
-    const owner = detectActiveUsername();
-    if (owner && isOnOwnStory()) {
-      if (DEBUG) console.log('[SL:backend] Panel opened, saving checkpoint');
-      saveCheckpoint(owner);
-      // Reload data to update NEW flags
-      Perf.schedule(() => scheduleMirror(), 100);
+    // Popup requests handle clear
+    if (evt.data.type === 'SL_CLEAR_ACCOUNT_HANDLE') {
+      const old = Settings.cache.accountHandle || "";
+      await Settings.save({ accountHandle: "" });
+      await eraseTagsForHandleIfFree(old);
+      window.dispatchEvent(new CustomEvent('storylister:account_cleared'));
     }
   });
 
-  window.addEventListener('storylister:request_data', () => {
-    scheduleMirror();
-  });
-
-  // Initial setup
-  async function initialize() {
-    // Load checkpoint for current user
-    const owner = detectActiveUsername();
-    if (owner) {
-      await loadCheckpoint(owner);
-    }
-
-    // Inject script
-    injectScript();
-    
-    // Parse initial state
-    parseStoryCount();
-    parseViewerCount();
-    
-    // Check for auto-open
-    Perf.schedule(autoOpenIfAllowed);
-  }
-
-  // Start when DOM is ready
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initialize);
-  } else {
-    initialize();
-  }
-
-  // Expose API for extension popup
-  if (chrome.runtime?.onMessage) {
-    chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
-      if (msg?.action === 'checkStoryViewer') {
-        sendResponse({ 
-          active: isOnOwnStory(), 
-          storyId: state.currentStoryId,
-          username: detectActiveUsername(),
-          canUse: canUseForThisAccount()
-        });
-        return false;
-      }
-    });
-  }
-
-  if (DEBUG) console.log('[SL:backend] Ready on', location.pathname);
+  // -----------------------------------
+  // Initialize
+  // -----------------------------------
+  (async function init() {
+    await Settings.load();
+    injectNetworkScriptOnce();
+    startObservers();
+  })();
 })();
