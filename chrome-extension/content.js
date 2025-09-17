@@ -4,6 +4,115 @@
 (function() {
   console.log('[Storylister] Initializing extension UI');
   
+  // Hybrid storage manager - IndexedDB for bulk data, localStorage for speed
+  class HybridStorage {
+    constructor() {
+      this.db = null;
+      this.dbName = 'storylister_data';
+      this.initPromise = this.initDB();
+    }
+    
+    async initDB() {
+      return new Promise((resolve, reject) => {
+        const request = indexedDB.open(this.dbName, 1);
+        
+        request.onupgradeneeded = (e) => {
+          const db = e.target.result;
+          
+          if (!db.objectStoreNames.contains('viewers')) {
+            const viewerStore = db.createObjectStore('viewers', { 
+              keyPath: 'compositeId' 
+            });
+            viewerStore.createIndex('storyId', 'storyId', { unique: false });
+            viewerStore.createIndex('username', 'username', { unique: false });
+            viewerStore.createIndex('timestamp', 'timestamp', { unique: false });
+          }
+          
+          if (!db.objectStoreNames.contains('stories')) {
+            db.createObjectStore('stories', { keyPath: 'id' });
+          }
+          
+          if (!db.objectStoreNames.contains('analytics')) {
+            db.createObjectStore('analytics', { keyPath: 'id', autoIncrement: true });
+          }
+        };
+        
+        request.onsuccess = () => {
+          this.db = request.result;
+          console.log('[Storylister] IndexedDB initialized');
+          resolve();
+        };
+        
+        request.onerror = (e) => {
+          console.error('[Storylister] IndexedDB failed, falling back to localStorage', e);
+          // Don't fail completely - we can still use localStorage
+          resolve();
+        };
+      });
+    }
+    
+    async saveViewers(storyId, viewers) {
+      // Fast save to localStorage for immediate UI
+      const sessionData = { [storyId]: { viewers, timestamp: Date.now() }};
+      localStorage.setItem('panel_story_store', JSON.stringify(sessionData));
+      
+      // Async save to IndexedDB if available
+      if (this.db) {
+        try {
+          await this.initPromise;
+          const tx = this.db.transaction(['viewers'], 'readwrite');
+          const store = tx.objectStore('viewers');
+          
+          for (const viewer of viewers) {
+            const viewerData = Array.isArray(viewer) ? viewer[1] : viewer;
+            await store.put({
+              ...viewerData,
+              compositeId: `${storyId}_${viewerData.username}`,
+              storyId,
+              timestamp: Date.now()
+            });
+          }
+        } catch (e) {
+          console.warn('[Storylister] IndexedDB save failed, data in localStorage only', e);
+        }
+      }
+    }
+    
+    async getViewers(storyId) {
+      // Try localStorage first (fast)
+      try {
+        const sessionData = localStorage.getItem('panel_story_store');
+        if (sessionData) {
+          const parsed = JSON.parse(sessionData);
+          if (parsed[storyId]?.viewers) {
+            return parsed[storyId].viewers;
+          }
+        }
+      } catch (e) {}
+      
+      // Fall back to IndexedDB
+      if (this.db) {
+        try {
+          await this.initPromise;
+          const tx = this.db.transaction(['viewers'], 'readonly');
+          const index = tx.objectStore('viewers').index('storyId');
+          const request = index.getAll(storyId);
+          
+          return new Promise(resolve => {
+            request.onsuccess = () => resolve(request.result || []);
+            request.onerror = () => resolve([]);
+          });
+        } catch (e) {
+          return [];
+        }
+      }
+      
+      return [];
+    }
+  }
+  
+  const storage = new HybridStorage();
+  
   // State management
   let isActive = false;
   let rightRail = null;
@@ -215,54 +324,108 @@
     return filteredViewers;
   }
   
-  // Load viewers from localStorage
-  function loadViewersFromStorage() {
-    try {
-      // Load story metadata
-      const metaStr = localStorage.getItem('panel_story_meta');
-      if (metaStr) {
-        storyMeta = JSON.parse(metaStr);
-      }
+  // Data synchronization with chunking
+  const DataSyncManager = {
+    lastSyncTime: 0,
+    
+    async performSync() {
+      const now = performance.now();
+      if (now - this.lastSyncTime < 1000) return;
+      this.lastSyncTime = now;
       
-      // Load from panel_story_store
-      const storyStore = localStorage.getItem('panel_story_store');
-      if (storyStore) {
-        const parsed = JSON.parse(storyStore);
-        const storyId = storyMeta.currentStoryId || Object.keys(parsed)[0];
-        currentStory = storyId;
+      try {
+        // Get story ID from URL  
+        const urlMatch = location.pathname.match(/\/stories\/[^\/]+\/(\d+)/);
+        if (!urlMatch) {
+          // Try legacy localStorage format
+          const metaStr = localStorage.getItem('panel_story_meta');
+          if (metaStr) {
+            storyMeta = JSON.parse(metaStr);
+          }
+          const storyStore = localStorage.getItem('panel_story_store');
+          if (storyStore) {
+            const parsed = JSON.parse(storyStore);
+            currentStory = Object.keys(parsed)[0];
+          }
+          return;
+        }
         
-        if (storyId && parsed[storyId] && parsed[storyId].viewers) {
+        const currentStoryId = urlMatch[1];
+        currentStory = currentStoryId;
+        
+        // Get viewers from hybrid storage
+        let viewerData = await storage.getViewers(currentStoryId);
+        
+        if (!viewerData || viewerData.length === 0) {
+          // Try legacy localStorage format for backwards compatibility
+          const legacyData = localStorage.getItem('panel_story_store');
+          if (legacyData) {
+            const parsed = JSON.parse(legacyData);
+            if (parsed[currentStoryId] && parsed[currentStoryId].viewers) {
+              viewerData = parsed[currentStoryId].viewers || [];
+            }
+          }
+        }
+        
+        // Process in chunks for performance
+        if (viewerData && viewerData.length > 0) {
           viewers.clear();
           
-          parsed[storyId].viewers.forEach(([compositeId, viewer]) => {
-            viewers.set(viewer.username, {
-              ...viewer,
-              displayName: viewer.full_name || viewer.displayName || viewer.username,
-              profilePic: viewer.profile_pic_url || `https://i.pravatar.cc/150?u=${viewer.username}`,
-              isVerified: viewer.is_verified || false,
-              isFollower: viewer.followed_by_viewer || false,
-              isFollowing: viewer.follows_viewer || false,
-              isTagged: taggedUsers.has(viewer.username),
-              isNew: viewer.isNew || false,
-              reaction: viewer.reaction || viewer.reacted || null,
-              viewedAt: viewer.viewedAt || viewer.timestamp || Date.now()
+          const chunkSize = 50;
+          for (let i = 0; i < viewerData.length; i += chunkSize) {
+            const chunk = viewerData.slice(i, i + chunkSize);
+            
+            await new Promise(resolve => {
+              requestAnimationFrame(() => {
+                chunk.forEach(item => {
+                  // Handle both formats ([id, viewer] or just viewer)
+                  const viewer = Array.isArray(item) ? item[1] : item;
+                  
+                  viewers.set(viewer.username, {
+                    id: viewer.id || viewer.pk || viewer.username,
+                    username: viewer.username || '',
+                    displayName: viewer.full_name || viewer.displayName || viewer.username || '',
+                    profilePic: viewer.profile_pic_url || `https://ui-avatars.com/api/?name=${viewer.username}`,
+                    isVerified: viewer.is_verified || false,
+                    isFollower: viewer.followed_by_viewer || false,
+                    isFollowing: viewer.follows_viewer || false,
+                    isTagged: taggedUsers.has(viewer.username),
+                    isNew: viewer.isNew || false,
+                    reaction: viewer.reaction || viewer.reacted || null,
+                    viewedAt: viewer.viewedAt || viewer.timestamp || Date.now()
+                  });
+                });
+                resolve();
+              });
             });
-          });
+          }
           
           // Update metadata
-          if (parsed[storyId].domTotal !== undefined) {
-            storyMeta.domTotal = parsed[storyId].domTotal;
-          }
-          if (parsed[storyId].collectedCount !== undefined) {
-            storyMeta.collectedCount = parsed[storyId].collectedCount;
-          }
+          storyMeta.domTotal = viewerData.length;
+          storyMeta.collectedCount = viewers.size;
           
-          console.log(`[Storylister] Loaded ${viewers.size} viewers for story ${storyId}`);
+          console.log(`[Storylister] Loaded ${viewers.size} viewers for story ${currentStoryId}`);
+          updateViewerList();
         }
+      } catch (e) {
+        console.error('[Storylister] Sync error:', e);
       }
-    } catch (e) {
-      console.error('[Storylister] Error loading viewers:', e);
+    },
+    
+    startSync() {
+      const syncLoop = () => {
+        if (isActive && isOnOwnStory()) {
+          this.performSync();
+        }
+        requestAnimationFrame(() => setTimeout(syncLoop, 1000));
+      };
+      syncLoop();
     }
+  };
+  
+  // Load viewers from storage (backwards compatibility wrapper)
+  function loadViewersFromStorage() {
+    DataSyncManager.performSync();
   }
   
   // Toggle tag
@@ -1425,6 +1588,9 @@
     
     // Inject styles
     injectStyles();
+    
+    // Start data synchronization manager
+    DataSyncManager.startSync();
     
     // Check if we should show the panel
     checkForStories();
