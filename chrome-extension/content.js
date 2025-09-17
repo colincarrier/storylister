@@ -1068,6 +1068,9 @@
     }
     isActive = false;
     
+    // Notify backend that panel closed
+    window.dispatchEvent(new CustomEvent('storylister:panel_closed'));
+    
     // Resume videos
     resumeVideos();
   }
