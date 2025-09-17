@@ -30,6 +30,22 @@
     { id: 'coworker', emoji: '💼', label: 'Coworker' }
   ];
   
+  // Settings helpers for per-account tags
+  const SETTINGS_KEY = 'storylister_settings';
+  
+  function tagsKeyFromSettings(settings) {
+    const handle = (settings?.accountHandle || 'default');
+    return `sl_tags_${handle}`;
+  }
+  
+  async function loadSettingsSync() {
+    return new Promise(resolve => {
+      chrome.storage.sync.get(['storylister_settings'], data => {
+        resolve(data['storylister_settings'] || {});
+      });
+    });
+  }
+  
   // ---------- Account Management ----------
   function detectActiveUsername() {
     // 1) From story URL: /stories/<username>/<id>
@@ -82,21 +98,29 @@
     return `sl_${username}_`;
   }
   
-  // Load tagged users from localStorage (account-specific)
-  function loadTaggedUsers() {
+  // Load tagged users from chrome.storage (account-specific)
+  async function loadTaggedUsers() {
     try {
-      const prefix = getAccountPrefix();
-      const stored = localStorage.getItem(prefix + 'tagged_users');
-      taggedUsers = stored ? new Set(JSON.parse(stored)) : new Set();
+      const settings = await loadSettingsSync();
+      const TAGS_KEY = tagsKeyFromSettings(settings);
+      
+      return new Promise(resolve => {
+        chrome.storage.local.get([TAGS_KEY], (obj) => {
+          const tags = obj[TAGS_KEY] || [];
+          taggedUsers = new Set(tags);
+          resolve();
+        });
+      });
     } catch (e) {
       taggedUsers = new Set();
     }
   }
   
-  // Save tagged users to localStorage (account-specific)
-  function saveTaggedUsers() {
-    const prefix = getAccountPrefix();
-    localStorage.setItem(prefix + 'tagged_users', JSON.stringify(Array.from(taggedUsers)));
+  // Save tagged users to chrome.storage (account-specific)
+  async function saveTaggedUsers() {
+    const settings = await loadSettingsSync();
+    const TAGS_KEY = tagsKeyFromSettings(settings);
+    chrome.storage.local.set({ [TAGS_KEY]: Array.from(taggedUsers) });
   }
   
   // Format time ago
