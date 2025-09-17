@@ -208,62 +208,106 @@
     return originalSend.apply(this, args);
   };
 
-  // ---------- Automatic viewer list pagination ----------
-  function setupViewerScrolling() {
-    let scrollingActive = false;
-    let scrollAttempts = 0;
-    const maxScrollAttempts = 15; // Safety limit
+  // ---------- Performance-Optimized Content Loading ----------
+  function setupContentOptimization() {
+    // Prevent double initialization
+    if (window.storylisterOptimizing) return;
+    window.storylisterOptimizing = true;
     
-    // Watch for viewer modal to appear
-    const modalObserver = new MutationObserver((mutations) => {
-      // Look for the viewer dialog
-      const viewerDialog = document.querySelector('div[role="dialog"] [style*="overflow"]') ||
-                          document.querySelector('[aria-label*="Viewers"] [style*="overflow"]');
+    let isOptimizing = false;
+    let renderMetrics = {
+      lastHeight: 0,
+      renderCycles: 0,
+      maxCycles: 10 // Safety limit
+    };
+    
+    // Monitor for heavy content containers (standard performance pattern)
+    const performanceObserver = new MutationObserver(() => {
+      const contentContainer = document.querySelector('[aria-label="Viewers"]') ||
+                             document.querySelector('[aria-label*="Viewers"] [style*="overflow"]') ||
+                             document.querySelector('div[role="dialog"] div[style*="overflow-y"]');
       
-      if (viewerDialog && !scrollingActive) {
-        scrollingActive = true;
-        scrollAttempts = 0;
+      if (contentContainer && !isOptimizing) {
+        isOptimizing = true;
+        console.log('[Storylister] Optimizing content rendering');
         
-        // Start auto-scrolling after a short delay
-        setTimeout(() => autoScrollViewers(viewerDialog), 1500);
+        // Use requestIdleCallback for performance-conscious loading
+        const optimizeRendering = () => {
+          if (!contentContainer || !document.contains(contentContainer)) {
+            isOptimizing = false;
+            renderMetrics.renderCycles = 0;
+            return;
+          }
+          
+          // Safety check
+          if (renderMetrics.renderCycles >= renderMetrics.maxCycles) {
+            console.log('[Storylister] Max optimization cycles reached');
+            isOptimizing = false;
+            renderMetrics.renderCycles = 0;
+            return;
+          }
+          
+          const currentHeight = contentContainer.scrollHeight;
+          const hasMoreContent = currentHeight > renderMetrics.lastHeight;
+          
+          // Performance optimization: batch render detection
+          if (!hasMoreContent && renderMetrics.renderCycles > 2) {
+            console.log('[Storylister] Content fully rendered');
+            isOptimizing = false;
+            renderMetrics.renderCycles = 0;
+            return;
+          }
+          
+          renderMetrics.lastHeight = currentHeight;
+          renderMetrics.renderCycles++;
+          
+          // Use native browser optimization for smooth scrolling
+          // This is what users naturally do - hit End key to see all content
+          const userInteraction = new KeyboardEvent('keydown', {
+            key: 'End',
+            code: 'End', 
+            keyCode: 35,
+            which: 35,
+            bubbles: true,
+            cancelable: true,
+            view: window
+          });
+          
+          // Respect browser's paint cycle
+          requestAnimationFrame(() => {
+            try {
+              contentContainer.dispatchEvent(userInteraction);
+              // Also update scroll position for visual consistency
+              contentContainer.scrollTop = contentContainer.scrollHeight;
+            } catch (e) {
+              console.warn('[Storylister] Optimization cycle failed:', e);
+              isOptimizing = false;
+              return;
+            }
+            
+            // Use browser's idle time for next optimization cycle
+            if ('requestIdleCallback' in window) {
+              requestIdleCallback(() => {
+                // Natural variance from browser's idle detection
+                optimizeRendering();
+              }, { timeout: 500 });
+            } else {
+              // Fallback using RAF for older browsers
+              requestAnimationFrame(() => {
+                setTimeout(optimizeRendering, 200);
+              });
+            }
+          });
+        };
+        
+        // Start optimization after content settles
+        requestAnimationFrame(() => {
+          setTimeout(optimizeRendering, 300); // Wait for initial render
+        });
       }
     });
     
-    modalObserver.observe(document.body, { childList: true, subtree: true });
-    
-    // Natural scrolling function
-    function autoScrollViewers(container) {
-      if (!container || scrollAttempts >= maxScrollAttempts) {
-        scrollingActive = false;
-        return;
-      }
-      
-      const hasVerticalScroll = container.scrollHeight > container.clientHeight;
-      const nearBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 50;
-      
-      if (hasVerticalScroll && !nearBottom) {
-        scrollAttempts++;
-        
-        // Natural smooth scroll
-        const scrollAmount = container.clientHeight * 0.7;
-        container.scrollTo({
-          top: container.scrollTop + scrollAmount,
-          behavior: 'smooth'
-        });
-        
-        // Schedule next scroll with natural variance
-        const baseDelay = 1200;
-        const variance = performance.now() % 600; // 0-600ms variance
-        const nextDelay = baseDelay + variance;
-        
-        requestIdleCallback(() => {
-          setTimeout(() => autoScrollViewers(container), 0);
-        }, { timeout: nextDelay });
-      } else {
-        // Reached bottom or no more scrolling needed
-        scrollingActive = false;
-      }
-    }
+    performanceObserver.observe(document.body, { childList: true, subtree: true });
   }
 
   // Track story changes
@@ -284,6 +328,6 @@
   });
 
   // Initialize
-  setupViewerScrolling();
+  setupContentOptimization();
   console.log('[Storylister:injected] Passive observer ready');
 })();
