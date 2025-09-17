@@ -1,628 +1,515 @@
-// Storylister Backend - Data Layer with DOM Observation
-// This script handles data collection and storage with localStorage bridge
-// No UI elements - UI is handled by content.js
+// content-backend.js — passive data layer & legacy bridge (no UI changes)
+(() => {
+  'use strict';
 
-(function() {
-  console.log('[SL:backend] Initializing backend data layer with DOM observers');
-  
-  const CONFIG = {
-    RETENTION_HOURS: 24,
-    MAX_STORIES_KEPT: 10,
-    MAX_CACHE_SIZE: 5000,
-    DB_NAME: 'StoryLister',
-    DB_VERSION: 1
-  };
-  
-  let db = null;
-  let currentStoryId = null;
-  let storiesMap = new Map(); // Track all stories in session
-  let viewersPerStory = new Map(); // Map of storyId -> Map of username -> viewer data
-  let domObservers = {
-    progressBar: null,
-    viewerModal: null,
-    storyContainer: null
-  };
-  
-  // DOM selectors (may need updates based on Instagram's current classes)
-  const SELECTORS = {
-    progressBars: '[role="progressbar"]',
-    progressContainer: 'div[style*="transform"] > div > div',
-    viewerModal: '[role="dialog"]',
-    viewerCount: 'span:has-text("Seen by")',
-    viewerRows: '[role="button"][tabindex="0"]',
-    storyContainer: 'section > div > div[style*="height"]',
-    videoElements: 'video'
-  };
-  
-  // Initialize IndexedDB
-  async function initDB() {
-    return new Promise((resolve, reject) => {
-      const request = indexedDB.open(CONFIG.DB_NAME, CONFIG.DB_VERSION);
-      
-      request.onerror = () => reject(request.error);
-      request.onsuccess = () => {
-        db = request.result;
-        console.log('[SL:backend] Database opened successfully');
-        resolve(db);
-      };
-      
-      request.onupgradeneeded = (event) => {
-        const db = event.target.result;
-        
-        if (!db.objectStoreNames.contains('viewers')) {
-          const viewerStore = db.createObjectStore('viewers', { keyPath: 'compositeId' });
-          viewerStore.createIndex('storyId', 'storyId', { unique: false });
-          viewerStore.createIndex('username', 'username', { unique: false });
-          viewerStore.createIndex('timestamp', 'timestamp', { unique: false });
-        }
-        
-        if (!db.objectStoreNames.contains('stories')) {
-          const storyStore = db.createObjectStore('stories', { keyPath: 'id' });
-          storyStore.createIndex('timestamp', 'timestamp', { unique: false });
-        }
-        
-        if (!db.objectStoreNames.contains('checkpoints')) {
-          const checkpointStore = db.createObjectStore('checkpoints', { keyPath: 'id' });
-          checkpointStore.createIndex('timestamp', 'timestamp', { unique: false });
-        }
-      };
-    });
-  }
-  
-  // Extract story ID from URL
-  function extractStoryId() {
-    const match = window.location.pathname.match(/\/stories\/[^\/]+\/(\d+)/);
-    return match ? match[1] : null;
-  }
-  
-  // Extract story owner from URL
-  function extractStoryOwner() {
-    const match = window.location.pathname.match(/\/stories\/([^\/]+)\/\d+/);
-    return match ? match[1] : null;
-  }
-  
-  // Parse story count from progress bars
-  function parseStoryCount() {
-    try {
-      // Look for progress bar segments
-      const progressBars = document.querySelectorAll('[role="progressbar"], div[style*="width"][style*="height: 2px"]');
-      const storyCount = progressBars.length || 0;
-      
-      // Find active story (look for animation or different opacity)
-      let activeIndex = 0;
-      progressBars.forEach((bar, index) => {
-        const computed = window.getComputedStyle(bar);
-        if (computed.opacity === '1' || bar.querySelector('[style*="animation"]')) {
-          activeIndex = index;
-        }
-      });
-      
-      return { total: storyCount, current: activeIndex + 1 };
-    } catch (e) {
-      console.log('[SL:backend] Could not parse story count from DOM');
-      return { total: 0, current: 0 };
+  const DEBUG = true;
+
+  // ---------- Internal settings (no UI change yet) ----------
+  const SETTINGS_KEY = 'storylister_settings';
+  const DEFAULT_SETTINGS = { autoOpen: true, pauseVideos: true, proMode: false };
+
+  const Settings = {
+    get() {
+      try { return JSON.parse(localStorage.getItem(SETTINGS_KEY)) || DEFAULT_SETTINGS; }
+      catch { return DEFAULT_SETTINGS; }
+    },
+    set(next) {
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(next));
     }
+  };
+
+  // ---------- Account awareness (no UI change) ----------
+  function detectActiveUsername() {
+    // 1) From story URL: /stories/<username>/<id>
+    const m = location.pathname.match(/\/stories\/([^\/]+)(?:\/|$)/);
+    if (m) return m[1];
+
+    // 2) Heuristic: cursor/profile area (robust to class churn)
+    const link = document.querySelector('a[href^="/"][href$="/"] img[alt*="profile picture"]')?.parentElement;
+    if (link?.getAttribute('href')) return link.getAttribute('href').replace(/\//g, '') || null;
+
+    // 3) Last resort: look for "'s profile picture" alt text
+    const img = Array.from(document.querySelectorAll('img[alt]'))
+      .find(el => /'s profile picture$/.test(el.alt));
+    if (img) return img.alt.replace(/'s profile picture$/, '');
+
+    return null;
   }
-  
-  // Parse viewer count from DOM
-  function parseViewerCount() {
-    try {
-      // Look for "Seen by X" text
-      const elements = Array.from(document.querySelectorAll('span, div')).filter(el => 
-        el.textContent.match(/^Seen by \d+$/)
-      );
-      
-      if (elements.length > 0) {
-        const match = elements[0].textContent.match(/Seen by (\d+)/);
-        return match ? parseInt(match[1]) : null;
+
+  function isOnOwnStory() {
+    const m = location.pathname.match(/\/stories\/([^\/]+)\//);
+    if (!m) return false;
+    const storyOwner = m[1];
+    const current = detectActiveUsername();
+    return !!current && storyOwner === current;
+  }
+
+  // Free-tier binding to first account that uses it
+  const FREE_ACCOUNT_KEY = 'storylister_free_account';
+  function canUseForThisAccount() {
+    const current = detectActiveUsername();
+    if (!current) return false;
+    let bound = localStorage.getItem(FREE_ACCOUNT_KEY);
+    if (!bound) { localStorage.setItem(FREE_ACCOUNT_KEY, current); bound = current; }
+    return bound === current;
+  }
+
+  function accountPrefix() {
+    const u = detectActiveUsername() || 'default';
+    return `sl_${u}_`;
+  }
+
+  // ---------- IndexedDB (compact per-story docs) ----------
+  const idb = {
+    db: null,
+    async open() {
+      if (this.db) return this.db;
+      this.db = await new Promise((resolve, reject) => {
+        const req = indexedDB.open(`${accountPrefix()}db`, 1);
+        req.onupgradeneeded = () => {
+          const db = req.result;
+          if (!db.objectStoreNames.contains('stories')) {
+            const st = db.createObjectStore('stories', { keyPath: 'storyId' });
+            st.createIndex('fetchedAt', 'fetchedAt');
+          }
+          if (!db.objectStoreNames.contains('checkpoints')) {
+            db.createObjectStore('checkpoints', { keyPath: 'owner' });
+          }
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+      return this.db;
+    },
+    async put(storeName, doc) {
+      const db = await this.open();
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction(storeName, 'readwrite');
+        tx.objectStore(storeName).put(doc);
+        tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
+      });
+    },
+    async get(storeName, id) {
+      const db = await this.open();
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(storeName, 'readonly');
+        const req = tx.objectStore(storeName).get(id);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => reject(req.error);
+      });
+    },
+    async getAll(storeName) {
+      const db = await this.open();
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(storeName, 'readonly');
+        const req = tx.objectStore(storeName).getAll();
+        req.onsuccess = () => resolve(req.result || []);
+        req.onerror = () => reject(req.error);
+      });
+    }
+  };
+
+  // ---------- State ----------
+  const state = {
+    stories: new Map(),    // storyId -> Map(userId -> viewer)
+    seenEver: new Set(JSON.parse(localStorage.getItem(accountPrefix() + 'seenEver') || '[]')),
+    currentStoryId: null,
+    storyMeta: {},         // storyId -> { index, total }
+    totals: new Map(),     // storyId -> number (DOM total)
+    checkpoints: new Map() // owner -> timestamp
+  };
+
+  function saveSeenEver() {
+    localStorage.setItem(accountPrefix() + 'seenEver', JSON.stringify([...state.seenEver]));
+  }
+
+  // ---------- Native timing helpers (no randomness) ----------
+  const Perf = {
+    // frame-aligned scheduling that looks like render budgeting
+    schedule(cb, timeout = 1500) {
+      if ('requestIdleCallback' in window) {
+        requestIdleCallback(cb, { timeout });
+      } else {
+        requestAnimationFrame(() => setTimeout(cb, 0));
       }
-      
-      // Alternative: Look in viewer modal header
-      const modalHeader = document.querySelector('[role="dialog"] h1, [role="dialog"] header');
-      if (modalHeader) {
-        const match = modalHeader.textContent.match(/(\d+) viewer/);
-        return match ? parseInt(match[1]) : null;
-      }
-    } catch (e) {
-      console.log('[SL:backend] Could not parse viewer count from DOM');
+    }
+  };
+
+  // ---------- Checkpoint management for NEW badges ----------
+  async function loadCheckpoint(owner) {
+    if (!owner) return null;
+    const doc = await idb.get('checkpoints', owner).catch(() => null);
+    if (doc) {
+      state.checkpoints.set(owner, doc.timestamp);
+      return doc.timestamp;
     }
     return null;
   }
-  
-  // Parse emoji reactions from viewer rows
-  function parseReactionsFromDOM() {
-    try {
-      const reactions = new Map();
-      const viewerRows = document.querySelectorAll('[role="dialog"] [role="button"]');
-      
-      viewerRows.forEach(row => {
-        // Look for username
-        const usernameEl = row.querySelector('span[dir="auto"]');
-        if (!usernameEl) return;
-        
-        const username = usernameEl.textContent;
-        
-        // Look for emoji reaction
-        const emojiEl = row.querySelector('[aria-label*="reaction"], [role="img"], span[style*="emoji"]');
-        if (emojiEl) {
-          const emoji = emojiEl.textContent || emojiEl.getAttribute('aria-label');
-          if (emoji) {
-            reactions.set(username, emoji);
-          }
-        }
-      });
-      
-      return reactions;
-    } catch (e) {
-      console.log('[SL:backend] Could not parse reactions from DOM');
-    }
-    return new Map();
-  }
-  
-  // Load checkpoint for "new" viewer tracking
-  async function loadCheckpoint(storyOwner) {
-    if (!db) return null;
-    
-    try {
-      const transaction = db.transaction(['checkpoints'], 'readonly');
-      const store = transaction.objectStore('checkpoints');
-      const request = store.get(storyOwner);
-      
-      return new Promise((resolve) => {
-        request.onsuccess = () => resolve(request.result?.timestamp || null);
-        request.onerror = () => resolve(null);
-      });
-    } catch (e) {
-      return null;
-    }
-  }
-  
-  // Save checkpoint
-  async function saveCheckpoint(storyOwner) {
-    if (!db || !storyOwner) return;
-    
-    try {
-      const transaction = db.transaction(['checkpoints'], 'readwrite');
-      const store = transaction.objectStore('checkpoints');
-      store.put({
-        id: storyOwner,
-        timestamp: Date.now()
-      });
-    } catch (e) {
+
+  async function saveCheckpoint(owner) {
+    if (!owner) return;
+    const now = Date.now();
+    state.checkpoints.set(owner, now);
+    await idb.put('checkpoints', { owner, timestamp: now }).catch(e => {
       console.error('[SL:backend] Error saving checkpoint:', e);
-    }
-  }
-  
-  // Debounce helper
-  function debounce(func, wait) {
-    let timeout;
-    return function executedFunction(...args) {
-      const later = () => {
-        clearTimeout(timeout);
-        func(...args);
-      };
-      clearTimeout(timeout);
-      timeout = setTimeout(later, wait);
-    };
-  }
-  
-  // Mirror data to localStorage for UI compatibility
-  async function _mirrorToLocalStorage() {
-    try {
-      const storyOwner = extractStoryOwner();
-      const checkpoint = await loadCheckpoint(storyOwner);
-      
-      // Get story metadata from DOM
-      const storyMeta = parseStoryCount();
-      const domViewerCount = parseViewerCount();
-      
-      // Create panel_story_store format
-      const storyStore = {};
-      
-      // Get viewers for current story
-      const currentViewers = viewersPerStory.get(currentStoryId) || new Map();
-      
-      if (currentStoryId) {
-        storyStore[currentStoryId] = {
-          viewers: [],
-          timestamp: Date.now(),
-          totalCount: domViewerCount || currentViewers.size,
-          domTotal: domViewerCount,
-          collectedCount: currentViewers.size
-        };
-        
-        // Add viewers with composite key and "new" flag
-        currentViewers.forEach((viewer, username) => {
-          const isNew = checkpoint && viewer.timestamp > checkpoint;
-          storyStore[currentStoryId].viewers.push([
-            `${currentStoryId}_${username}`, // Composite ID
-            {
-              ...viewer,
-              isNew: isNew
-            }
-          ]);
-        });
-      }
-      
-      // Write to localStorage
-      localStorage.setItem('panel_story_store', JSON.stringify(storyStore));
-      
-      // Store story metadata
-      localStorage.setItem('panel_story_meta', JSON.stringify({
-        currentStoryId: currentStoryId,
-        storyOwner: storyOwner,
-        storyIndex: storyMeta.current,
-        storyTotal: storyMeta.total,
-        storiesInSession: Array.from(storiesMap.keys()),
-        lastCheckpoint: checkpoint
-      }));
-      
-      // Create viewer cache
-      const viewerCache = {};
-      currentViewers.forEach((viewer, username) => {
-        viewerCache[username] = {
-          ...viewer,
-          lastSeen: Date.now()
-        };
-      });
-      
-      // Limit cache size
-      const cacheEntries = Object.entries(viewerCache);
-      if (cacheEntries.length > CONFIG.MAX_CACHE_SIZE) {
-        const limited = Object.fromEntries(cacheEntries.slice(-CONFIG.MAX_CACHE_SIZE));
-        localStorage.setItem('panel_viewer_cache', JSON.stringify(limited));
-      } else {
-        localStorage.setItem('panel_viewer_cache', JSON.stringify(viewerCache));
-      }
-      
-      console.log(`[SL:backend] Mirrored ${currentViewers.size} viewers, DOM shows ${domViewerCount || '?'} total`);
-      
-      // Dispatch event for UI
-      window.dispatchEvent(new CustomEvent('storylister:data_updated', { 
-        detail: { 
-          storyId: currentStoryId,
-          viewerCount: currentViewers.size,
-          totalCount: domViewerCount || currentViewers.size,
-          storyIndex: storyMeta.current,
-          storyTotal: storyMeta.total,
-          isComplete: domViewerCount != null ? currentViewers.size >= domViewerCount : false
-        }
-      }));
-      
-    } catch (error) {
-      console.error('[SL:backend] Error mirroring to localStorage:', error);
-    }
-  }
-  
-  // Debounced version to avoid excessive writes
-  const mirrorToLocalStorage = debounce(_mirrorToLocalStorage, 500);
-  
-  // Process viewer chunks from interceptor
-  function processViewerChunk(data) {
-    const { mediaId, viewers, totalCount, timestamp } = data;
-    
-    if (!viewers || viewers.length === 0) return;
-    
-    currentStoryId = mediaId || extractStoryId();
-    console.log(`[SL:backend] Processing ${viewers.length} viewers for story ${currentStoryId}`);
-    
-    // Track this story
-    if (currentStoryId && !storiesMap.has(currentStoryId)) {
-      storiesMap.set(currentStoryId, {
-        id: currentStoryId,
-        firstSeen: timestamp || Date.now(),
-        owner: extractStoryOwner()
-      });
-    }
-    
-    // Get or create viewer map for this story
-    if (!viewersPerStory.has(currentStoryId)) {
-      viewersPerStory.set(currentStoryId, new Map());
-    }
-    const storyViewers = viewersPerStory.get(currentStoryId);
-    
-    // Get reactions from DOM
-    const domReactions = parseReactionsFromDOM();
-    
-    // Add viewers with composite key deduplication
-    viewers.forEach(viewer => {
-      const compositeId = `${currentStoryId}_${viewer.username}`;
-      
-      // Merge with DOM reaction if available
-      const reaction = viewer.reaction || domReactions.get(viewer.username) || null;
-      
-      storyViewers.set(viewer.username, {
-        ...viewer,
-        compositeId: compositeId,
-        storyId: currentStoryId,
-        timestamp: timestamp || Date.now(),
-        reaction: reaction
-      });
     });
-    
-    // Store in IndexedDB
-    if (db) {
-      const transaction = db.transaction(['viewers'], 'readwrite');
-      const store = transaction.objectStore('viewers');
-      
-      viewers.forEach(viewer => {
-        const record = {
-          compositeId: `${currentStoryId}_${viewer.username}`,
-          storyId: currentStoryId,
-          username: viewer.username,
-          ...viewer,
-          timestamp: timestamp || Date.now()
-        };
-        store.put(record);
-      });
-    }
-    
-    // Mirror to localStorage for UI
-    mirrorToLocalStorage();
-    
-    const domTotal = parseViewerCount();
-    console.log(`[SL:backend] Total collected: ${storyViewers.size}/${domTotal || totalCount || '?'}`);
   }
-  
-  // Set up DOM observers
-  function setupDOMObservers() {
-    // Observer for progress bars (story count)
-    if (!domObservers.progressBar) {
-      domObservers.progressBar = new MutationObserver(() => {
-        const storyMeta = parseStoryCount();
-        if (storyMeta.total > 0) {
-          console.log(`[SL:backend] Story ${storyMeta.current} of ${storyMeta.total}`);
-          mirrorToLocalStorage();
-        }
-      });
-      
-      // Try to observe progress container
-      const progressContainer = document.querySelector('div[style*="transform"]')?.parentElement;
-      if (progressContainer) {
-        domObservers.progressBar.observe(progressContainer, { 
-          childList: true, 
-          subtree: true, 
-          attributes: true,
-          attributeFilter: ['style']
-        });
-      }
-    }
-    
-    // Observer for viewer modal
-    if (!domObservers.viewerModal) {
-      domObservers.viewerModal = new MutationObserver(() => {
-        const viewerCount = parseViewerCount();
-        const reactions = parseReactionsFromDOM();
+
+  // ---------- Legacy mirror (keeps current UI working) ----------
+  const LEGACY_CACHE_CAP = 5000;
+  let mirrorTimer = null;
+
+  function scheduleMirror() {
+    if (mirrorTimer) return;
+    mirrorTimer = setTimeout(mirrorToLegacy, 150);
+  }
+
+  async function mirrorToLegacy() {
+    mirrorTimer = null;
+
+    const storyStore = {};
+    const aggregate = [];
+    const storyOwner = detectActiveUsername();
+    const checkpoint = state.checkpoints.get(storyOwner) || 0;
+
+    for (const [sid, map] of state.stories.entries()) {
+      const entries = [];
+      map.forEach(v => {
+        const isNew = v.viewedAt > checkpoint;
+        entries.push([v.id, {
+          id: v.id,
+          username: v.username,
+          full_name: v.displayName,
+          profile_pic_url: v.profilePic,
+          is_verified: !!v.isVerified,
+          is_private: !!v.isPrivate,
+          follows_viewer: !!v.followsViewer,
+          followed_by_viewer: !!v.followedByViewer,
+          viewedAt: v.viewedAt,
+          timestamp: v.viewedAt,
+          isNew: isNew,
+          reaction: v.reaction || null
+        }]);
+        aggregate.push([v.id, {
+          id: v.id,
+          username: v.username,
+          full_name: v.displayName,
+          profile_pic_url: v.profilePic,
+          is_verified: !!v.isVerified,
+          lastSeen: v.viewedAt
+        }]);
         
-        if (viewerCount !== null || reactions.size > 0) {
-          console.log(`[SL:backend] DOM shows ${viewerCount} total viewers, ${reactions.size} reactions`);
-          
-          // Update existing viewers with reactions
-          const storyViewers = viewersPerStory.get(currentStoryId);
-          if (storyViewers) {
-            reactions.forEach((emoji, username) => {
-              const viewer = storyViewers.get(username);
-              if (viewer && !viewer.reaction) {
-                viewer.reaction = emoji;
-              }
-            });
-          }
-          
-          mirrorToLocalStorage();
-        }
+        // Track in seenEver
+        state.seenEver.add(v.id);
       });
-      
-      // Observe entire document for modal appearance
-      domObservers.viewerModal.observe(document.body, {
-        childList: true,
-        subtree: true
-      });
+
+      storyStore[sid] = { 
+        viewers: entries, 
+        fetchedAt: Date.now(), 
+        generation: 0, 
+        totalReported: state.totals.get(sid) ?? null,
+        domTotal: state.totals.get(sid) ?? null,
+        collectedCount: entries.length
+      };
     }
-  }
-  
-  // Handle story changes
-  function handleStoryChange(data) {
-    const { mediaId } = data;
-    
-    if (mediaId && mediaId !== currentStoryId) {
-      console.log(`[SL:backend] Story changed: ${currentStoryId} -> ${mediaId}`);
-      currentStoryId = mediaId;
-      
-      // Track new story
-      if (!storiesMap.has(currentStoryId)) {
-        storiesMap.set(currentStoryId, {
-          id: currentStoryId,
-          firstSeen: Date.now(),
-          owner: extractStoryOwner()
-        });
-      }
-      
-      // Load cached data for this story
-      loadCachedViewers(currentStoryId).then(() => {
-        mirrorToLocalStorage();
-      });
-    }
-  }
-  
-  // Load cached viewers from IndexedDB
-  async function loadCachedViewers(storyId) {
-    if (!db || !storyId) return;
-    
+
+    aggregate.sort((a, b) => (b[1].lastSeen || 0) - (a[1].lastSeen || 0));
+    const trimmed = aggregate.slice(0, LEGACY_CACHE_CAP);
+
+    // Add story metadata
+    const meta = {
+      currentStoryId: state.currentStoryId,
+      storyIndex: state.storyMeta[state.currentStoryId]?.index || 1,
+      storyTotal: state.storyMeta[state.currentStoryId]?.total || 0,
+      domTotal: state.totals.get(state.currentStoryId) ?? null
+    };
+
     try {
-      const transaction = db.transaction(['viewers'], 'readonly');
-      const store = transaction.objectStore('viewers');
-      const index = store.index('storyId');
-      const request = index.getAll(storyId);
-      
-      return new Promise((resolve) => {
-        request.onsuccess = () => {
-          const viewers = request.result;
-          
-          if (!viewersPerStory.has(storyId)) {
-            viewersPerStory.set(storyId, new Map());
-          }
-          const storyViewers = viewersPerStory.get(storyId);
-          
-          viewers.forEach(viewer => {
-            storyViewers.set(viewer.username, viewer);
-          });
-          
-          console.log(`[SL:backend] Loaded ${viewers.length} cached viewers for story ${storyId}`);
-          resolve();
-        };
-        request.onerror = () => resolve();
-      });
+      localStorage.setItem('panel_story_store', JSON.stringify(storyStore));
+      localStorage.setItem('panel_viewer_cache', JSON.stringify(trimmed));
+      localStorage.setItem('panel_global_seen', JSON.stringify([...state.seenEver]));
+      localStorage.setItem('panel_story_meta', JSON.stringify(meta));
+      saveSeenEver();
+      if (DEBUG) console.log('[SL:backend] mirrored panel_* keys');
     } catch (e) {
-      console.error('[SL:backend] Error loading cached viewers:', e);
+      console.warn('[SL:backend] mirror failed', e);
     }
+
+    // Notify UI
+    window.dispatchEvent(new CustomEvent('storylister:data_updated', { 
+      detail: { storyId: state.currentStoryId, count: storyStore[state.currentStoryId]?.viewers?.length || 0 } 
+    }));
   }
-  
-  // Clean old data
-  async function cleanOldData() {
-    if (!db) return;
-    
-    const cutoff = Date.now() - (CONFIG.RETENTION_HOURS * 60 * 60 * 1000);
-    
-    const transaction = db.transaction(['viewers', 'stories'], 'readwrite');
-    const viewerStore = transaction.objectStore('viewers');
-    const storyStore = transaction.objectStore('stories');
-    
-    // Delete old viewers
-    const viewerIndex = viewerStore.index('timestamp');
-    const viewerRange = IDBKeyRange.upperBound(cutoff);
-    viewerIndex.openCursor(viewerRange).onsuccess = (event) => {
-      const cursor = event.target.result;
-      if (cursor) {
-        cursor.delete();
-        cursor.continue();
-      }
+
+  // ---------- Viewer ingestion ----------
+  function normalizeViewer(u) {
+    const id = String(u.id || u.pk);
+    return {
+      id,
+      username: u.username || '',
+      displayName: u.full_name || '',
+      profilePic: u.profile_pic_url || u.profile_pic_url_hd || '',
+      isVerified: !!u.is_verified,
+      isPrivate: !!u.is_private,
+      followsViewer: !!(u.follows_viewer || u?.friendship_status?.following),
+      followedByViewer: !!(u.followed_by_viewer || u?.friendship_status?.followed_by),
+      reaction: u.reaction || u.quick_reaction_emoji || u.reel_reaction || null,
+      viewedAt: Date.now()
     };
-    
-    // Delete old stories
-    const storyIndex = storyStore.index('timestamp');
-    const storyRange = IDBKeyRange.upperBound(cutoff);
-    storyIndex.openCursor(storyRange).onsuccess = (event) => {
-      const cursor = event.target.result;
-      if (cursor) {
-        cursor.delete();
-        cursor.continue();
-      }
-    };
-    
-    console.log('[SL:backend] Cleaned data older than', new Date(cutoff));
   }
-  
-  // Listen for messages from injected script
-  window.addEventListener('message', (event) => {
-    if (event.source !== window) return;
+
+  function ensureBucket(storyId) {
+    const sid = String(storyId);
+    if (!state.stories.has(sid)) state.stories.set(sid, new Map());
+    state.currentStoryId = sid;
+    return state.stories.get(sid);
+  }
+
+  function extractStoryId() {
+    const m = location.pathname.match(/\/stories\/[^\/]+\/(\d+)/);
+    return m ? m[1] : null;
+  }
+
+  // Message bridge from injected.js
+  window.addEventListener('message', (evt) => {
+    if (evt.source !== window || !evt.data) return;
+    const msg = evt.data;
+
+    if (msg.type === 'STORYLISTER_VIEWERS_CHUNK' && msg.data) {
+      const { mediaId, viewers, totalCount } = msg.data;
+      const sid = String(mediaId || extractStoryId() || 'unknown');
+      const bucket = ensureBucket(sid);
+
+      if (Number.isFinite(totalCount)) state.totals.set(sid, totalCount);
+
+      for (const u of viewers) {
+        const v = normalizeViewer(u);
+        if (!bucket.has(v.id)) {
+          bucket.set(v.id, v);
+        }
+      }
+      
+      // persist compact doc
+      idb.put('stories', { 
+        storyId: sid, 
+        viewers: Array.from(bucket.values()), 
+        fetchedAt: Date.now(), 
+        total: state.totals.get(sid) ?? null 
+      }).catch(() => {});
+      
+      scheduleMirror();
+    }
+
+    if (msg.type === 'STORYLISTER_DOM_TOTAL' && msg.data) {
+      const { mediaId, total } = msg.data;
+      const sid = String(mediaId || extractStoryId() || 'unknown');
+      if (Number.isFinite(total)) {
+        state.totals.set(sid, total);
+        scheduleMirror();
+      }
+    }
+
+    if (msg.type === 'STORYLISTER_STORY_CHANGED' && msg.data) {
+      const { storyId } = msg.data;
+      state.currentStoryId = String(storyId);
+      ensureBucket(state.currentStoryId);
+      scheduleMirror();
+    }
+  });
+
+  // ---------- DOM observers for story metadata ----------
+  function parseStoryCount() {
+    // Parse progress bars to get story count
+    const progressBars = document.querySelectorAll('[role="progressbar"], [aria-label*="Story"] div[style*="width"]');
+    if (progressBars.length > 0) {
+      const index = Array.from(progressBars).findIndex(bar => {
+        const style = window.getComputedStyle(bar);
+        return style.width !== '0px' && style.width !== '100%';
+      });
+      
+      if (state.currentStoryId) {
+        state.storyMeta[state.currentStoryId] = {
+          index: index >= 0 ? index + 1 : 1,
+          total: progressBars.length
+        };
+      }
+      
+      return { index: index + 1, total: progressBars.length };
+    }
+    return null;
+  }
+
+  function parseViewerCount() {
+    // Look for "Seen by X" in the DOM
+    const patterns = [
+      /Seen by (\d+)/i,
+      /(\d+) viewers?/i,
+      /Viewed by (\d+)/i
+    ];
     
-    if (event.data.type === 'STORYLISTER_VIEWERS_CHUNK') {
-      processViewerChunk(event.data.data);
-    } else if (event.data.type === 'STORYLISTER_STORY_CHANGED') {
-      handleStoryChange(event.data.data);
+    const walker = document.createTreeWalker(
+      document.body,
+      NodeFilter.SHOW_TEXT,
+      null,
+      false
+    );
+    
+    let node;
+    while (node = walker.nextNode()) {
+      const text = node.textContent || '';
+      for (const pattern of patterns) {
+        const match = text.match(pattern);
+        if (match) {
+          const count = parseInt(match[1], 10);
+          if (count > 0) {
+            if (state.currentStoryId) {
+              state.totals.set(state.currentStoryId, count);
+            }
+            return count;
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  // ---------- Native-timing auto-open (no randomness), gated ----------
+  function findSeenBy() {
+    // Multiple selectors for robustness
+    return document.querySelector('a[href*="/seen_by/"]') ||
+           document.querySelector('[aria-label*="Seen by"]') ||
+           document.querySelector('button:has-text("Seen by")') ||
+           Array.from(document.querySelectorAll('div[role="button"]')).find(el => 
+             el.textContent?.includes('Seen by'));
+  }
+
+  function autoOpenIfAllowed() {
+    const settings = Settings.get();
+    if (!settings.autoOpen) return;
+    if (!isOnOwnStory()) return;
+    if (!canUseForThisAccount()) return;
+
+    const el = findSeenBy();
+    if (!el) {
+      // Try again in a moment
+      Perf.schedule(autoOpenIfAllowed, 2000);
+      return;
+    }
+
+    // Let the browser choose a natural moment to act
+    Perf.schedule(() => {
+      // click via a standard, frame-aligned event (no mouse jitter)
+      el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+      if (DEBUG) console.log('[SL:backend] Auto-opened viewer list');
+      
+      // Save checkpoint when opening
+      const owner = detectActiveUsername();
+      if (owner) {
+        saveCheckpoint(owner);
+      }
+    });
+  }
+
+  // ---------- Script injection (with retry safety) ----------
+  function injectScript() {
+    if (document.getElementById('storylister-injected')) return;
+    
+    const script = document.createElement('script');
+    script.id = 'storylister-injected';
+    script.src = chrome.runtime.getURL('injected.js');
+    script.onload = function() { this.remove(); };
+    
+    (document.head || document.documentElement).appendChild(script);
+    if (DEBUG) console.log('[SL:backend] Injected script');
+  }
+
+  // ---------- Initialization ----------
+  // Observe navigation to trigger auto-open once per story
+  let lastPath = null;
+  const navObserver = new MutationObserver(() => {
+    const p = location.pathname;
+    if (p === lastPath) return;
+    lastPath = p;
+
+    // Parse story metadata when navigating
+    parseStoryCount();
+    parseViewerCount();
+
+    // only on your own story
+    if (/^\/stories\//.test(p) && isOnOwnStory()) {
+      state.currentStoryId = extractStoryId();
+      Perf.schedule(autoOpenIfAllowed);
     }
   });
   
-  // Listen for UI requests
-  window.addEventListener('storylister:request_data', () => {
-    mirrorToLocalStorage();
+  navObserver.observe(document.documentElement, { childList: true, subtree: true, attributes: true });
+
+  // DOM observer for viewer counts
+  const domObserver = new MutationObserver(() => {
+    const count = parseViewerCount();
+    const storyMeta = parseStoryCount();
+    if (count !== null || storyMeta !== null) {
+      scheduleMirror();
+    }
   });
   
-  // Listen for panel open/close to manage checkpoints
+  domObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
+
+  // Listen for panel events
   window.addEventListener('storylister:panel_opened', () => {
-    const storyOwner = extractStoryOwner();
-    if (storyOwner) {
-      console.log('[SL:backend] Panel opened, saving checkpoint for', storyOwner);
-      saveCheckpoint(storyOwner);
+    const owner = detectActiveUsername();
+    if (owner && isOnOwnStory()) {
+      if (DEBUG) console.log('[SL:backend] Panel opened, saving checkpoint');
+      saveCheckpoint(owner);
       // Reload data to update NEW flags
-      setTimeout(() => mirrorToLocalStorage(), 100);
+      Perf.schedule(() => scheduleMirror(), 100);
     }
   });
-  
-  // Monitor URL changes
-  let lastUrl = window.location.href;
-  setInterval(() => {
-    if (window.location.href !== lastUrl) {
-      lastUrl = window.location.href;
-      const newStoryId = extractStoryId();
-      
-      if (newStoryId !== currentStoryId) {
-        handleStoryChange({ mediaId: newStoryId });
-      }
-      
-      // Re-setup DOM observers if needed
-      setupDOMObservers();
-    }
-  }, 1000);
-  
-  // Initialize
-  initDB().then(() => {
-    console.log('[SL:backend] Backend ready');
-    cleanOldData();
-    
-    // Initial story detection
-    currentStoryId = extractStoryId();
-    if (currentStoryId) {
-      console.log(`[SL:backend] Initial story ID: ${currentStoryId}`);
-      storiesMap.set(currentStoryId, {
-        id: currentStoryId,
-        firstSeen: Date.now(),
-        owner: extractStoryOwner()
-      });
-      
-      // Load cached data
-      loadCachedViewers(currentStoryId).then(() => {
-        mirrorToLocalStorage();
-      });
-    }
-    
-    // Setup DOM observers
-    setTimeout(setupDOMObservers, 2000); // Wait for page to load
-    
-    // Clean old data periodically
-    setInterval(cleanOldData, 60 * 60 * 1000); // Every hour
-  }).catch(error => {
-    console.error('[SL:backend] Failed to initialize:', error);
+
+  window.addEventListener('storylister:request_data', () => {
+    scheduleMirror();
   });
-  
-  // Public API for UI
-  window.StorylisterCore = {
-    getState: () => ({
-      storyId: currentStoryId,
-      stories: Array.from(storiesMap.values()),
-      total: viewersPerStory.get(currentStoryId)?.size || 0,
-      viewers: Array.from(viewersPerStory.get(currentStoryId)?.values() || [])
-    }),
+
+  // Initial setup
+  async function initialize() {
+    // Load checkpoint for current user
+    const owner = detectActiveUsername();
+    if (owner) {
+      await loadCheckpoint(owner);
+    }
+
+    // Inject script
+    injectScript();
     
-    getStoryViewers: (storyId) => {
-      return Array.from(viewersPerStory.get(storyId)?.values() || []);
-    },
+    // Parse initial state
+    parseStoryCount();
+    parseViewerCount();
     
-    getAllStories: () => {
-      return Array.from(storiesMap.values());
-    },
-    
-    onUpdate: (callback) => {
-      window.addEventListener('storylister:data_updated', (e) => {
-        callback({
-          storyId: e.detail.storyId,
-          total: e.detail.viewerCount,
-          viewers: Array.from(viewersPerStory.get(e.detail.storyId)?.values() || []),
-          meta: e.detail
+    // Check for auto-open
+    Perf.schedule(autoOpenIfAllowed);
+  }
+
+  // Start when DOM is ready
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initialize);
+  } else {
+    initialize();
+  }
+
+  // Expose API for extension popup
+  if (chrome.runtime?.onMessage) {
+    chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+      if (msg?.action === 'checkStoryViewer') {
+        sendResponse({ 
+          active: isOnOwnStory(), 
+          storyId: state.currentStoryId,
+          username: detectActiveUsername(),
+          canUse: canUseForThisAccount()
         });
-      });
-    },
-    
-    refreshData: () => {
-      mirrorToLocalStorage();
-    },
-    
-    updateCheckpoint: () => {
-      const storyOwner = extractStoryOwner();
-      if (storyOwner) {
-        saveCheckpoint(storyOwner);
+        return false;
       }
-    }
-  };
-  
+    });
+  }
+
+  if (DEBUG) console.log('[SL:backend] Ready on', location.pathname);
 })();
