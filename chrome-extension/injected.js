@@ -58,7 +58,8 @@
             follows_viewer: !!u.follows_viewer || !!u.friendship_status?.following,
             // Keep IG's original order and when we captured it
             originalIndex: idx,
-            capturedAt: Date.now()
+            capturedAt: u.timestamp || u.viewed_at || Date.now(),  // Use Instagram's timestamp if available
+            viewedAt: u.timestamp || u.viewed_at || null  // Preserve actual view time
           }));
 
           console.log(`[Storylister Injected] Captured ${viewers.length} viewers for story ${mediaId}`);
@@ -199,7 +200,8 @@
             followed_by_viewer: !!u.friendship_status?.followed_by,
             follows_viewer: !!u.friendship_status?.following,
             originalIndex: idx,
-            capturedAt: Date.now()
+            capturedAt: u.timestamp || u.viewed_at || Date.now(),  // Use Instagram's timestamp if available
+            viewedAt: u.timestamp || u.viewed_at || null  // Preserve actual view time
           }));
           
           if (viewers.length > 0) {

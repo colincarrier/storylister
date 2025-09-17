@@ -30,22 +30,34 @@
 
   // Get logged-in user from Instagram UI
   const getLoggedInUser = () => {
-    // Method 1: From profile picture alt text
-    const profileImgs = document.querySelectorAll('img[alt*="profile picture"]');
-    for (const img of profileImgs) {
-      const match = img.alt.match(/^(.+?)'s profile picture/);
-      if (match) {
-        console.log('[Storylister] Detected logged-in user from profile pic:', match[1]);
-        return match[1];
+    // Method 1: From nav bar avatar (most reliable)
+    const navAvatar = document.querySelector('nav a[href^="/"] img[alt$="profile picture"]');
+    if (navAvatar) {
+      const username = navAvatar.alt.replace("'s profile picture", "");
+      console.log('[Storylister] Detected logged-in user from nav avatar:', username);
+      return username;
+    }
+    
+    // Method 2: From profile link in navigation
+    const profileSpan = document.querySelector('nav a[href^="/"]:not([href="/"]) span');
+    if (profileSpan) {
+      const link = profileSpan.closest('a');
+      if (link) {
+        const href = link.getAttribute('href');
+        if (href && href !== '/' && !href.includes('/direct') && !href.includes('/explore')) {
+          const username = href.replace(/\//g, '');
+          console.log('[Storylister] Detected logged-in user from nav link:', username);
+          return username;
+        }
       }
     }
     
-    // Method 2: From profile link in nav
-    const profileLink = document.querySelector('a[href^="/"][role="link"] span')?.parentElement?.parentElement;
-    if (profileLink?.getAttribute('href')) {
-      const username = profileLink.getAttribute('href').replace(/\//g, '');
-      if (username && username !== 'direct' && username !== 'explore') {
-        console.log('[Storylister] Detected logged-in user from nav:', username);
+    // Method 3: From any profile picture with the user's name
+    const allImgs = document.querySelectorAll('img[alt*="profile picture"]');
+    for (const img of allImgs) {
+      if (img.alt.includes("'s profile picture")) {
+        const username = img.alt.split("'s profile picture")[0];
+        console.log('[Storylister] Detected logged-in user from profile pic alt:', username);
         return username;
       }
     }
@@ -54,28 +66,31 @@
     return null;
   };
 
-  // Check if "Seen by" exists ONLY in story area
+  // Check if "Seen by" exists
   const hasSeenByUI = () => {
-    // Look for the story viewer container
-    const storyContainer = document.querySelector('[aria-label*="Story"], section > div > div[style*="height"]');
-    if (!storyContainer) {
-      console.log('[Storylister] No story container found');
-      return false;
-    }
-    
-    // Look for actual "Seen by" link (most reliable)
+    // Method 1: Direct link (most reliable)
     const seenByLink = document.querySelector('a[href*="/seen_by/"]');
     if (seenByLink) {
       console.log('[Storylister] Found "Seen by" link');
       return true;
     }
     
-    // Backup: Look for viewer count in story area only
-    const viewerElements = storyContainer.querySelectorAll('span, div');
-    for (const el of viewerElements) {
+    // Method 2: Button with viewer count
+    const buttons = document.querySelectorAll('button, [role="button"]');
+    for (const btn of buttons) {
+      const text = (btn.textContent || '').trim();
+      if (/^\d+$|^Seen by|^\d+ viewer/i.test(text)) {
+        console.log('[Storylister] Found viewer button:', text);
+        return true;
+      }
+    }
+    
+    // Method 3: Any element with exact viewer text
+    const allElements = document.querySelectorAll('span, div');
+    for (const el of allElements) {
       const text = (el.textContent || '').trim();
-      if (/^Seen by \d+$|^\d+ viewer/i.test(text)) {
-        console.log('[Storylister] Found viewer count text:', text);
+      if (/^Seen by \d+$|^\d+ viewers?$/i.test(text)) {
+        console.log('[Storylister] Found viewer text:', text);
         return true;
       }
     }
@@ -246,11 +261,31 @@
     store[mediaId].totalCount = totalCount ?? store[mediaId].totalCount;
 
     try {
-      localStorage.setItem('panel_story_store', JSON.stringify(store));
+      // Use chrome.storage.local for extension context
+      chrome.storage.local.set({ 'panel_story_store': store }, () => {
+        if (chrome.runtime.lastError) {
+          console.error('[Storylister] Storage error:', chrome.runtime.lastError);
+          // Fallback to localStorage if available
+          try {
+            localStorage.setItem('panel_story_store', JSON.stringify(store));
+          } catch (e2) {
+            console.error('[Storylister] LocalStorage also failed:', e2);
+          }
+        } else {
+          console.log('[Storylister] Saved', store[mediaId].viewers.length, 'viewers to chrome.storage');
+        }
+      });
+      
+      // Also save to localStorage for panel access
+      try {
+        localStorage.setItem('panel_story_store', JSON.stringify(store));
+      } catch (e) {
+        // Ignore localStorage errors
+      }
+      
       window.dispatchEvent(new CustomEvent('storylister:data_updated', {
         detail: { storyId: mediaId, viewerCount: store[mediaId].viewers.length }
       }));
-      console.log('[Storylister] Saved', store[mediaId].viewers.length, 'viewers to storage');
     } catch (e) {
       console.error('[Storylister] Failed to save viewers:', e);
     }

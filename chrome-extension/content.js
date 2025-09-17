@@ -158,22 +158,34 @@
   // ---------- Account Management ----------
   function detectActiveUsername() {
     // Get logged-in user from Instagram UI
-    // 1) From profile picture alt text (most reliable)
-    const profileImgs = document.querySelectorAll('img[alt*="profile picture"]');
-    for (const img of profileImgs) {
-      const match = img.alt.match(/^(.+?)'s profile picture/);
-      if (match) {
-        console.log('[Storylister UI] Detected user from profile pic:', match[1]);
-        return match[1];
+    // 1) From nav bar avatar (most reliable)
+    const navAvatar = document.querySelector('nav a[href^="/"] img[alt$="profile picture"]');
+    if (navAvatar) {
+      const username = navAvatar.alt.replace("'s profile picture", "");
+      console.log('[Storylister UI] Detected user from nav avatar:', username);
+      return username;
+    }
+    
+    // 2) From profile link in navigation
+    const profileSpan = document.querySelector('nav a[href^="/"]:not([href="/"]) span');
+    if (profileSpan) {
+      const link = profileSpan.closest('a');
+      if (link) {
+        const href = link.getAttribute('href');
+        if (href && href !== '/' && !href.includes('/direct') && !href.includes('/explore')) {
+          const username = href.replace(/\//g, '');
+          console.log('[Storylister UI] Detected user from nav link:', username);
+          return username;
+        }
       }
     }
     
-    // 2) From profile link in nav
-    const profileLink = document.querySelector('a[href^="/"][role="link"] span')?.parentElement?.parentElement;
-    if (profileLink?.getAttribute('href')) {
-      const username = profileLink.getAttribute('href').replace(/\//g, '');
-      if (username && username !== 'direct' && username !== 'explore') {
-        console.log('[Storylister UI] Detected user from nav:', username);
+    // 3) From any profile picture with user's name
+    const allImgs = document.querySelectorAll('img[alt*="profile picture"]');
+    for (const img of allImgs) {
+      if (img.alt.includes("'s profile picture")) {
+        const username = img.alt.split("'s profile picture")[0];
+        console.log('[Storylister UI] Detected user from profile pic alt:', username);
         return username;
       }
     }
@@ -195,8 +207,11 @@
       return false;
     }
     
-    // Also check for "Seen by" UI to confirm
-    const hasViewerUI = !!document.querySelector('a[href*="/seen_by/"]');
+    // Check for "Seen by" UI to confirm (multiple methods)
+    const hasViewerUI = !!document.querySelector('a[href*="/seen_by/"]') || 
+                        Array.from(document.querySelectorAll('button, [role="button"], span, div'))
+                          .some(el => /^Seen by \d+$|^\d+ viewers?$|^\d+$/i.test(el.textContent?.trim()));
+    
     console.log('[Storylister UI] Own story check - owner matches, has viewer UI:', hasViewerUI);
     
     return hasViewerUI;
