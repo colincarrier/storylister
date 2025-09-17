@@ -6,14 +6,12 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/not-found";
 import ExtensionDemo from "@/pages/extension-demo";
 import MockInstagram from "@/pages/mock-instagram";
-import ExtensionPreview from "@/pages/extension-preview";
 
 function Router() {
   return (
     <Switch>
       <Route path="/" component={ExtensionDemo} />
       <Route path="/mock-instagram" component={MockInstagram} />
-      <Route path="/extension-preview" component={ExtensionPreview} />
       <Route component={NotFound} />
     </Switch>
   );
