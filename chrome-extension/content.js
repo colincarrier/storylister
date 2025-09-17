@@ -1,5 +1,5 @@
 // Storylister Chrome Extension - UI Layer
-// This script renders the exact UI from mock-instagram and reads data from localStorage
+// This script renders the UI and reads data from localStorage
 
 (function() {
   console.log('[Storylister] Initializing extension UI');
@@ -8,7 +8,8 @@
   let isActive = false;
   let rightRail = null;
   let viewers = new Map();
-  let currentStory = 0;
+  let currentStory = null;
+  let storyMeta = {};
   let currentFilters = {
     query: '',
     type: 'all',
@@ -17,6 +18,7 @@
   };
   let taggedUsers = new Set();
   let isProMode = false;
+  let pausedVideos = new Set();
   
   // Custom tags for Pro mode
   const customTags = [
@@ -65,6 +67,40 @@
     return 'just now';
   }
   
+  // Auto-pause videos
+  function pauseVideos() {
+    document.querySelectorAll('video').forEach(video => {
+      if (!video.paused) {
+        video.pause();
+        pausedVideos.add(video);
+        video.dataset.storylisterPaused = 'true';
+      }
+    });
+    
+    // Also pause story progress animations
+    const progressBars = document.querySelectorAll('[role="progressbar"]');
+    progressBars.forEach(bar => {
+      bar.style.animationPlayState = 'paused';
+    });
+  }
+  
+  // Resume videos
+  function resumeVideos() {
+    pausedVideos.forEach(video => {
+      if (video.dataset.storylisterPaused === 'true') {
+        video.play();
+        delete video.dataset.storylisterPaused;
+      }
+    });
+    pausedVideos.clear();
+    
+    // Resume progress animations
+    const progressBars = document.querySelectorAll('[role="progressbar"]');
+    progressBars.forEach(bar => {
+      bar.style.animationPlayState = 'running';
+    });
+  }
+  
   // Get filtered viewers
   function getFilteredViewers() {
     let filteredViewers = Array.from(viewers.values());
@@ -74,23 +110,23 @@
       const query = currentFilters.query.toLowerCase();
       filteredViewers = filteredViewers.filter(viewer => 
         viewer.username.toLowerCase().includes(query) ||
-        viewer.displayName.toLowerCase().includes(query)
+        (viewer.displayName || viewer.full_name || '').toLowerCase().includes(query)
       );
     }
 
     // Apply type filter
     switch (currentFilters.type) {
       case 'followers':
-        filteredViewers = filteredViewers.filter(v => v.isFollower);
+        filteredViewers = filteredViewers.filter(v => v.followed_by_viewer || v.isFollower);
         break;
       case 'non-followers':
-        filteredViewers = filteredViewers.filter(v => !v.isFollower);
+        filteredViewers = filteredViewers.filter(v => !(v.followed_by_viewer || v.isFollower));
         break;
       case 'following':
-        filteredViewers = filteredViewers.filter(v => v.isFollowing);
+        filteredViewers = filteredViewers.filter(v => v.follows_viewer || v.isFollowing);
         break;
       case 'verified':
-        filteredViewers = filteredViewers.filter(v => v.isVerified);
+        filteredViewers = filteredViewers.filter(v => v.is_verified || v.isVerified);
         break;
     }
 
@@ -101,9 +137,9 @@
 
     // Apply sorting
     if (currentFilters.sort === 'oldest') {
-      filteredViewers.sort((a, b) => a.viewedAt - b.viewedAt);
+      filteredViewers.sort((a, b) => (a.timestamp || a.viewedAt) - (b.timestamp || b.viewedAt));
     } else {
-      filteredViewers.sort((a, b) => b.viewedAt - a.viewedAt);
+      filteredViewers.sort((a, b) => (b.timestamp || b.viewedAt) - (a.timestamp || a.viewedAt));
     }
 
     return filteredViewers;
@@ -112,50 +148,46 @@
   // Load viewers from localStorage
   function loadViewersFromStorage() {
     try {
+      // Load story metadata
+      const metaStr = localStorage.getItem('panel_story_meta');
+      if (metaStr) {
+        storyMeta = JSON.parse(metaStr);
+      }
+      
       // Load from panel_story_store
       const storyStore = localStorage.getItem('panel_story_store');
       if (storyStore) {
         const parsed = JSON.parse(storyStore);
-        const storyId = Object.keys(parsed)[0]; // Get first story
+        const storyId = storyMeta.currentStoryId || Object.keys(parsed)[0];
+        currentStory = storyId;
         
         if (storyId && parsed[storyId] && parsed[storyId].viewers) {
           viewers.clear();
           
-          parsed[storyId].viewers.forEach(([id, viewer]) => {
+          parsed[storyId].viewers.forEach(([compositeId, viewer]) => {
             viewers.set(viewer.username, {
-              username: viewer.username,
-              displayName: viewer.full_name || viewer.username,
+              ...viewer,
+              displayName: viewer.full_name || viewer.displayName || viewer.username,
               profilePic: viewer.profile_pic_url || `https://i.pravatar.cc/150?u=${viewer.username}`,
               isVerified: viewer.is_verified || false,
               isFollower: viewer.followed_by_viewer || false,
               isFollowing: viewer.follows_viewer || false,
               isTagged: taggedUsers.has(viewer.username),
+              isNew: viewer.isNew || false,
+              reaction: viewer.reaction || null,
               viewedAt: viewer.timestamp || Date.now()
             });
           });
           
-          console.log(`[Storylister] Loaded ${viewers.size} viewers from localStorage`);
-        }
-      }
-      
-      // Load from panel_viewer_cache as fallback
-      if (viewers.size === 0) {
-        const viewerCache = localStorage.getItem('panel_viewer_cache');
-        if (viewerCache) {
-          const cached = JSON.parse(viewerCache);
-          Object.entries(cached).forEach(([username, viewer]) => {
-            viewers.set(username, {
-              username: username,
-              displayName: viewer.full_name || viewer.displayName || username,
-              profilePic: viewer.profile_pic_url || `https://i.pravatar.cc/150?u=${username}`,
-              isVerified: viewer.is_verified || false,
-              isFollower: viewer.followed_by_viewer || viewer.isFollower || false,
-              isFollowing: viewer.follows_viewer || viewer.isFollowing || false,
-              isTagged: taggedUsers.has(username),
-              viewedAt: viewer.timestamp || Date.now()
-            });
-          });
-          console.log(`[Storylister] Loaded ${viewers.size} viewers from cache`);
+          // Update metadata
+          if (parsed[storyId].domTotal !== undefined) {
+            storyMeta.domTotal = parsed[storyId].domTotal;
+          }
+          if (parsed[storyId].collectedCount !== undefined) {
+            storyMeta.collectedCount = parsed[storyId].collectedCount;
+          }
+          
+          console.log(`[Storylister] Loaded ${viewers.size} viewers for story ${storyId}`);
         }
       }
     } catch (e) {
@@ -189,15 +221,17 @@
       isVerified: v.isVerified,
       isFollower: v.isFollower,
       isTagged: v.isTagged,
+      isNew: v.isNew,
+      reaction: v.reaction,
       viewedAt: new Date(v.viewedAt).toISOString(),
-      story: currentStory + 1
+      story: storyMeta.storyIndex || 1
     }));
     
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `storylister_export_${Date.now()}.json`;
+    a.download = `storylister_story${storyMeta.storyIndex || 1}_export_${Date.now()}.json`;
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -209,15 +243,35 @@
     
     const filteredViewers = getFilteredViewers();
     
-    // Update stats
+    // Count stats
     const totalViewers = viewers.size;
     const totalVerified = Array.from(viewers.values()).filter(v => v.isVerified).length;
     const taggedInCurrentStory = Array.from(viewers.values()).filter(v => v.isTagged).length;
+    const newViewersCount = Array.from(viewers.values()).filter(v => v.isNew).length;
     
+    // Update header with story position
+    const storyIndicator = document.querySelector('.storylister-story-indicator');
+    if (storyIndicator) {
+      const storyText = storyMeta.storyTotal > 0 
+        ? `Analyzing Story ${storyMeta.storyIndex || 1} of ${storyMeta.storyTotal}`
+        : 'Analyzing Story';
+      storyIndicator.textContent = storyText;
+    }
+    
+    // Update stats
     document.getElementById('sl-viewer-count').textContent = totalViewers;
     document.getElementById('sl-verified-count').textContent = totalVerified;
     document.getElementById('sl-tagged-count').textContent = `${taggedInCurrentStory}/${taggedUsers.size}`;
-    document.getElementById('sl-filtered-count').textContent = `${filteredViewers.length} viewers found`;
+    
+    // Update filtered count with DOM total if available
+    let countText = `${filteredViewers.length} viewers`;
+    if (storyMeta.domTotal && storyMeta.domTotal > viewers.size) {
+      countText = `Showing ${filteredViewers.length} of ${storyMeta.domTotal} viewers`;
+    }
+    if (newViewersCount > 0) {
+      countText += ` (${newViewersCount} new)`;
+    }
+    document.getElementById('sl-filtered-count').textContent = countText;
     
     // Clear and rebuild list
     listElement.innerHTML = '';
@@ -226,7 +280,9 @@
       listElement.innerHTML = `
         <div class="storylister-empty">
           <div class="storylister-empty-icon">👁️</div>
-          <div class="storylister-empty-text">No viewers found</div>
+          <div class="storylister-empty-text">
+            ${viewers.size === 0 ? 'Waiting for viewers...' : 'No viewers match filters'}
+          </div>
         </div>
       `;
       return;
@@ -235,6 +291,19 @@
     filteredViewers.forEach(viewer => {
       const viewerEl = document.createElement('div');
       viewerEl.className = 'storylister-viewer-item';
+      
+      // Build reaction display
+      let reactionHtml = '';
+      if (viewer.reaction) {
+        reactionHtml = `<span class="viewer-reaction">${viewer.reaction}</span>`;
+      }
+      
+      // Build new badge
+      let newBadge = '';
+      if (viewer.isNew) {
+        newBadge = '<span class="viewer-new-badge">NEW</span>';
+      }
+      
       viewerEl.innerHTML = `
         <div class="storylister-viewer-avatar" data-username="${viewer.username}">
           <img src="${viewer.profilePic}" alt="${viewer.username}">
@@ -243,6 +312,8 @@
           <div class="storylister-viewer-username" data-username="${viewer.username}">
             ${viewer.username}
             ${viewer.isVerified ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="#1877F2" style="display: inline; vertical-align: middle; margin-left: 4px;"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>' : ''}
+            ${reactionHtml}
+            ${newBadge}
           </div>
           <div class="storylister-viewer-meta">
             ${viewer.displayName} · ${formatTimeAgo(viewer.viewedAt)}
@@ -294,7 +365,7 @@
             <div class="storylister-story-indicator">
               Analyzing Story
             </div>
-            <button class="story-insights-btn-small">
+            <button class="story-insights-btn-small" id="sl-insights">
               📊 Story to Story Insights
             </button>
           </div>
@@ -384,6 +455,25 @@
     rightRail.classList.add('active');
     isActive = true;
     
+    // Pause videos
+    pauseVideos();
+    
+    // Set up observer for new videos
+    const videoObserver = new MutationObserver(() => {
+      if (isActive) {
+        pauseVideos();
+      }
+    });
+    videoObserver.observe(document.body, { childList: true, subtree: true });
+    
+    // Notify backend that panel opened
+    window.dispatchEvent(new CustomEvent('storylister:panel_opened'));
+    
+    // Update checkpoint
+    if (window.StorylisterCore) {
+      window.StorylisterCore.updateCheckpoint();
+    }
+    
     // Load viewers
     loadViewersFromStorage();
     updateViewerList();
@@ -395,6 +485,9 @@
       rightRail.classList.remove('active');
     }
     isActive = false;
+    
+    // Resume videos
+    resumeVideos();
   }
   
   // Setup event listeners
@@ -448,6 +541,12 @@
     
     // Export
     document.getElementById('sl-export')?.addEventListener('click', exportData);
+    
+    // Insights button
+    document.getElementById('sl-insights')?.addEventListener('click', () => {
+      console.log('[Storylister] Story insights clicked - feature coming soon');
+      alert('Story to Story Insights - Coming in next update!');
+    });
     
     // Tag clicks (delegated)
     document.getElementById('sl-list')?.addEventListener('click', (e) => {
@@ -508,6 +607,43 @@
       checkForStories();
     }
   }, 1000);
+  
+  // Add styles for new elements
+  const style = document.createElement('style');
+  style.textContent = `
+    .viewer-reaction {
+      margin-left: 6px;
+      font-size: 14px;
+    }
+    
+    .viewer-new-badge {
+      display: inline-block;
+      background: #10b981;
+      color: white;
+      font-size: 10px;
+      font-weight: 600;
+      padding: 2px 4px;
+      border-radius: 3px;
+      margin-left: 6px;
+      text-transform: uppercase;
+    }
+    
+    .storylister-empty {
+      text-align: center;
+      padding: 40px 20px;
+      color: #9ca3af;
+    }
+    
+    .storylister-empty-icon {
+      font-size: 48px;
+      margin-bottom: 12px;
+    }
+    
+    .storylister-empty-text {
+      font-size: 14px;
+    }
+  `;
+  document.head.appendChild(style);
   
   // Initialize
   console.log('[Storylister] Extension ready');
