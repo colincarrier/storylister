@@ -1656,6 +1656,23 @@
     window.dispatchEvent(new CustomEvent('storylister:request_data'));
   }
   
+  // Listen for panel show/hide events from content-backend
+  window.addEventListener('storylister:show_panel', () => {
+    try { 
+      showRightRail(); 
+    } catch (e) { 
+      console.warn('[Storylister] Show panel failed', e); 
+    }
+  });
+  
+  window.addEventListener('storylister:hide_panel', () => {
+    try { 
+      hideRightRail(); 
+    } catch (e) { 
+      console.warn('[Storylister] Hide panel failed', e); 
+    }
+  });
+  
   // Start initialization
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', initialize);

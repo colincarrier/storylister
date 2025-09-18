@@ -82,44 +82,43 @@
     return res;
   };
 
-  // --------- Fast pagination by "End" key ---------
-  const scrollerInDialog = () => {
-    const dlg = document.querySelector('[role="dialog"][aria-modal="true"]');
+  // --------- Find the scrollable container inside the "Viewers" dialog ---------
+  function findScrollableInViewersDialog() {
+    const dlg = document.querySelector('[role="dialog"]');
     if (!dlg) return null;
-    // Find the scrollable child if there is one
-    const scrollable = dlg.querySelector('[style*="overflow-y"]') || 
-                       dlg.querySelector('[style*="overflow: auto"]') ||
-                       dlg.querySelector('div > div > div');
-    return scrollable || dlg;
-  };
 
-  let paginating = false;
-  function fastPaginate() {
-    const el = scrollerInDialog();
-    if (!el) { 
+    // Most reliable: inline overflow-y styles
+    const styled = dlg.querySelector('[style*="overflow-y: auto"],[style*="overflow-y: scroll"]');
+    if (styled) return styled;
+
+    // Fallback: largest scrollable DIV
+    const divs = Array.from(dlg.querySelectorAll('div'));
+    let best = null, bestDelta = 0;
+    for (const d of divs) {
+      const delta = (d.scrollHeight || 0) - (d.clientHeight || 0);
+      if (delta > bestDelta) { bestDelta = delta; best = d; }
+    }
+    return best || dlg;
+  }
+
+  // --------- Very fast pagination using End key ---------
+  function pageAllViewers() {
+    const pane = findScrollableInViewersDialog();
+    if (!pane) {
       console.log('[Storylister Injected] No scrollable element found');
-      paginating = false; 
-      return; 
+      return;
     }
 
-    let lastH = -1;
-    let stable = 0;
-    let attempts = 0;
-
+    let lastH = 0, stableCount = 0, running = true;
     const tick = () => {
-      if (!document.contains(el)) { 
-        console.log('[Storylister Injected] Element removed from DOM');
-        paginating = false; 
-        return; 
+      if (!running || !document.contains(pane)) {
+        console.log('[Storylister Injected] Pagination stopped');
+        return;
       }
 
-      const h = el.scrollHeight;
-      stable = (h === lastH) ? (stable + 1) : 0;
-      lastH = h;
-      attempts++;
-
-      // End key + explicit bottom scroll (what a user would do)
-      const ev = new KeyboardEvent('keydown', { 
+      // focus + End key (mirrors user behavior)
+      pane.focus();
+      const endKey = new KeyboardEvent('keydown', { 
         key: 'End', 
         code: 'End', 
         keyCode: 35, 
@@ -127,42 +126,35 @@
         bubbles: true, 
         cancelable: true 
       });
-      el.dispatchEvent(ev);
-      el.scrollTop = el.scrollHeight;
+      pane.dispatchEvent(endKey);
+      pane.scrollTop = pane.scrollHeight;
 
-      // Stop if stable for 3 ticks or after 100 attempts (safety)
-      if (stable >= 3 || attempts > 100) { 
-        console.log(`[Storylister Injected] Pagination complete. Height: ${h}, Attempts: ${attempts}`);
-        paginating = false; 
-        return; 
+      const h = pane.scrollHeight;
+      if (h === lastH) {
+        stableCount++;
+        if (stableCount >= 3) { 
+          console.log(`[Storylister Injected] Pagination complete. Height: ${h}`);
+          running = false; 
+          return; 
+        }
+      } else {
+        stableCount = 0; 
+        lastH = h;
       }
-      
-      setTimeout(tick, 150);
+      setTimeout(tick, 120);
     };
-
-    if (!paginating) { 
-      console.log('[Storylister Injected] Starting fast pagination');
-      paginating = true; 
-      tick(); 
-    }
+    setTimeout(tick, 300);
   }
 
-  // Watch for dialog appearance
-  const mo = new MutationObserver(() => {
-    const dlg = document.querySelector('[role="dialog"][aria-modal="true"]');
-    if (dlg && !paginating) {
-      // Check if it's the viewers dialog
-      const hasViewers = dlg.querySelector('[aria-label*="Viewers"]') || 
-                        dlg.querySelector('[aria-label*="viewers"]') ||
-                        dlg.textContent?.includes('Viewers');
-      if (hasViewers) {
-        console.log('[Storylister Injected] Viewers dialog detected, starting pagination');
-        setTimeout(fastPaginate, 300);
-      }
+  // Start paging the moment the "Viewers" dialog appears
+  const dlgObserver = new MutationObserver(() => {
+    const title = document.querySelector('[role="dialog"] h2');
+    if (title && title.textContent?.trim() === 'Viewers') {
+      console.log('[Storylister Injected] Viewers dialog detected, starting pagination');
+      pageAllViewers();
     }
   });
-  
-  mo.observe(document.documentElement, { childList: true, subtree: true });
+  dlgObserver.observe(document.documentElement || document.body, { childList: true, subtree: true });
 
   // Override XMLHttpRequest for older Instagram code (backup)
   const originalXHR = window.XMLHttpRequest;

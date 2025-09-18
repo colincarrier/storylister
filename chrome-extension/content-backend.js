@@ -1,8 +1,8 @@
-// content-backend.js
+// content-backend.js  — OWN STORY detection + auto-open + panel events
 (() => {
   'use strict';
 
-  // ---------------- Settings (storage) ----------------
+  // ---------- Settings ----------
   const Settings = {
     cache: { accountHandle: null, pro: false, autoOpen: true, pauseVideos: true },
     async load() {
@@ -20,112 +20,66 @@
     }
   };
 
-  // ---------------- Helpers ----------------
   const state = { currentStoryId: null, injected: false };
 
   const getOwnerFromPath = () => {
-    const m = location.pathname.match(/\/stories\/([^\/]+)/);
+    const m = location.pathname.match(/\/stories\/([^/]+)/);
     return m ? decodeURIComponent(m[1]) : null;
   };
 
-  // Get logged-in user from Instagram UI
+  // Robust logged‑in username detection (no saved handle required)
   const getLoggedInUser = () => {
-    // Method 1: From nav bar avatar (most reliable)
+    // 1) nav avatar alt='X's profile picture'
     const navAvatar = document.querySelector('nav a[href^="/"] img[alt$="profile picture"]');
-    if (navAvatar) {
-      const username = navAvatar.alt.replace("'s profile picture", "");
-      console.log('[Storylister] Detected logged-in user from nav avatar:', username);
-      return username;
+    if (navAvatar) return navAvatar.alt.replace("'s profile picture", "");
+
+    // 2) any nav profile link
+    const links = document.querySelectorAll('nav a[href^="/"]:not([href="/"])');
+    for (const a of links) {
+      const href = a.getAttribute('href') || '';
+      if (href.includes('/direct') || href.includes('/explore')) continue;
+      const user = href.replace(/\//g, '').split('?')[0];
+      if (user) return user;
     }
-    
-    // Method 2: From profile link in navigation
-    const profileSpan = document.querySelector('nav a[href^="/"]:not([href="/"]) span');
-    if (profileSpan) {
-      const link = profileSpan.closest('a');
-      if (link) {
-        const href = link.getAttribute('href');
-        if (href && href !== '/' && !href.includes('/direct') && !href.includes('/explore')) {
-          const username = href.replace(/\//g, '');
-          console.log('[Storylister] Detected logged-in user from nav link:', username);
-          return username;
-        }
-      }
-    }
-    
-    // Method 3: From any profile picture with the user's name
-    const allImgs = document.querySelectorAll('img[alt*="profile picture"]');
-    for (const img of allImgs) {
-      if (img.alt.includes("'s profile picture")) {
-        const username = img.alt.split("'s profile picture")[0];
-        console.log('[Storylister] Detected logged-in user from profile pic alt:', username);
-        return username;
-      }
-    }
-    
-    console.log('[Storylister] Could not detect logged-in user');
+
+    // 3) fallback legacy alt
+    const img = Array.from(document.querySelectorAll('img[alt*="profile picture"]'))
+      .find(el => el.alt.includes("'s profile picture"));
+    if (img) return img.alt.split("'s profile picture")[0];
+
     return null;
   };
 
-  // Check if "Seen by" exists
+  // "Seen by" presence (strict but resilient)
   const hasSeenByUI = () => {
-    // Method 1: Direct link (most reliable)
-    const seenByLink = document.querySelector('a[href*="/seen_by/"]');
-    if (seenByLink) {
-      console.log('[Storylister] Found "Seen by" link');
-      return true;
+    if (document.querySelector('a[href*="/seen_by/"]')) return true;
+
+    // text 'Seen by <number>' anywhere in the story surface
+    const el = Array.from(document.querySelectorAll('span, div'))
+      .find(e => /^Seen by \d+$/i.test((e.textContent || '').trim()));
+    if (el) return true;
+
+    // some builds put the count directly inside a role=button wrapper
+    for (const btn of document.querySelectorAll('button,[role="button"]')) {
+      const t = (btn.textContent || '').trim();
+      if (/^Seen by|^\d+ viewer/i.test(t)) return true;
     }
-    
-    // Method 2: Button with viewer count
-    const buttons = document.querySelectorAll('button, [role="button"]');
-    for (const btn of buttons) {
-      const text = (btn.textContent || '').trim();
-      if (/^\d+$|^Seen by|^\d+ viewer/i.test(text)) {
-        console.log('[Storylister] Found viewer button:', text);
-        return true;
-      }
-    }
-    
-    // Method 3: Any element with exact viewer text
-    const allElements = document.querySelectorAll('span, div');
-    for (const el of allElements) {
-      const text = (el.textContent || '').trim();
-      if (/^Seen by \d+$|^\d+ viewers?$/i.test(text)) {
-        console.log('[Storylister] Found viewer text:', text);
-        return true;
-      }
-    }
-    
     return false;
   };
 
   const isOnStories = () => location.pathname.includes('/stories/');
 
-  // Strict own-story detection
+  // Strict own‑story check: owner == logged‑in user AND viewer UI exists
   const isOwnStory = () => {
     if (!isOnStories()) return false;
-    
-    const storyOwner = getOwnerFromPath();
-    const loggedInUser = getLoggedInUser();
-    
-    console.log('[Storylister] Story owner:', storyOwner, 'Logged-in user:', loggedInUser);
-    
-    // Must have both usernames
-    if (!storyOwner || !loggedInUser) return false;
-    
-    // Must match (case-insensitive)
-    if (storyOwner.toLowerCase() !== loggedInUser.toLowerCase()) {
-      console.log('[Storylister] Not own story - owner:', storyOwner, 'user:', loggedInUser);
-      return false;
-    }
-    
-    // Must have viewer UI
-    const hasViewerUI = hasSeenByUI();
-    console.log('[Storylister] Has viewer UI:', hasViewerUI);
-    
-    return hasViewerUI;
+    const owner = getOwnerFromPath();
+    const logged = getLoggedInUser();
+    if (!owner || !logged) return false;
+    if (owner.toLowerCase() !== logged.toLowerCase()) return false;
+    return hasSeenByUI();
   };
 
-  // Inject page-level script once (fetch interceptor & fast pagination)
+  // ---- Inject the page script once (listeners + fast pagination) ----
   const ensureInjected = () => {
     if (state.injected) return;
     const s = document.createElement('script');
@@ -134,40 +88,25 @@
     s.onload = () => s.remove();
     (document.head || document.documentElement).appendChild(s);
     state.injected = true;
-    console.log('[Storylister] Injected script loaded');
   };
 
-  // Find the clickable "Seen by" element
+  // Find clickable "Seen by …"
   const findSeenByClickable = () => {
-    // Primary: Look for the actual link
     const link = document.querySelector('a[href*="/seen_by/"]');
-    if (link) {
-      console.log('[Storylister] Found "Seen by" link');
-      return link;
+    if (link) return link;
+
+    const candidates = Array.from(document.querySelectorAll('span,div'))
+      .filter(e => /^Seen by \d+$|^\d+ viewer/i.test((e.textContent || '').trim()));
+    for (const c of candidates) {
+      const clicky = c.closest('[role="button"],[tabindex],button,a') || c;
+      if (clicky) return clicky;
     }
-    
-    // Backup: Look for viewer count that might be clickable
-    const candidates = Array.from(document.querySelectorAll('span, div'))
-      .filter(el => /^Seen by \d+$|^\d+ viewer/i.test((el.textContent || '').trim()));
-    
-    for (const candidate of candidates) {
-      const clickable = candidate.closest('[role="button"], [tabindex], button, a') || candidate;
-      if (clickable) {
-        console.log('[Storylister] Found clickable viewer element:', clickable.textContent);
-        return clickable;
-      }
-    }
-    
-    console.log('[Storylister] No clickable "Seen by" element found');
     return null;
   };
 
-  // Pause videos ONLY when called by panel
+  // Only pause when panel says to (prevents "frozen" stories)
   const pauseVideosIfNeeded = () => {
     if (!Settings.cache.pauseVideos) return;
-    // Don't check isOwnStory here - let the panel control this
-    
-    console.log('[Storylister] Pausing videos');
     document.querySelectorAll('video').forEach(v => {
       if (!v.paused && !v.dataset.slPaused) {
         v.pause();
@@ -175,173 +114,118 @@
       }
     });
   };
-
-  // Resume videos
   const resumeVideos = () => {
-    console.log('[Storylister] Resuming videos');
     document.querySelectorAll('video[data-sl-paused="1"]').forEach(v => {
       v.play();
       delete v.dataset.slPaused;
     });
   };
 
-  // Auto-open viewers with retry logic
+  // Auto‑open dialog (simple setTimeout/RAF – no requestIdleCallback)
   const autoOpenViewers = async () => {
-    if (!Settings.cache.autoOpen) return;
-    if (!isOwnStory()) {
-      console.log('[Storylister] Not own story, skipping auto-open');
-      return;
-    }
-    
-    // Don't open if dialog already exists
-    if (document.querySelector('[role="dialog"][aria-modal="true"]')) {
-      console.log('[Storylister] Dialog already open');
-      return;
-    }
+    if (!Settings.cache.autoOpen || !isOwnStory()) return;
+    if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
 
-    console.log('[Storylister] Waiting for "Seen by" element...');
-    
-    // Try to find and click "Seen by" (up to 3 seconds)
-    let attempts = 0;
-    while (attempts < 10) {
-      const seenBy = findSeenByClickable();
-      if (seenBy) {
-        console.log('[Storylister] Clicking "Seen by" element');
-        seenBy.click();
-        
-        // Wait a bit to see if dialog opened
-        await new Promise(r => setTimeout(r, 500));
-        
-        if (document.querySelector('[role="dialog"][aria-modal="true"]')) {
-          console.log('[Storylister] Dialog opened successfully');
+    let tries = 0;
+    while (tries < 10) {
+      const target = findSeenByClickable();
+      if (target) {
+        target.click();
+        await new Promise(r => setTimeout(r, 400));
+        if (document.querySelector('[role="dialog"] h2')?.textContent?.trim() === 'Viewers') {
           return;
         }
       }
-      
-      await new Promise(r => setTimeout(r, 300));
-      attempts++;
+      await new Promise(r => setTimeout(r, 250));
+      tries++;
     }
-    
-    console.log('[Storylister] Could not auto-open viewers after', attempts, 'attempts');
   };
 
-  // Receive viewer chunks from injected.js and mirror to localStorage
-  window.addEventListener('message', (evt) => {
-    if (evt.source !== window) return;
-    if (evt.data?.type !== 'STORYLISTER_VIEWERS_CHUNK') return;
+  // --- Observe SPA changes; decide when to show/hide/paginate ---
+  const observe = () => {
+    const mo = new MutationObserver(() => {
+      const urlMatch = location.pathname.match(/\/stories\/[^/]+\/(\d+)/);
+      const storyId = urlMatch ? urlMatch[1] : null;
 
-    const { mediaId, viewers, totalCount } = evt.data.data || {};
-    if (!mediaId || !Array.isArray(viewers)) return;
-    
-    console.log('[Storylister] Received viewer chunk:', viewers.length, 'viewers for story', mediaId);
+      if (!isOwnStory()) {
+        window.dispatchEvent(new CustomEvent('storylister:hide_panel'));
+        return;
+      }
 
-    const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
-    if (!store[mediaId]) store[mediaId] = { viewers: [], fetchedAt: Date.now() };
-
-    const present = new Set(store[mediaId].viewers.map(([k]) => k));
-    viewers.forEach((v) => {
-      const key = v.username || String(v.id || v.pk);
-      if (present.has(key)) return;
-      store[mediaId].viewers.push([key, {
-        id: String(v.id || v.pk || key),
-        username: v.username || key,
-        full_name: v.full_name || '',
-        profile_pic_url: v.profile_pic_url || '',
-        is_verified: !!v.is_verified,
-        followed_by_viewer: !!v.followed_by_viewer,
-        follows_viewer: !!v.follows_viewer,
-        originalIndex: typeof v.originalIndex === 'number'
-          ? v.originalIndex
-          : store[mediaId].viewers.length,
-        capturedAt: v.capturedAt || Date.now()
-      }]);
-      present.add(key);
+      // Own story: show panel and ensure inject + open dialog
+      window.dispatchEvent(new CustomEvent('storylister:show_panel'));
+      ensureInjected();
+      if (storyId && storyId !== state.currentStoryId) {
+        state.currentStoryId = storyId;
+        // slight delay helps with UI stability
+        setTimeout(() => autoOpenViewers(), 300);
+      }
     });
 
-    store[mediaId].totalCount = totalCount ?? store[mediaId].totalCount;
+    mo.observe(document.documentElement || document.body, { childList: true, subtree: true });
+  };
 
-    try {
-      // Use chrome.storage.local for extension context
-      chrome.storage.local.set({ 'panel_story_store': store }, () => {
-        if (chrome.runtime.lastError) {
-          console.error('[Storylister] Storage error:', chrome.runtime.lastError);
-          // Fallback to localStorage if available
-          try {
-            localStorage.setItem('panel_story_store', JSON.stringify(store));
-          } catch (e2) {
-            console.error('[Storylister] LocalStorage also failed:', e2);
-          }
-        } else {
-          console.log('[Storylister] Saved', store[mediaId].viewers.length, 'viewers to chrome.storage');
-        }
-      });
+  // Bridge for chunks coming from injected.js -> localStorage (UI reads it)
+  window.addEventListener('message', (e) => {
+    if (e.source !== window) return;
+    const msg = e.data;
+    if (msg?.type === 'STORYLISTER_VIEWERS_CHUNK') {
+      const { mediaId, viewers, totalCount } = msg.data || {};
+      if (!mediaId || !Array.isArray(viewers)) return;
       
-      // Also save to localStorage for panel access
+      console.log('[Storylister] Received viewer chunk:', viewers.length, 'viewers for story', mediaId);
+
+      const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+      if (!store[mediaId]) store[mediaId] = { viewers: [], fetchedAt: Date.now() };
+
+      const present = new Set(store[mediaId].viewers.map(([k]) => k));
+      viewers.forEach((v) => {
+        const key = v.username || String(v.id || v.pk);
+        if (present.has(key)) return;
+        store[mediaId].viewers.push([key, {
+          id: String(v.id || v.pk || key),
+          username: v.username || key,
+          full_name: v.full_name || '',
+          profile_pic_url: v.profile_pic_url || '',
+          is_verified: !!v.is_verified,
+          followed_by_viewer: !!v.followed_by_viewer,
+          follows_viewer: !!v.follows_viewer,
+          originalIndex: typeof v.originalIndex === 'number'
+            ? v.originalIndex
+            : store[mediaId].viewers.length,
+          capturedAt: v.capturedAt || Date.now(),
+          viewedAt: v.viewedAt || null
+        }]);
+        present.add(key);
+      });
+
+      store[mediaId].totalCount = totalCount ?? store[mediaId].totalCount;
+
       try {
         localStorage.setItem('panel_story_store', JSON.stringify(store));
+        window.dispatchEvent(new CustomEvent('storylister:data_updated', {
+          detail: { storyId: mediaId, viewerCount: store[mediaId].viewers.length }
+        }));
+        console.log('[Storylister] Saved', store[mediaId].viewers.length, 'viewers to storage');
       } catch (e) {
-        // Ignore localStorage errors
+        console.error('[Storylister] Failed to save viewers:', e);
       }
-      
-      window.dispatchEvent(new CustomEvent('storylister:data_updated', {
-        detail: { storyId: mediaId, viewerCount: store[mediaId].viewers.length }
-      }));
-    } catch (e) {
-      console.error('[Storylister] Failed to save viewers:', e);
     }
   });
 
-  // Handle panel opened/closed events from content.js
+  // Handle panel pause/resume requests
   window.addEventListener('storylister:panel_opened', () => {
-    console.log('[Storylister] Panel opened event received');
     pauseVideosIfNeeded();
   });
 
   window.addEventListener('storylister:panel_closed', () => {
-    console.log('[Storylister] Panel closed event received');
     resumeVideos();
   });
 
-  // ---------------- Boot ----------------
-  const start = async () => {
-    await Settings.load();
-    console.log('[Storylister] Backend started with settings:', Settings.cache);
-
-    const mo = new MutationObserver(() => {
-      const m = location.pathname.match(/\/stories\/[^\/]+\/(\d+)/);
-      const sid = m ? m[1] : null;
-      if (!sid) return;
-
-      if (sid !== state.currentStoryId) {
-        state.currentStoryId = sid;
-        console.log('[Storylister] Story changed to:', sid);
-        
-        if (isOwnStory()) {
-          console.log('[Storylister] Own story detected, preparing...');
-          ensureInjected();
-          // Don't pause videos here! Let the panel control that
-          setTimeout(() => autoOpenViewers(), 1000);
-        }
-      }
-    });
-
-    mo.observe(document.documentElement, { childList: true, subtree: true });
-
-    // Initial check
-    if (isOnStories()) {
-      console.log('[Storylister] On stories page, checking if own story...');
-      if (isOwnStory()) {
-        console.log('[Storylister] Initial own story detected');
-        ensureInjected();
-        // Don't pause videos here! Let the panel control that
-        setTimeout(() => autoOpenViewers(), 1500);
-      }
-    }
-  };
-
+  // Init
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', start);
+    document.addEventListener('DOMContentLoaded', () => { Settings.load(); observe(); });
   } else {
-    start();
+    Settings.load(); observe();
   }
 })();
