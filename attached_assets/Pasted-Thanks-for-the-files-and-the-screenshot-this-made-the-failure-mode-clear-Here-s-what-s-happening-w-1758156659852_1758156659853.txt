@@ -1,0 +1,190 @@
+Thanks for the files and the screenshot—this made the failure mode clear.
+Here’s what’s happening, why the panel doesn’t show on your story, and the exact patches to make it come up every time (without changing your UI/styling).
+
+What’s not happening (root cause)
+
+Own‑story detection is still tied to “detect logged‑in user from the nav avatar alt text”.
+Instagram now often leaves that alt empty, so detectActiveUsername() returns null. That makes isOnOwnStory() return false, so the UI never renders. You can see the nav‑avatar/alt dependency in your UI layer and in the backend layer: the code looks up img[alt$="profile picture"] or other nav links to infer the user, then compares it to /stories/<owner>/… in the URL. If that detection fails, isOnOwnStory() is false.
+
+Because isOnOwnStory() resolves to false, the backend never triggers the auto‑open “Seen by” logic or the network interceptor, and it doesn’t signal the UI to show. The nav observer in the backend only schedules auto‑open when isOnOwnStory() is true.
+
+The UI does have event hooks to open/close the right rail (storylister:show_panel / storylister:hide_panel), but those events are never dispatched by the backend today. So even when the rest of the conditions are right, the panel isn’t told to appear.
+
+TL;DR: We were still requiring “know my username” → that detection fails → isOnOwnStory() returns false → backend never opens “Seen by”, never injects the interceptor, and never tells the UI to show.
+
+What to change (minimal + safe; no UI edits)
+0) Sanity: your manifest already loads both scripts
+
+Good: your uploaded manifest.json includes both content-backend.js and content.js as content scripts (so we can fix this entirely in the content layer).
+
+1) Backend: make own‑story detection not depend on nav username; require “Seen by” instead
+
+Replace the isOnOwnStory() (or add a new “relaxed” version and use it) in content-backend.js with this strict-but-robust check:
+
+// --- helpers (put near other helpers) ---
+function getStoryOwnerFromURL() {
+  const m = location.pathname.match(/\/stories\/([^/]+)/);
+  return m ? m[1] : null;
+}
+
+function hasSeenByUI() {
+  // True only when you're on *your* story
+  return !!(
+    document.querySelector('a[href*="/seen_by/"]') ||
+    Array.from(document.querySelectorAll('button,[role="button"],span,div'))
+      .some(el => /^Seen by(\s+\d+)?$/i.test((el.textContent || '').trim()))
+  );
+}
+
+// Free tier gate: bind first use; allow all if proMode
+function canRunForOwner(owner) {
+  const s = Settings.get(); // same Settings you already have
+  if (s.proMode) return true;
+  if (!s.accountHandle && owner) { Settings.set({ ...s, accountHandle: owner }); return true; }
+  return s.accountHandle === owner;
+}
+
+function isOnOwnStoryRelaxed() {
+  if (!/^\/stories\//.test(location.pathname)) return false;
+  if (!hasSeenByUI()) return false;     // the reliable signal from IG UI
+  const owner = getStoryOwnerFromURL();
+  return !!owner && canRunForOwner(owner);
+}
+
+
+Why: this avoids relying on img[alt$="profile picture"] etc., which is flaky now. The “Seen by …” control only exists on your own story, so it’s a stable indicator.
+
+2) Backend: actually tell the UI to open/close, and auto‑open “Seen by” + fast paginate
+
+Update the navigation observer in content-backend.js to dispatch the show/hide events, ensure the page interceptor is injected, and open “Seen by” with a small delay:
+
+// In your existing nav observer callback:
+const p = location.pathname;
+if (/^\/stories\//.test(p)) {
+  if (isOnOwnStoryRelaxed()) {
+    window.dispatchEvent(new CustomEvent('storylister:show_panel'));  // <— tell UI to show
+    injectScript();                                                   // <— make sure injected.js is in page
+    setTimeout(openViewersAndPaginate, 400);                          // <— auto open + END-key pagination
+  } else {
+    window.dispatchEvent(new CustomEvent('storylister:hide_panel'));  // <— tell UI to hide
+  }
+}
+
+
+Add these helpers (same file):
+
+function findSeenByButtonStrict() {
+  // Prefer the link; fall back to any role=button that says "Seen by"
+  return document.querySelector('a[href*="/seen_by/"]') ||
+         Array.from(document.querySelectorAll('[role="button"]'))
+              .find(b => /^Seen by(\s+\d+)?$/i.test((b.textContent || '').trim()));
+}
+
+function openViewersAndPaginate() {
+  if (!isOnOwnStoryRelaxed()) return;
+  const btn = findSeenByButtonStrict();
+  if (!btn) return;
+  btn.click();
+
+  // When dialog appears, use END key to load fast
+  setTimeout(startFastPagination, 300);
+}
+
+function findScrollableInDialog() {
+  const dlg = document.querySelector('[role="dialog"]');
+  if (!dlg) return null;
+  // Instagram uses inline overflow for the scroller
+  return dlg.querySelector('[style*="overflow-y"]') ||
+         Array.from(dlg.querySelectorAll('div'))
+              .find(el => el.scrollHeight > el.clientHeight + 40) || dlg;
+}
+
+function startFastPagination() {
+  const scroller = findScrollableInDialog();
+  if (!scroller) return;
+
+  let lastH = 0, stableTicks = 0;
+  (function tick() {
+    if (!document.contains(scroller)) return;
+    const h = scroller.scrollHeight;
+    if (h === lastH) {
+      if (++stableTicks > 2) return;     // loaded everything
+    } else { stableTicks = 0; lastH = h; }
+
+    // Simulate what power users do: press END
+    const ev = new KeyboardEvent('keydown', { key: 'End', code: 'End', keyCode: 35, which: 35, bubbles: true });
+    scroller.dispatchEvent(ev);
+    scroller.scrollTop = scroller.scrollHeight;
+
+    setTimeout(tick, 120);
+  })();
+}
+
+
+Also call auto‑open on first load:
+
+// In initialize():
+if (isOnOwnStoryRelaxed()) {
+  window.dispatchEvent(new CustomEvent('storylister:show_panel'));
+  setTimeout(openViewersAndPaginate, 400);
+}
+
+
+Why this is enough: your UI already listens for these events and knows how to render/hide the right rail. We’re just guaranteeing those events fire at the right times.
+
+3) Keep your interceptor and legacy storage mirror as‑is
+
+You already inject injected.js (which posts viewer chunks via window.postMessage) and mirror to localStorage for the panel to read. The injection hook and mirror scheduling are in place.
+
+If you see no chunks coming in after this, we’ll inspect injected.js next—there’s at least one good version in the repo that wraps fetch and XMLHttpRequest and posts STORYLISTER_VIEWERS_CHUNK. For now, the main blocker is the panel not appearing and the dialog not opening.
+
+Why this fixes your screenshot symptoms
+
+“Panel doesn’t show on my story” → The backend no longer depends on nav/alt detection; it uses the “Seen by …” control as the ground truth and explicitly dispatches storylister:show_panel. (UI is listening for that.)
+
+“Doesn’t auto‑open ‘Seen by’ / doesn’t scroll” → We now click the real Seen‑by control and send END to the dialog scroller until the list stops growing. (Fast and human‑plausible.)
+
+“Manage Tags / Story‑to‑Story do nothing” → Those buttons live in the panel; once the panel is shown reliably, their existing handlers run again.
+
+Paste‑ready patch summary
+
+content-backend.js
+
+Add: getStoryOwnerFromURL(), hasSeenByUI(), canRunForOwner(), isOnOwnStoryRelaxed()
+
+Add: findSeenByButtonStrict(), openViewersAndPaginate(), findScrollableInDialog(), startFastPagination()
+
+Change: in the nav observer and in initialize(), use isOnOwnStoryRelaxed(); dispatch storylister:show_panel / hide_panel; call injectScript() and openViewersAndPaginate() as shown above.
+
+No UI/styling changes, no settings UI changes, and no API calls.
+
+Quick smoke test (60 seconds)
+
+Open your own story. Confirm you see “Seen by …” at the bottom-left.
+
+The right rail should appear within ~½ second.
+
+The “Viewers” dialog should open automatically; list should jump to the bottom rapidly (END pagination).
+
+The panel counters should start updating (watch for your “Waiting for viewers…” state to flip).
+
+If any step fails, open Console and check for:
+
+“[SL:backend] Auto‑opened viewer list” (backend reached auto‑open)
+
+Messages from injected.js about viewer chunks (we’ll fix there next if needed)
+
+If you want, I can give you a single, consolidated content-backend.js with the exact edits already merged so you can drop it in verbatim.
+
+You said:
+Recording 9_17_2025 at 5_40_03 PM.json
+File
+i noticed if I pay around with window size I can see the window appear now.  but it's not seemingly gathering data.  I also noticed when it's viewing my story it's generating a ton of messages and it was continuously going up.
+
+look at the screen shot. 
+
+also including a recorder from logs.
+
+is this helpful?
+
+concerned we cannot get the window up and get data flowing in reliably.

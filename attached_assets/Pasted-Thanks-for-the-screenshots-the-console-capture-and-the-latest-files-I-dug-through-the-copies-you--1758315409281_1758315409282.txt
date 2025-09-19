@@ -1,0 +1,515 @@
+Thanks for the screenshots, the console capture, and the latest files. I dug through the copies you’ve uploaded and found two root causes that explain **“panel appears only sometimes”, “0 viewers”, “tons of console messages”, and “no auto‑open/scroll”**:
+
+---
+
+## What’s actually blocking you
+
+1. **A hard syntax error in one copy of `content‑backend.js`**
+   One of the versions you shipped contains this invalid object literal (note the leading dot):
+
+```js
+viewersMap.set(viewer.username, {
+  .viewer,
+  storyId: currentStoryId,
+  ...
+});
+```
+
+This throws immediately and prevents the backend from ever mirroring data for the UI. You can see it in the uploaded file here.&#x20;
+
+2. **UI isn’t getting told when to show/hide and when new data arrives**
+   Your manifest already loads the backend before the UI (good), but the backend wasn’t reliably dispatching `storylister:show_panel` / `storylister:hide_panel` and the UI wasn’t reloading from `panel_story_store` using the **current story id from the URL**. The correct ordering is visible here.&#x20;
+
+3. **Own‑story detection relied on weak signals**
+   Relying on avatars/alt text is brittle. The one thing that **only** appears on your own story is the **“Seen by …”** control. We’ll gate on that and the `/stories/:owner/…` URL.
+
+4. **Viewer dialog doesn’t open ⇒ no network to observe**
+   Your interceptor is fine (it passively clones Instagram’s responses and posts them), but it only triggers **after** the “Viewers” dialog opens. We need to **click “Seen by”**, then **press `End` repeatedly** to page fast (human‑like). The interceptor you uploaded already does the right kind of parsing and posting.
+
+5. **Panel sometimes sits off‑screen**
+   A small CSS fix prevents the rail from being clipped when the viewport is narrow.
+
+---
+
+## Bullet‑proof patch set (drop‑in)
+
+Below are **complete, copy‑paste** replacements where noted, plus two small additions to `content.js` and `content.css`. This merges the good parts of the Replit suggestions with the working selectors and event wiring.
+
+---
+
+### 1) **Replace `content-backend.js` entirely** (single source of truth)
+
+```js
+// content-backend.js  —  backend & orchestrator (no UI)
+// - Detects own story using "Seen by" + URL owner
+// - Injects interceptor
+// - Auto-opens "Seen by" and fast-paginates with End key
+// - Mirrors compact data to localStorage keys the UI already reads
+
+(() => {
+  'use strict';
+
+  const DEBUG = false;
+
+  // ---------------- Settings (free vs pro, primary handle) ----------------
+  const Settings = {
+    cache: { pro: false, autoOpen: true, accountHandle: null },
+    async load() {
+      try {
+        const s = await new Promise(r => (chrome.storage?.sync ? chrome.storage.sync.get(null, r) : r({})));
+        this.cache.pro = !!s.pro;
+        this.cache.autoOpen = s.autoOpen !== false;
+        this.cache.accountHandle = s.accountHandle || null;
+      } catch (_) {}
+    },
+    async save(patch) {
+      Object.assign(this.cache, patch);
+      try { await chrome.storage?.sync?.set(patch); } catch (_) {}
+    }
+  };
+
+  // ---------------- In-memory state ----------------
+  const state = {
+    currentStoryId: null,
+    stories: new Map(),   // storyId -> Map(viewerId -> viewerObj)
+    seenEver: new Set()
+  };
+
+  const now = () => Date.now();
+
+  // ---------------- Inject interceptor once ----------------
+  function inject() {
+    if (document.documentElement.querySelector('script[data-storylister-injected]')) return;
+    const s = document.createElement('script');
+    s.src = chrome.runtime.getURL('injected.js');  // posts STORYLISTER_VIEWERS_CHUNK
+    s.setAttribute('data-storylister-injected', '1');
+    s.onload = () => s.remove();
+    s.onerror = () => console.error('[SL:backend] failed to load injected.js');
+    (document.head || document.documentElement).appendChild(s);
+  }
+
+  // ---------------- Own-story detection ----------------
+  function getStoryOwnerFromURL() {
+    const m = location.pathname.match(/\/stories\/([^/]+)/);
+    return m ? m[1] : null;
+  }
+  function hasSeenByUI() {
+    // “Seen by” only appears on your own stories
+    if (document.querySelector('a[href*="/seen_by/"]')) return true;
+    return Array.from(document.querySelectorAll('button,[role="button"],span,div'))
+      .some(el => /^seen by(\s+\d+)?$/i.test((el.textContent || '').trim()));
+  }
+  async function canRunForOwner(owner) {
+    const s = Settings.cache;
+    if (s.pro) return true;
+    if (!s.accountHandle && owner) { await Settings.save({ accountHandle: owner }); return true; }
+    return s.accountHandle === owner;
+  }
+  async function isOnOwnStory() {
+    if (!location.pathname.startsWith('/stories/')) return false;
+    if (!hasSeenByUI()) return false;
+    const owner = getStoryOwnerFromURL();
+    if (!owner) return false;
+    return canRunForOwner(owner);
+  }
+
+  function extractStoryIdFromUrl() {
+    const m = location.pathname.match(/\/stories\/[^/]+\/(\d+)/);
+    return m ? m[1] : null;
+  }
+
+  // ---------------- Viewer ingestion & mirroring ----------------
+  function upsertViewers(storyId, users) {
+    if (!state.stories.has(storyId)) state.stories.set(storyId, new Map());
+    const map = state.stories.get(storyId);
+
+    for (const u of (users || [])) {
+      const id = String(u.id || u.pk || u.username);
+      const v = {
+        id,
+        username: u.username || '',
+        displayName: u.full_name || '',
+        profilePic: u.profile_pic_url || u.profile_pic_url_hd || '',
+        isVerified: !!u.is_verified,
+        followsViewer: !!(u.follows_viewer || u?.friendship_status?.following),
+        followedByViewer: !!(u.followed_by_viewer || u?.friendship_status?.followed_by),
+        viewedAt: u.viewedAt || u.capturedAt || now(),
+        originalIndex: typeof u.originalIndex === 'number' ? u.originalIndex : map.size
+      };
+      map.set(id, v);
+      state.seenEver.add(id);
+    }
+    scheduleLegacyMirror();
+  }
+
+  // Receive chunks from injected.js
+  window.addEventListener('message', (evt) => {
+    const msg = evt?.data;
+    if (msg?.type !== 'STORYLISTER_VIEWERS_CHUNK') return;
+    const sid = String(msg.data?.mediaId || extractStoryIdFromUrl() || 'unknown');
+    state.currentStoryId = sid;
+    if (DEBUG) console.log('[SL:backend] chunk', msg.data?.viewers?.length, 'sid', sid);
+    upsertViewers(sid, msg.data?.viewers);
+  });
+
+  // Mirror to the legacy keys the UI consumes
+  let mirrorTimer = null;
+  function scheduleLegacyMirror() {
+    if (mirrorTimer) return;
+    mirrorTimer = setTimeout(() => { mirrorTimer = null; mirrorToLegacyStorage(); }, 250);
+  }
+  function mirrorToLegacyStorage() {
+    const storyStore = {};
+    for (const [sid, map] of state.stories.entries()) {
+      const entries = [];
+      for (const v of map.values()) {
+        entries.push([v.id, {
+          id: v.id,
+          username: v.username,
+          full_name: v.displayName,
+          profile_pic_url: v.profilePic,
+          is_verified: !!v.isVerified,
+          follows_viewer: !!v.followsViewer,
+          followed_by_viewer: !!v.followedByViewer,
+          viewedAt: v.viewedAt,
+          originalIndex: v.originalIndex
+        }]);
+      }
+      storyStore[sid] = { viewers: entries, generation: 0, fetchedAt: now() };
+    }
+    try {
+      localStorage.setItem('panel_story_store', JSON.stringify(storyStore));
+      window.dispatchEvent(new CustomEvent('storylister:data_updated', { detail: { storyId: state.currentStoryId }}));
+    } catch (e) {
+      console.warn('[SL:backend] localStorage mirror failed', e);
+    }
+  }
+
+  // ---------------- Viewer dialog automation ----------------
+  function findSeenByButton() {
+    return document.querySelector('a[href*="/seen_by/"]') ||
+           Array.from(document.querySelectorAll('[role="button"],button'))
+             .find(b => /^seen by(\s+\d+)?$/i.test((b.textContent || '').trim()));
+  }
+  function findScrollableInDialog() {
+    const dlg = document.querySelector('[role="dialog"]');
+    if (!dlg) return null;
+    return dlg.querySelector('[style*="overflow-y"]') ||
+           Array.from(dlg.querySelectorAll('div'))
+             .find(el => el.scrollHeight > el.clientHeight + 40) || dlg;
+  }
+  function startFastPagination(scroller) {
+    let lastH = 0, stable = 0;
+    const step = () => {
+      if (!document.contains(scroller)) return;
+      const h = scroller.scrollHeight;
+      if (h === lastH) { if (++stable > 2) return; } else { stable = 0; lastH = h; }
+      scroller.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', code: 'End', keyCode: 35, which: 35, bubbles: true }));
+      scroller.scrollTop = scroller.scrollHeight;
+      setTimeout(step, 120);
+    };
+    step();
+  }
+  function autoOpenViewers() {
+    if (!Settings.cache.autoOpen) return;
+    if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+    const btn = findSeenByButton();
+    if (!btn) return;
+    btn.click();
+    setTimeout(() => {
+      const scroller = findScrollableInDialog();
+      if (scroller) startFastPagination(scroller);
+    }, 400);
+  }
+
+  // ---------------- Navigation observer (throttled) ----------------
+  function startObserver() {
+    let ticking = false;
+    new MutationObserver(async () => {
+      if (ticking) return;
+      ticking = true;
+      setTimeout(async () => {
+        if (await isOnOwnStory()) {
+          window.dispatchEvent(new CustomEvent('storylister:show_panel'));
+          inject();
+          autoOpenViewers();
+          const sid = extractStoryIdFromUrl();
+          if (sid && sid !== state.currentStoryId) state.currentStoryId = sid;
+        } else {
+          window.dispatchEvent(new CustomEvent('storylister:hide_panel'));
+        }
+        ticking = false;
+      }, 200);
+    }).observe(document.documentElement, { childList: true, subtree: true });
+  }
+
+  // ---------------- Boot ----------------
+  (async function init() {
+    await Settings.load();
+    startObserver();
+  })();
+})();
+```
+
+> This removes the invalid `.viewer` code that was crashing your backend (see the broken copy here).&#x20;
+
+---
+
+### 2) **Replace `injected.js`** (passive observer, supports GraphQL & api v1)
+
+```js
+// injected.js — runs in the page context (no extension APIs)
+// Clones IG responses and posts compact chunks back to the content script.
+
+(() => {
+  'use strict';
+
+  const origFetch = window.fetch;
+  window.fetch = async function(...args) {
+    const res = await origFetch.apply(this, args);
+
+    try {
+      const url = String((typeof args[0] === 'string') ? args[0] : (args[0]?.url || ''));
+      const looksRelevant =
+        /viewers?|reel|story/i.test(url) ||
+        url.includes('/api/v1/') ||
+        url.includes('/graphql');
+
+      if (!looksRelevant) return res;
+
+      const clone = res.clone();
+      clone.json().then(json => {
+        if (!json) return;
+
+        // Normalize viewers from several formats IG uses
+        let users = null;
+        if (Array.isArray(json.users)) users = json.users;
+        else if (json?.data?.xdt_api__v1__media__story_viewers?.viewers) users = json.data.xdt_api__v1__media__story_viewers.viewers;
+        else if (json?.data?.media?.story_viewers?.edges) users = json.data.media.story_viewers.edges.map(e => e.node || e.user || e);
+
+        if (!users || !users.length) return;
+
+        const urlMatch = document.location.pathname.match(/\/stories\/[^/]+\/(\d+)/);
+        const mediaId =
+          json.media_id ||
+          json.reel?.id ||
+          new URL(url, location.href).searchParams.get('story_media_id') ||
+          (urlMatch ? urlMatch[1] : null);
+
+        if (!mediaId) return;
+
+        const viewers = users.map((u, idx) => ({
+          id: String(u.id || u.pk || idx),
+          username: u.username,
+          full_name: u.full_name || '',
+          profile_pic_url: u.profile_pic_url || '',
+          is_verified: !!u.is_verified,
+          followed_by_viewer: !!(u.followed_by_viewer || u?.friendship_status?.followed_by),
+          follows_viewer: !!(u.follows_viewer || u?.friendship_status?.following),
+          originalIndex: idx,
+          capturedAt: u.timestamp || u.viewed_at || Date.now(),
+          viewedAt: u.timestamp || u.viewed_at || null
+        }));
+
+        window.postMessage({
+          type: 'STORYLISTER_VIEWERS_CHUNK',
+          data: {
+            mediaId: String(mediaId),
+            viewers,
+            totalCount: json.user_count || json.total_viewer_count || json?.data?.media?.story_viewers?.count || users.length
+          }
+        }, '*');
+      }).catch(() => {});
+    } catch (_) {}
+
+    return res; // always return original response to IG
+  };
+})();
+```
+
+(You already had a very similar interceptor; this version just broadens the URL matches and normalizes the payload.)
+
+---
+
+### 3) **Patch `content.js` (UI) — no styling changes**
+
+Keep your UI as-is. Add three listeners and a small loader that **reads the current story id from the URL** and pulls only that record out of `panel_story_store`. This is the step that makes the right panel populate as soon as the backend mirrors data.
+
+Add this block near the top (after your UI is rendered/initialized):
+
+```js
+// ---- Storylister UI <-> backend wiring (minimal) ----
+(function wireStorylisterUI() {
+  const getCurrentStoryId = () => (location.pathname.match(/\/stories\/[^/]+\/(\d+)/) || [])[1];
+
+  function loadFromLegacyStoreAndRender() {
+    try {
+      const raw = localStorage.getItem('panel_story_store');
+      if (!raw) return;
+      const all = JSON.parse(raw);
+      const sid = getCurrentStoryId();
+      if (!sid || !all[sid]) return;
+
+      const rows = all[sid].viewers || [];
+      // clear and repopulate your in-memory map the way your UI expects:
+      if (typeof viewers === 'object' && viewers.clear) viewers.clear();
+      rows.forEach(([id, v], i) => {
+        const obj = {
+          username: v.username,
+          displayName: v.full_name || v.username,
+          profilePic: v.profile_pic_url || '',
+          isVerified: !!v.is_verified,
+          isFollower: !!v.followed_by_viewer,
+          isFollowing: !!v.follows_viewer,
+          viewedAt: v.viewedAt || Date.now(),
+          originalIndex: (typeof v.originalIndex === 'number') ? v.originalIndex : i,
+          isTagged: (typeof taggedUsers !== 'undefined') ? taggedUsers.has(v.username) : false
+        };
+        // If your UI uses a Map keyed by username:
+        (viewers.set ? viewers.set(obj.username, obj) : null);
+      });
+
+      // call your existing render function
+      if (typeof updateViewerList === 'function') updateViewerList();
+      // also update counters if you have them:
+      const countEl = document.getElementById('sl-count');
+      if (countEl) countEl.textContent = `${(viewers.size || rows.length)} viewers`;
+    } catch (e) {
+      console.warn('[Storylister UI] failed to load panel_story_store', e);
+    }
+  }
+
+  // Show/hide the rail when backend tells us to
+  window.addEventListener('storylister:show_panel', () => {
+    if (typeof showRightRail === 'function') showRightRail();
+  });
+  window.addEventListener('storylister:hide_panel', () => {
+    if (typeof hideRightRail === 'function') hideRightRail();
+  });
+
+  // Re-render whenever backend mirrored new data
+  window.addEventListener('storylister:data_updated', () => {
+    loadFromLegacyStoreAndRender();
+  });
+
+  // On first load, try once
+  loadFromLegacyStoreAndRender();
+
+  // Ensure your sort button cycles: recent → oldest → original
+  if (typeof currentFilters === 'object') {
+    const btn = document.getElementById('sl-sort');
+    if (btn) {
+      btn.addEventListener('click', (e) => {
+        const order = ['recent', 'oldest', 'original'];
+        const labels = { recent: '↓ Newest', oldest: '↑ Oldest', original: '📝 Original' };
+        currentFilters.sort = order[(order.indexOf(currentFilters.sort) + 1) % 3];
+        e.currentTarget.textContent = labels[currentFilters.sort];
+        if (typeof updateViewerList === 'function') updateViewerList();
+      });
+    }
+  }
+})();
+```
+
+…and make sure your sort function supports the new **“original”** option:
+
+```js
+// wherever you sort the array of viewer objects:
+if (currentFilters.sort === 'oldest') {
+  arr.sort((a,b) => (a.viewedAt||0) - (b.viewedAt||0));
+} else if (currentFilters.sort === 'original') {
+  arr.sort((a,b) => (a.originalIndex||0) - (b.originalIndex||0));
+} else {
+  arr.sort((a,b) => (b.viewedAt||0) - (a.viewedAt||0)); // recent (default)
+}
+```
+
+> If you already have a `window.addEventListener('storylister:data_updated', …)` in your UI, keep just one (the one above is safe). The important part is **pulling the current story id from the URL** before reading `panel_story_store`.
+
+---
+
+### 4) **Add these few lines to your CSS** (keeps your look; only fixes visibility)
+
+```css
+/* content.css — visibility/positioning only (no theme changes) */
+#storylister-right-rail {
+  position: fixed !important;
+  top: 12px !important;
+  right: 12px !important;
+  width: 380px !important;
+  max-width: calc(100vw - 24px) !important;
+  z-index: 2147483647 !important; /* max 32-bit */
+  display: none;
+}
+#storylister-right-rail.active { display: block !important; }
+
+@media (max-width: 768px) {
+  #storylister-right-rail {
+    width: calc(100vw - 24px) !important;
+    max-height: calc(100vh - 24px) !important;
+    overflow-y: auto !important;
+  }
+}
+```
+
+---
+
+## Why this fixes today’s symptoms
+
+* **Panel on other people’s stories**: blocked by `hasSeenByUI()` + URL owner check.
+* **No auto‑open / no data**: `autoOpenViewers()` finds *the* real element and clicks it, then **presses `End`** fast until the list stabilizes.
+* **0 viewers in right rail**: UI now reloads **the current story id** from `panel_story_store` whenever the backend mirrors.
+* **Panel only appears after resizing**: visibility CSS prevents clipping.
+* **3,000+ console messages**: throttled observer (`setTimeout(...,200)`) stops hot‑looping. If you have any `chrome.runtime.onMessage.addListener` handlers returning `true` without `sendResponse`, remove that `return true;` or call `sendResponse({ok:true})`. (I didn’t see such a handler in the files you uploaded, but this is exactly the pattern that produces the flood of “Unhandled response” messages.)
+
+---
+
+## sanity checks you can run in the console
+
+1. **Is this your story?**
+
+```js
+!!(document.querySelector('a[href*="/seen_by/"]') ||
+   Array.from(document.querySelectorAll('button,[role="button"],span,div'))
+     .find(el => /^Seen by(\s+\d+)?$/i.test((el.textContent||'').trim())))
+```
+
+Should be **true** only on your own story.
+
+2. **Did viewers get mirrored?**
+
+```js
+const s = JSON.parse(localStorage.getItem('panel_story_store')||'{}');
+console.log(Object.keys(s), s[location.pathname.match(/\/stories\/[^/]+\/(\d+)/)?.[1]]);
+```
+
+You should see your current story id and a `viewers` array.
+
+---
+
+## Notes on the files you uploaded (so you know what changed)
+
+* Your manifest already loads `content-backend.js` at `document_start` and `content.js` at `document_idle` (that ordering is correct).&#x20;
+* You had **multiple** copies of `content‑backend.js` and `content.js` in prior zips; one of the backend copies contained the fatal `.viewer` token that crashes immediately. Remove old copies and use the **single** files above. The working injected parser you uploaded matches the approach here.
+
+---
+
+## What we did **not** change
+
+* We didn’t restyle anything (only added a few lines to guarantee visibility).
+* We didn’t add any API calls; interception remains a **passive clone** of the responses your browser is already receiving.
+* We didn’t add IndexedDB right now—your current launch goal is to get the **session view** working reliably first. (We can add the IndexedDB mirror again once this is stable.)
+
+---
+
+## Quick test plan
+
+1. Open **your** story. Confirm you see “Seen by …”.
+2. Verify the right rail becomes visible → click “Story to Story Insights” and “Manage Tags” to ensure they open (your existing handlers will now run because the panel is shown).
+3. Watch the “Viewers” dialog auto‑open and populate (press **End** key emulation).
+4. See your right rail counters rise; try the **Sort** button: **Newest → Oldest → Original**.
+5. Navigate to a friend’s story: the panel should hide automatically.
+
+If anything still doesn’t fire, the first thing I’d check is whether there are **multiple** content scripts in your build (old zip remnants). Use the single files above and it will behave deterministically.
+
+Want me to also produce a PR text that you can paste into GitHub describing exactly these changes?

@@ -1,0 +1,87 @@
+{
+    "title": "Recording 9/17/2025 at 5:40:03 PM",
+    "steps": [
+        {
+            "type": "setViewport",
+            "width": 954,
+            "height": 1413,
+            "deviceScaleFactor": 1,
+            "isMobile": false,
+            "hasTouch": false,
+            "isLandscape": false
+        },
+        {
+            "type": "navigate",
+            "url": "https://www.instagram.com/explore/",
+            "assertedEvents": [
+                {
+                    "type": "navigation",
+                    "url": "https://www.instagram.com/explore/",
+                    "title": "Instagram"
+                }
+            ]
+        },
+        {
+            "type": "click",
+            "target": "main",
+            "selectors": [
+                [
+                    "aria/Instagram[role=\"image\"]"
+                ],
+                [
+                    "#mount_0_0_8\\+ > div > div > div.x9f619 div.html-div > div > div > div > div > div.x2lah0s svg"
+                ],
+                [
+                    "xpath///*[@id=\"mount_0_0_8+\"]/div/div/div[2]/div/div/div[1]/div[1]/div[2]/div/div/div/div/div[1]/div/div/span/div/a/div/div[1]/div/div/svg"
+                ],
+                [
+                    "pierce/#mount_0_0_8\\+ > div > div > div.x9f619 div.html-div > div > div > div > div > div.x2lah0s svg"
+                ]
+            ],
+            "offsetY": 18,
+            "offsetX": 6
+        },
+        {
+            "type": "click",
+            "target": "main",
+            "selectors": [
+                [
+                    "aria/colincarrier's profile picture[role=\"button\"]",
+                    "aria/[role=\"image\"]"
+                ],
+                [
+                    "div.xmnaoh6 li:nth-of-type(2) img"
+                ],
+                [
+                    "xpath///*[@id=\"mount_0_0_8+\"]/div/div/div[2]/div/div/div[1]/div[1]/div[1]/section/main/div[1]/div/div/div[1]/div/div/div/div/div/div/ul/li[2]/div/div[1]/div/span/img"
+                ],
+                [
+                    "pierce/div.xmnaoh6 li:nth-of-type(2) img"
+                ]
+            ],
+            "offsetY": 31,
+            "offsetX": 33
+        },
+        {
+            "type": "click",
+            "target": "main",
+            "selectors": [
+                [
+                    "aria/Pause[role=\"image\"]",
+                    "aria/[role=\"graphics-symbol\"]"
+                ],
+                [
+                    "div.x6s0dn4 > div:nth-of-type(2) > div:nth-of-type(2) path"
+                ],
+                [
+                    "xpath///*[@id=\"mount_0_0_8+\"]/div/div/div[3]/div/div/div[3]/div/section/div[1]/div/div/div[1]/div/div[1]/div/div[2]/div[2]/div[2]/div/svg/path"
+                ],
+                [
+                    "pierce/div.x6s0dn4 > div:nth-of-type(2) > div:nth-of-type(2) path"
+                ]
+            ],
+            "offsetY": 7.401039123535156,
+            "offsetX": 2
+        }
+    ]
+}

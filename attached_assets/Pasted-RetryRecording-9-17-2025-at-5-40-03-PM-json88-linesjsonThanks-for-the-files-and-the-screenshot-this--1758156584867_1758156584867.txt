@@ -1,0 +1,200 @@
+RetryRecording 9_17_2025 at 5_40_03 PM.json88 linesjsonThanks for the files and the screenshot—this made the failure mode clear.
+Here’s what’s happening, why the panel doesn’t show on your story, and the exact patches to make it come up every time (without changing your UI/styling).
+
+What’s not happening (root cause)
+
+Own‑story detection is still tied tpastedCCEditDiagnosed technical glitches in data capture and messaging.Looking at the screenshot and the console errors, I can see several critical issues:
+
+The panel IS showing - which is good progress! It's appearing on the right side
+No data is flowing - It shows "0 viewers", "Waiting for viewers..."
+Massive console errors - There are repeating errors about:
+
+"Uncaught (in promise) Error: A listener indicated an asynchronous response by returning true, but the message channel closed before a response was received"
+Multiple "Permissions policy violation" warnings
+"AbortError: The play() request was interrupted by a call to pause()"
+
+
+
+The recording JSON shows the user clicking on their story, pausing the video, and the panel appearing.
+The key issues seem to be:
+
+The data capture isn't working - the injected script might not be intercepting properly
+There's an async messaging issue causing the repeated errors
+The video pause/play conflict is happening
+
+Let me provide focused fixes for these specific issues.Looking at your screenshot, I can see two critical issues:
+🔴 Issue 1: Runaway Async Response Error (3,093 messages!)
+The console shows thousands of these errors:
+"A listener indicated an asynchronous response by returning true, but the message channel closed..."
+This is caused by a Chrome extension message listener returning true without sending a response. It's creating an infinite loop.
+Fix: In your content.js or content-backend.js, find ANY chrome.runtime.onMessage listener and make sure it either:
+
+Returns false (or nothing)
+OR actually sends a response
+
+javascript// WRONG - causes infinite errors:
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  // some code...
+  return true; // BUT never calls sendResponse()
+});
+
+// CORRECT:
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  // some code...
+  // Either don't return true, OR actually send a response:
+  sendResponse({status: 'ok'});
+  return true;
+});
+🔴 Issue 2: No Data Flowing
+The panel shows but says "Waiting for viewers..." because the fetch interception isn't working.
+Check your injected.js - it needs to intercept Instagram's API calls:
+javascript// This MUST be in injected.js (page context, not content script context)
+const origFetch = window.fetch;
+window.fetch = async function(...args) {
+  const response = await origFetch.apply(this, args);
+  
+  try {
+    const url = args[0]?.toString() || '';
+    
+    // Check if this is a viewer request
+    if (url.includes('/api/v1/') || url.includes('story_viewers')) {
+      const clone = response.clone();
+      const json = await clone.json();
+      
+      console.log('[Storylister] Intercepted API response:', url, json); // Debug log
+      
+      // Look for viewer data in the response
+      if (json?.users || json?.viewers) {
+        const viewers = json.users || json.viewers || [];
+        
+        // Send to content script
+        window.postMessage({
+          type: 'STORYLISTER_VIEWERS_CHUNK',
+          data: {
+            mediaId: location.pathname.match(/\/(\d+)\/?$/)?.[1] || 'unknown',
+            viewers: viewers,
+            totalCount: json.user_count || viewers.length
+          }
+        }, '*');
+        
+        console.log('[Storylister] Posted', viewers.length, 'viewers to content script');
+      }
+    }
+  } catch(e) {
+    // Silent fail
+  }
+  
+  return response;
+};
+🟡 Issue 3: Video Play/Pause Conflict
+The AbortError: The play() request was interrupted happens when you're trying to pause/play videos too quickly.
+Fix in content-backend.js:
+javascriptconst pauseVideosIfNeeded = () => {
+  if (!Settings.cache.pauseVideos) return;
+  
+  document.querySelectorAll('video').forEach(v => {
+    // Wait for video to be ready before pausing
+    if (v.readyState >= 2 && !v.paused && !v.dataset.slPaused) {
+      v.pause().catch(() => {}); // Ignore pause errors
+      v.dataset.slPaused = '1';
+    }
+  });
+};
+🔍 Quick Debugging Steps:
+
+Open Console and run:
+
+javascript// Check if injected script is loaded
+console.log(typeof window.STORYLISTER_INJECTED !== 'undefined');
+
+// Manually test fetch interception
+fetch('https://www.instagram.com/api/v1/test').then(() => {
+  console.log('Fetch interceptor is working');
+});
+
+// Check if message listener is set up
+window.addEventListener('message', (e) => {
+  if (e.data?.type === 'STORYLISTER_VIEWERS_CHUNK') {
+    console.log('Received viewer chunk!', e.data);
+  }
+});
+
+Click "Seen by" manually and watch the Network tab. Look for any API calls containing "viewer" or "story" - those are what need to be intercepted.
+
+🚨 The Real Problem:
+Your injected.js either:
+
+Isn't being injected into the page context
+OR isn't intercepting the right API endpoints
+
+The panel is working, but it's not getting data because the fetch interceptor isn't catching Instagram's viewer API calls.
+Would you like me to provide a complete, working injected.js that definitely catches Instagram's current API structure?RetryCCwe don't want to use IG's APIs, or don't want to really be detected doing so.  we want to use whatever the browswer itself is seeing and getting.also, the panel not showing up on different widnow sizing is a problem.EditStrategized passive data interception and panel visibility solutions.The user is making two important points:
+
+They don't want to make API calls directly - they want to passively intercept what the browser is already fetching (which is legitimate and not detectable)
+The panel not showing up at different window sizes is a problem
+
+For the first point, I need to clarify that the fetch interception in injected.js is NOT making new API calls - it's just intercepting the ones Instagram is already making. This is passive observation of existing traffic, not active API usage.
+For the second point, the panel visibility issue at different window sizes is likely a CSS z-index or positioning problem.
+Let me address both issues clearly.You're right to be cautious, but let me clarify: the fetch interception isn't making any API calls - it's passively observing the requests Instagram is already making when you view your stories. This is completely undetectable because we're not sending anything, just reading what the browser already receives.
+The Data Flow Issue
+Your injected.js needs to intercept the existing browser traffic, not make new requests:
+javascript// This doesn't make ANY requests - it just watches what Instagram already fetches
+const origFetch = window.fetch;
+window.fetch = async function(...args) {
+  const response = await origFetch.apply(this, args); // Let Instagram's request complete normally
+  
+  // Passively observe the response Instagram already got
+  try {
+    const url = args[0]?.toString() || '';
+    // Only process if it looks like viewer data
+    if (url.includes('viewer') || url.includes('story')) {
+      const clone = response.clone(); // Don't touch the original
+      const data = await clone.json();
+      
+      // Just pass along what we observed to your extension
+      if (data?.users) {
+        window.postMessage({
+          type: 'STORYLISTER_VIEWERS_CHUNK',
+          data: { viewers: data.users }
+        }, '*');
+      }
+    }
+  } catch(e) {}
+  
+  return response; // Return Instagram's original response untouched
+};
+This is like reading the mail that's already been delivered to your house - you're not sending any letters.
+The Window Sizing Issue
+The panel not appearing at different sizes is a CSS problem. In your content.css, the panel has fixed positioning that might be off-screen:
+css#storylister-right-rail {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  width: 380px;
+  /* Add these to ensure visibility: */
+  max-width: calc(100vw - 24px);
+  z-index: 2147483647; /* Maximum z-index */
+}
+
+/* For smaller screens */
+@media (max-width: 768px) {
+  #storylister-right-rail {
+    width: calc(100vw - 24px);
+  }
+}
+The Console Errors
+Those 3,093 "asynchronous response" errors are killing performance. Find this pattern in your code:
+javascript// Search for any chrome.runtime.onMessage listener
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  // If you have 'return true' anywhere, remove it unless you actually call sendResponse
+});
+Quick Test
+Open your story and run this in console to see what Instagram is actually fetching:
+javascript// This just logs what Instagram is already requesting - no new calls
+const origFetch = window.fetch;
+window.fetch = function(...args) {
+  console.log('Instagram requested:', args[0]);
+  return origFetch.apply(this, args);
+};
+You'll see Instagram makes requests like /api/v1/feed/reels_media/ or similar. Those responses already contain the viewer data - we just need to read it as it passes through.
+The key point: we're not "using IG's APIs" - we're just observing the data Instagram already sent to your browser. It's like reading a book that's already on your shelf versus going to the library to get it.RetryClaude can make mistakes. Please double-check responses.
