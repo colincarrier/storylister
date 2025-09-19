@@ -1673,6 +1673,69 @@
     }
   });
   
+  // Listen for data updates from backend
+  window.addEventListener('storylister:data_updated', (evt) => {
+    const storyId = evt.detail?.storyId || getCurrentStoryIdFromURL();
+    if (!storyId) return;
+    
+    try {
+      const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+      const data = store[storyId];
+      
+      if (!data?.viewers) return;
+      
+      // Call existing viewer loader if defined
+      if (typeof loadViewersFromStorage === 'function') {
+        loadViewersFromStorage();
+      } else {
+        // Convert to format the UI expects
+        const viewerMap = new Map();
+        data.viewers.forEach(([id, v]) => {
+          viewerMap.set(v.username || id, v);
+        });
+        
+        // Update global viewers map
+        viewers = viewerMap;
+        
+        // Update the UI
+        if (typeof updateViewerList === 'function') {
+          updateViewerList(viewerMap);
+        }
+        
+        // Update count displays
+        const countElements = document.querySelectorAll('#sl-viewer-count, .viewer-count, [data-viewer-count]');
+        countElements.forEach(el => {
+          el.textContent = data.viewers.length;
+        });
+        
+        // Remove waiting message if present
+        const waitingMsg = document.querySelector('.waiting-message, .no-data');
+        if (waitingMsg) waitingMsg.style.display = 'none';
+      }
+    } catch(e) {
+      console.error('[Storylister] Data update failed:', e);
+    }
+  });
+  
+  // Helper to get story ID from URL (same as backend)
+  function getCurrentStoryIdFromURL() {
+    const m = location.pathname.match(/\/stories\/[^/]+\/(\d+)/);
+    return m ? m[1] : null;
+  }
+  
+  // Ensure button handlers work (delegation for dynamic elements)
+  document.addEventListener('click', (e) => {
+    if (e.target.closest('#sl-manage-tags')) {
+      e.preventDefault();
+      if (typeof showManageTagsModal === 'function') showManageTagsModal();
+    }
+    
+    if (e.target.closest('#sl-insights')) {
+      e.preventDefault();
+      if (typeof showStoryInsights === 'function') showStoryInsights();
+    }
+  }, true);
+  
   // Start initialization
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', initialize);
