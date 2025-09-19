@@ -454,3 +454,59 @@
 .storylister-empty-text {
   font-size: 14px;
 }
+
+/* Responsive Panel Fixes - Ensures visibility at all window sizes */
+#storylister-right-rail {
+  position: fixed !important;
+  top: 12px !important;
+  right: 12px !important;
+  width: 380px !important;
+  max-width: calc(100vw - 24px) !important;
+  max-height: calc(100vh - 24px) !important;
+  z-index: 2147483647 !important; /* Maximum z-index */
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+}
+
+#storylister-right-rail.active {
+  display: block !important;
+}
+
+/* Responsive sizing for tablets */
+@media (max-width: 768px) {
+  #storylister-right-rail {
+    width: calc(100vw - 24px) !important;
+    top: 60px !important; /* Below Instagram header */
+  }
+  
+  .storylister-panel {
+    max-height: calc(100vh - 72px) !important;
+  }
+}
+
+/* Responsive sizing for mobile */
+@media (max-width: 480px) {
+  #storylister-right-rail {
+    width: 100vw !important;
+    right: 0 !important;
+    top: 0 !important;
+    max-height: 100vh !important;
+    border-radius: 0 !important;
+  }
+  
+  .storylister-panel {
+    border-radius: 0 !important;
+    max-height: 100vh !important;
+  }
+  
+  .storylister-content {
+    border-radius: 0 !important;
+  }
+}
+
+/* Ensure above Instagram overlays on medium screens */
+@media (min-width: 769px) and (max-width: 1024px) {
+  #storylister-right-rail {
+    width: min(380px, calc(100vw - 24px)) !important;
+  }
+}
