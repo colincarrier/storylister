@@ -285,9 +285,13 @@
     
     document.querySelectorAll('video').forEach(video => {
       if (!video.paused) {
-        video.pause();
-        pausedVideos.add(video);
-        video.dataset.storylisterPaused = 'true';
+        try {
+          video.pause();
+          pausedVideos.add(video);
+          video.dataset.storylisterPaused = 'true';
+        } catch (e) {
+          // ignore
+        }
       }
     });
     
@@ -302,7 +306,11 @@
   function resumeVideos() {
     pausedVideos.forEach(video => {
       if (video.dataset.storylisterPaused === 'true') {
-        video.play();
+        try {
+          video.play();
+        } catch (e) {
+          // ignore
+        }
         delete video.dataset.storylisterPaused;
       }
     });
@@ -1169,11 +1177,17 @@
       updateViewerList();
     });
     
-    // Search
-    document.getElementById('sl-search')?.addEventListener('input', (e) => {
-      currentFilters.query = e.target.value;
-      updateViewerList();
-    });
+    // Search - stop propagation to prevent interference
+    const searchEl = document.getElementById('sl-search');
+    if (searchEl) {
+      searchEl.addEventListener('keydown', e => { 
+        e.stopPropagation(); 
+      }, { capture: true });
+      searchEl.addEventListener('input', (e) => {
+        currentFilters.query = e.target.value;
+        updateViewerList();
+      });
+    }
     
     // Filter buttons
     document.querySelectorAll('[data-filter-type]').forEach(btn => {
