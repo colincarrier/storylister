@@ -8,7 +8,9 @@
     currentStoryId: null,
     autoOpenInProgress: false,
     viewerStore: new Map(),       // Map<mediaId, Map<viewerId, viewer>>
-    mirrorTimer: null
+    mirrorTimer: null,
+    lastAutoOpenedStoryId: null,  // Prevents re-opening
+    cancelPaginator: null          // Stops old paginators
   };
 
   const Settings = {
@@ -217,9 +219,18 @@
     return el && document.activeElement === el;
   }
 
-  function startFastPagination(scroller, maxMs = 8000) {
+  function startFastPagination(scroller, maxMs = 6000) {
     let lastHeight = 0, stable = 0, running = true;
     const started = Date.now();
+
+    const stop = () => { running = false; };
+    const userStop = () => stop();
+
+    // Stop when user interacts with the dialog in any way
+    const dlg = scroller.closest('[role="dialog"]') || document;
+    ['wheel','mousedown','keydown','touchstart'].forEach(evt =>
+      dlg.addEventListener(evt, userStop, { once: true, capture: true })
+    );
 
     const tick = () => {
       if (!running || !document.contains(scroller)) return;
@@ -230,39 +241,57 @@
       // hard stop after maxMs
       if (Date.now() - started > maxMs) return;
 
-      const height = scroller.scrollHeight;
-      if (height === lastHeight) {
-        if (++stable >= 2) return; // loaded
+      const h = scroller.scrollHeight;
+      if (h === lastHeight) {
+        if (++stable > 2) return;
       } else {
         stable = 0;
-        lastHeight = height;
+        lastHeight = h;
       }
 
-      // Force a simple scroll that IG listens to
+      // Simulate End key with non-bubbling event
+      const ev = new KeyboardEvent('keydown', { 
+        key: 'End', 
+        code: 'End', 
+        keyCode: 35, 
+        which: 35, 
+        bubbles: false,  // Don't bubble to prevent interference
+        cancelable: true
+      });
+      scroller.dispatchEvent(ev);
       scroller.scrollTop = scroller.scrollHeight;
       
-      // Pace requests to avoid duplicates (was 120ms)
+      // Pace requests to avoid duplicates
       setTimeout(tick, 360);
     };
+    
     tick();
-    return () => { running = false; };
+    return stop;
   }
 
   function autoOpenViewers() {
     if (!Settings.cache.autoOpen) return;
     if (state.autoOpenInProgress) return;
 
+    // Open only once per story to avoid re-open loop
+    if (state.currentStoryId && state.lastAutoOpenedStoryId === state.currentStoryId) return;
+
     const btn = findSeenByButton();
     if (!btn) return;
 
     state.autoOpenInProgress = true;
-    try { btn.click(); } catch (e) { console.warn('[Storylister] Click failed:', e); }
+    try { btn.click(); } catch (e) { /* ignore */ }
 
     setTimeout(() => {
       const scroller = findScrollableInDialog();
-      if (scroller) startFastPagination(scroller);
-      setTimeout(() => { state.autoOpenInProgress = false; }, 1000);
-    }, 500);
+      if (scroller) {
+        // Cancel any previous paginator (safety)
+        if (typeof state.cancelPaginator === 'function') state.cancelPaginator();
+        state.cancelPaginator = startFastPagination(scroller);
+      }
+      state.lastAutoOpenedStoryId = state.currentStoryId || state.lastAutoOpenedStoryId;
+      setTimeout(() => { state.autoOpenInProgress = false; }, 800);
+    }, 450);
   }
 
   function cleanupOldStories(max = 10) {
@@ -289,29 +318,36 @@
 
   const resumeVideos = () => {
     document.querySelectorAll('video[data-sl-paused="1"]').forEach(v => {
-      v.play().catch(() => {});
+      try { v.play(); } catch(e) {}
       delete v.dataset.slPaused;
     });
   };
 
   // --- DOM observer -> gate + inject + open ---
   const onDOMChange = throttle(async () => {
+    const storyId = getCurrentStoryIdFromURL();
+
     if (await isOnOwnStory()) {
       window.dispatchEvent(new CustomEvent('storylister:show_panel'));
       ensureInjected();
+      pauseVideosIfNeeded();
 
-      const urlId = getCurrentStoryIdFromURL();
-      if (!urlId) {
-        // No id in URL (first story view) — still open Seen by
-        autoOpenViewers();
-      } else if (urlId !== state.currentStoryId) {
-        state.currentStoryId = urlId;
-        if (DEBUG) console.log('[Storylister] Story changed:', urlId);
+      if (storyId && storyId !== state.currentStoryId) {
+        state.currentStoryId = storyId;
+        state.lastAutoOpenedStoryId = null;      // allow one open for this story
+        if (typeof state.cancelPaginator === 'function') state.cancelPaginator(); // cancel old paginator
+        if (DEBUG) console.log('[Storylister] Story changed:', storyId);
         autoOpenViewers();
         cleanupOldStories(10);
+      } else if (!storyId) {
+        // No id in URL (first story view) — still open Seen by
+        state.lastAutoOpenedStoryId = null;
+        if (typeof state.cancelPaginator === 'function') state.cancelPaginator();
+        autoOpenViewers();
       }
     } else {
       window.dispatchEvent(new CustomEvent('storylister:hide_panel'));
+      if (typeof state.cancelPaginator === 'function') state.cancelPaginator();
     }
   }, 200);
 

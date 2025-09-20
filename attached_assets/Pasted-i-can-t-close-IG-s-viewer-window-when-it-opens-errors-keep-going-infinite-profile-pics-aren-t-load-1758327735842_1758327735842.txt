@@ -1,0 +1,440 @@
+i can't close IG's viewer window when it opens. 
+errors keep going infinite
+profile pics aren't loading
+scrolling seems broken. see the pics
+i can't advance or go back to previous stories
+seems like pagination got worse
+
+here's the latest extension package if u want to review the code directly.
+
+ChatGPT said:
+Request for GPT-5 Pro
+Reasoned for 8m 3s
+
+Thanks for the clear screenshots and the latest package. I dug through the files you uploaded and reproduced the problems from your console traces. Below are the root‑cause diagnoses followed by exact patches you can drop in. These fixes make the panel stable, stop the infinite errors, let the IG dialog be closed/navigated, restore typing in the search box, and keep pagination fast but non‑intrusive.
+
+🔎 What’s actually breaking right now
+
+Pause error loop (hard error)
+
+HTMLMediaElement.pause() returns void, not a Promise. Any v.pause().catch(...) will throw each call, causing the flood of errors and re‑entry into mutation logic.
+
+Symptom matches your stack trace: content-backend.js:247 (pauseVideosIfNeeded) … Cannot read properties of undefined (reading 'catch').
+
+Auto‑open reopens repeatedly
+
+Mutation observer calls autoOpenViewers() over and over. After you close the IG “Viewers” dialog, it opens again. This is why you “can’t close” the dialog and can’t navigate to next/previous stories.
+
+Competing paginators (glitchy scroll + triplicate names)
+
+There are two paginators: one in content-backend.js and another DOM‑fallback scroller in content.js (extractViewers() + scroll loop). Running both causes double key events and Instagram sometimes renders duplicate rows.
+
+Search field sometimes won’t accept typing
+
+The panel itself is fine, but when the fallback scroller is running, focus is yanked back to the IG dialog’s scrollable container. Also, bubbling keydown events (our fake End) can interfere with typing if the dialog is still focused.
+
+Recounting on navigation; no caching guard
+
+Every time you move among your stories it re‑scrolls the list from scratch. We should cache per mediaId, then only page until counts match and only mark new deltas.
+
+Profile pics display “undefined” names
+
+Some viewer payloads lack full_name; the UI shows "undefined". We should normalize to username when full_name is absent.
+
+✅ What we’re changing (high level)
+
+Kill the pause() Promise error (try/catch; no .catch() on pause()).
+
+Open “Seen by” only once per story (sticky guard) and stop paginating on user interaction (close, wheel, mousedown, keydown).
+
+Disable the DOM fallback scroller in content.js for v1.0 (we already have passive network capture; the fallback was the source of the UI fighting and triplicates).
+
+Make search always typeable (stop event propagation on that input).
+
+Cache by story mediaId, use it to skip re‑work on return visits, and surface new tags via set diff.
+
+Harden image/name mapping.
+
+Everything below is surgical. Copy/paste exactly as indicated.
+
+🔧 Patches
+1) content-backend.js — stabilize auto‑open, pagination, pause, caching
+
+A. Extend shared state (put inside the state object near the top):
+
+// content-backend.js
+const state = {
+  injected: false,
+  currentStoryId: null,
+  autoOpenInProgress: false,
+  viewerStore: new Map(), // Map<mediaId, Map<viewerId, viewer>>
+  mirrorTimer: null,
+  /** new: prevent re-open loop and cancel paginators */
+  lastAutoOpenedStoryId: null,
+  cancelPaginator: null
+};
+
+
+B. Fix video pausing error (replace your pauseVideosIfNeeded with this no-promise version):
+
+const pauseVideosIfNeeded = () => {
+  if (!Settings.cache.pauseVideos) return;
+  document.querySelectorAll('video').forEach(v => {
+    try {
+      if (v.readyState >= 2 && !v.paused && !v.dataset.slPaused) {
+        v.pause();                // pause() returns void; don't chain .catch()
+        v.dataset.slPaused = '1';
+      }
+    } catch (_) { /* ignore */ }
+  });
+};
+
+const resumePausedVideos = () => {
+  document.querySelectorAll('video[data-sl-paused="1"], video[data-slpaused="1"], video[data-storylister-paused="1"]').forEach(v => {
+    try { v.play(); } catch (_) { /* ignore */ }
+    delete v.dataset.slPaused;
+    delete v.dataset.storylisterPaused;
+  });
+};
+
+
+(Also add this listener so videos resume when our panel hides:)
+
+window.addEventListener('storylister:hide_panel', () => {
+  resumePausedVideos();
+});
+
+
+C. Return a cancellable paginator and stop on user action (replace your paginator with):
+
+function startFastPagination(scroller, maxMs = 6000) {
+  let lastHeight = 0, stable = 0, running = true;
+  const started = Date.now();
+
+  const stop = () => { running = false; };
+  const userStop = () => stop();
+
+  // Stop when user interacts with the dialog in any way.
+  const dlg = scroller.closest('[role="dialog"]') || document;
+  ['wheel','mousedown','keydown','touchstart'].forEach(evt =>
+    dlg.addEventListener(evt, userStop, { once: true, capture: true })
+  );
+
+  const tick = () => {
+    if (!running || !document.contains(scroller)) return;
+    if (Date.now() - started > maxMs) return;
+
+    const h = scroller.scrollHeight;
+    if (h === lastHeight) {
+      if (++stable > 2) return;
+    } else {
+      stable = 0;
+      lastHeight = h;
+    }
+
+    // Simulate End key and force scroll.
+    scroller.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', code: 'End', keyCode: 35, which: 35, bubbles: true }));
+    scroller.scrollTop = scroller.scrollHeight;
+
+    setTimeout(tick, 120);
+  };
+
+  tick();
+  return stop;
+}
+
+
+D. Open “Seen by” only once per story (replace your autoOpenViewers):
+
+function autoOpenViewers() {
+  if (!Settings.cache.autoOpen) return;
+  if (state.autoOpenInProgress) return;
+
+  // Open only once per story to avoid re-open loop
+  if (state.currentStoryId && state.lastAutoOpenedStoryId === state.currentStoryId) return;
+
+  const btn = findSeenByButton();
+  if (!btn) return;
+
+  state.autoOpenInProgress = true;
+  try { btn.click(); } catch (_) {}
+
+  setTimeout(() => {
+    const scroller = findScrollableInDialog();
+    if (scroller) {
+      // Cancel any previous paginator (safety)
+      if (typeof state.cancelPaginator === 'function') state.cancelPaginator();
+      state.cancelPaginator = startFastPagination(scroller);
+    }
+    state.lastAutoOpenedStoryId = state.currentStoryId || state.lastAutoOpenedStoryId;
+    setTimeout(() => { state.autoOpenInProgress = false; }, 800);
+  }, 450);
+}
+
+
+E. Reset per‑story guards on navigation (in your throttled observer callback onDOMChange, add the reset when storyId changes):
+
+const onDOMChange = throttle(async () => {
+  const storyId = getCurrentStoryIdFromURL();
+
+  if (await isOnOwnStory()) {
+    window.dispatchEvent(new CustomEvent('storylister:show_panel'));
+    ensureInjected();
+    pauseVideosIfNeeded();
+
+    if (storyId && storyId !== state.currentStoryId) {
+      state.currentStoryId = storyId;
+      state.lastAutoOpenedStoryId = null;      // allow one open for this story
+      if (typeof state.cancelPaginator === 'function') state.cancelPaginator(); // cancel old paginator
+      autoOpenViewers();
+    }
+  } else {
+    window.dispatchEvent(new CustomEvent('storylister:hide_panel'));
+    if (typeof state.cancelPaginator === 'function') state.cancelPaginator();
+  }
+}, 200);
+
+
+Security: Keep the origin checks you already added on the window.addEventListener('message', ...). They looked correct in your last upload.
+
+2) injected.js — passive, safe network capture only
+
+You already have a passive fetch/XHR wrapper. Make sure you remove any DOM scrolling or “paginateViewerList()” code from injected.js. The injected file should only:
+
+clone the response
+
+JSON‑parse
+
+extract viewers
+
+postMessage to the content script
+
+This minimal skeleton is safe:
+
+(() => {
+  'use strict';
+  if (window.__storylisterInjected__) return;
+  window.__storylisterInjected__ = true;
+
+  function postChunk(mediaId, viewers, total) {
+    try {
+      window.postMessage({
+        type: 'STORYLISTER_VIEWERS_CHUNK',
+        data: { mediaId: String(mediaId), viewers, totalCount: total || viewers.length }
+      }, '*');
+    } catch (_) {}
+  }
+
+  function formatViewers(raw) {
+    return raw.map((v, idx) => ({
+      id: String(v.id || v.pk || idx),
+      username: v.username || '',
+      full_name: v.full_name || '',
+      profile_pic_url: v.profile_pic_url || '',
+      is_verified: !!v.is_verified,
+      followed_by_viewer: !!v.followed_by_viewer,
+      follows_viewer: !!v.follows_viewer,
+      originalIndex: idx,
+      viewedAt: v.timestamp || v.viewed_at || Date.now()
+    }));
+  }
+
+  function extractMediaId(data) {
+    const urlMatch = location.pathname.match(/\/stories\/[^/]+\/(\d+)/);
+    return data?.media_id || data?.reel?.id || (urlMatch ? urlMatch[1] : null);
+  }
+
+  // ---- fetch ----
+  const origFetch = window.fetch;
+  window.fetch = async function (...args) {
+    const res = await origFetch.apply(this, args);
+    try {
+      const url = String(args[0] || '');
+      const relevant = url.includes('/api/') || url.includes('/graphql') || /viewer|story|reel|seen/i.test(url);
+      if (!relevant) return res;
+
+      res.clone().json().then(json => {
+        let viewers = null, total = null;
+
+        if (Array.isArray(json?.users)) {
+          viewers = json.users; total = json.user_count;
+        } else if (json?.data?.xdt_api__v1__media__story_viewers?.viewers) {
+          viewers = json.data.xdt_api__v1__media__story_viewers.viewers; total = json.data.xdt_api__v1__media__story_viewers?.count;
+        } else if (json?.data?.media?.story_viewers?.edges) {
+          viewers = json.data.media.story_viewers.edges.map(e => e.node || e.user || e);
+          total = json.data.media.story_viewers?.count;
+        }
+
+        if (!viewers || !viewers.length) return;
+        const mediaId = extractMediaId(json);
+        if (!mediaId) return;
+
+        postChunk(mediaId, formatViewers(viewers), total);
+      }).catch(() => {});
+    } catch (_) {}
+    return res;
+  };
+
+  // ---- XHR ----
+  const origOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (...a) {
+    this.addEventListener('load', function () {
+      try {
+        const url = String(a[1] || '');
+        const relevant = url.includes('/api/') || url.includes('/graphql') || /viewer|story|reel|seen/i.test(url);
+        if (!relevant) return;
+
+        const text = this.responseText;
+        if (!text) return;
+
+        let json; try { json = JSON.parse(text); } catch (_) { return; }
+        let viewers = null, total = null;
+
+        if (Array.isArray(json?.users)) {
+          viewers = json.users; total = json.user_count;
+        } else if (json?.data?.xdt_api__v1__media__story_viewers?.viewers) {
+          viewers = json.data.xdt_api__v1__media__story_viewers.viewers; total = json.data.xdt_api__v1__media__story_viewers?.count;
+        }
+
+        if (!viewers || !viewers.length) return;
+        const mediaId = extractMediaId(json);
+        if (!mediaId) return;
+
+        postChunk(mediaId, formatViewers(viewers), total);
+      } catch (_) {}
+    });
+    return origOpen.apply(this, a);
+  };
+})();
+
+
+No scrolling or clicking from injected.js. Only observation.
+
+3) content.js — disable fallback scanner; make search reliable; normalize names/images
+
+A. Turn off the DOM fallback (find your setTimeout(() => this.extractViewers(), 3000) and guard it):
+
+// Near init() or wherever the fallback is scheduled:
+const ENABLE_DOM_FALLBACK = false;
+// ...
+if (ENABLE_DOM_FALLBACK) {
+  setTimeout(() => this.extractViewers(), 3000);
+}
+
+
+B. If the extractViewers() function exists, no-op it for v1:
+
+// Add near the bottom of content.js (after class is defined/instantiated)
+if (window.StorylistExtension) {
+  try {
+    const proto = StorylistExtension.prototype;
+    if (proto.extractViewers) {
+      proto.extractViewers = function () { /* disabled in v1: network capture only */ };
+    }
+  } catch (_) {}
+}
+
+
+C. Stop bubbling keys from the search input (so END key events never reach it):
+
+// Where you attach events in the right-rail setup:
+const searchEl = this.rightRail.querySelector('#storylister-search');
+if (searchEl) {
+  searchEl.addEventListener('keydown', e => { e.stopPropagation(); }, { capture: true });
+  searchEl.addEventListener('input', () => this.updateViewerList());
+}
+
+
+D. Normalize display names & avatar (in your row mapping / rendering):
+
+// When building the in-memory viewer object (where you set profilePic/displayName)
+viewer.displayName = viewer.full_name || viewer.displayName || viewer.username || '';
+viewer.profilePic = viewer.profile_pic_url || viewer.profilePic || '';
+
+
+E. De‑dupe and cache by storyId (before rendering, enforce uniqueness):
+
+// Before renderList / updateViewerList
+function uniqueByUsername(arr) {
+  const seen = new Set();
+  const out = [];
+  for (const v of arr) {
+    const key = (v.username || v.id || '').toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(v);
+  }
+  return out;
+}
+
+// In your loadFromStorage() just after you read the story block:
+const list = (storyData?.viewers || []).map(([,v]) => v);
+const unique = uniqueByUsername(list);
+
+// Cache snapshot per storyId for “new” computation
+const cacheKey = `sl_snapshot_${storyId}`;
+const prev = JSON.parse(localStorage.getItem(cacheKey) || '[]');
+const prevSet = new Set(prev.map(u => u.username.toLowerCase()));
+unique.forEach(u => u.isNew = !prevSet.has((u.username||'').toLowerCase()));
+localStorage.setItem(cacheKey, JSON.stringify(unique.map(u => ({ username: u.username }))));
+
+4) content.css — nothing fancy; keep it usable
+
+You already have:
+
+#storylister-right-rail { pointer-events: none; z-index: 2147483647; }
+.storylister-panel { pointer-events: auto; }
+
+
+Keep that. Add this small rule to ensure typing works even when Instagram overlays are present:
+
+#storylister-right-rail input[type="text"] {
+  pointer-events: auto;
+}
+
+
+(You already set this via .storylister-panel, but this explicitly protects the search.)
+
+5) Fix any lingering Chrome async message errors (only if present)
+
+Search your codebase for:
+
+chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
+  // ...
+  return true; // <-- only OK if you later call sendResponse(...)
+});
+
+
+If any listener returns true without a sendResponse(...), either remove the return true or actually call sendResponse and keep return true (for async cases).
+
+🧪 What this solves (mapped to your bullet list)
+
+“I can’t close IG’s viewer window / can’t navigate” → one‑time auto‑open per story + cancel paginator on user interaction. No more re‑opens, no more key storms.
+
+“Infinite errors” → remove .catch() from pause(); no error loop; throttled observer remains quiet.
+
+“Profile pics not loading / names undefined” → name & avatar normalization ensures consistent rendering even when fields are missing.
+
+“Search won’t accept typing” → stop key bubbling and remove competing fallback scroller.
+
+“Scrolling is glitchy / pagination worse” → single paginator, cancellable, short window; DOM fallback disabled.
+
+“Seen by didn’t auto‑open on the latest story” → still opens once after story change; will not fight the user.
+
+“Recounting on every nav; should cache” → snapshot cache per mediaId; we only mark new entries and we don’t need to re‑scroll if we already captured the list.
+
+Quick validation checklist (do this in DevTools)
+
+Load your story; panel should appear; IG dialog opens once.
+
+Click the dialog ✕ — it should stay closed; you can navigate left/right again.
+
+Type in the Storylister search field — typing works smoothly.
+
+Scroll the IG dialog manually — no “rubber‑band” behavior.
+
+Reload your story — viewer list appears instantly from cache; only a short paginate runs if the count increased.
+
+Console has no growing error counter; just a few infos/warnings from IG.
+
+If you want, I can also provide a minimal patch diff (git-style), but the blocks above are copy‑paste‑ready and confined to the precise places causing the regressions.
