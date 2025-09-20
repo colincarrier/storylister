@@ -444,8 +444,8 @@
                   viewers.set(viewer.username, {
                     id: viewer.id || viewer.pk || viewer.username,
                     username: viewer.username || '',
-                    displayName: viewer.full_name || viewer.displayName || viewer.username || '',
-                    profilePic: viewer.profile_pic_url || `https://ui-avatars.com/api/?name=${viewer.username}`,
+                    displayName: viewer.full_name || viewer.displayName || viewer.username || 'Anonymous',
+                    profilePic: viewer.profile_pic_url || viewer.profilePic || `https://ui-avatars.com/api/?name=${viewer.username || 'U'}`,
                     isVerified: viewer.is_verified || false,
                     isFollower: viewer.followed_by_viewer || false,
                     isFollowing: viewer.follows_viewer || false,
