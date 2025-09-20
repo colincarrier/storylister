@@ -111,6 +111,25 @@
     if (state.mirrorTimer) return;
     state.mirrorTimer = setTimeout(() => {
       state.mirrorTimer = null;
+      
+      // Compute NEW viewers by diffing against last seen set
+      if (state.currentStoryId) {
+        const lastSeenKey = `sl:last_seen:${state.currentStoryId}`;
+        const currentViewers = state.viewerStore.get(state.currentStoryId);
+        if (currentViewers) {
+          const currentSet = new Set(Array.from(currentViewers.values()).map(v => v.username));
+          const prevSet = new Set(JSON.parse(localStorage.getItem(lastSeenKey) || '[]'));
+          
+          // Mark new viewers
+          for (const [id, viewer] of currentViewers.entries()) {
+            viewer.isNew = !prevSet.has(viewer.username);
+          }
+          
+          // Save current set for next comparison
+          localStorage.setItem(lastSeenKey, JSON.stringify([...currentSet]));
+        }
+      }
+      
       const store = {};
       for (const [mediaId, viewersMap] of state.viewerStore) {
         store[mediaId] = {
@@ -162,6 +181,12 @@
       });
     });
 
+    // Broadcast active mediaId when we actually receive it
+    state.currentStoryId = String(mediaId); // trust network value
+    window.dispatchEvent(new CustomEvent('storylister:active_media', {
+      detail: { storyId: state.currentStoryId }
+    }));
+
     if (DEBUG) console.log(`[Storylister] Received ${viewers.length} viewers for ${mediaId}`, { totalCount });
     mirrorToLocalStorageDebounced();
   });
@@ -186,30 +211,38 @@
       .find(el => el.scrollHeight > el.clientHeight + 40) || dialog;
   }
 
+  // Helper to know if our search input is focused
+  function searchIsActive() {
+    const el = document.querySelector('#sl-search, input#sl-search');
+    return el && document.activeElement === el;
+  }
+
   function startFastPagination(scroller, maxMs = 8000) {
     let lastHeight = 0, stable = 0, running = true;
     const started = Date.now();
 
     const tick = () => {
       if (!running || !document.contains(scroller)) return;
+      
+      // Stop quickly if user is interacting with the panel
+      if (searchIsActive()) return;
+      
+      // hard stop after maxMs
       if (Date.now() - started > maxMs) return;
 
       const height = scroller.scrollHeight;
       if (height === lastHeight) {
-        if (++stable > 2) return; // done
+        if (++stable >= 2) return; // loaded
       } else {
         stable = 0;
         lastHeight = height;
       }
 
-      // Simulate End key + force scroll
-      const ev = new KeyboardEvent('keydown', {
-        key: 'End', code: 'End', keyCode: 35, which: 35, bubbles: true
-      });
-      scroller.dispatchEvent(ev);
+      // Force a simple scroll that IG listens to
       scroller.scrollTop = scroller.scrollHeight;
-
-      setTimeout(tick, 120);
+      
+      // Pace requests to avoid duplicates (was 120ms)
+      setTimeout(tick, 360);
     };
     tick();
     return () => { running = false; };
@@ -243,9 +276,13 @@
   const pauseVideosIfNeeded = () => {
     if (!Settings.cache.pauseVideos) return;
     document.querySelectorAll('video').forEach(v => {
-      if (v.readyState >= 2 && !v.paused && !v.dataset.slPaused) {
-        v.pause().catch(() => {}); // Ignore pause errors
-        v.dataset.slPaused = '1';
+      try {
+        if (!v.paused && !v.dataset.slPaused) {
+          v.pause(); // pause() returns void, not a Promise
+          v.dataset.slPaused = '1';
+        }
+      } catch (e) {
+        // ignore
       }
     });
   };
@@ -259,15 +296,17 @@
 
   // --- DOM observer -> gate + inject + open ---
   const onDOMChange = throttle(async () => {
-    const storyId = getCurrentStoryIdFromURL();
-
     if (await isOnOwnStory()) {
       window.dispatchEvent(new CustomEvent('storylister:show_panel'));
       ensureInjected();
 
-      if (storyId && storyId !== state.currentStoryId) {
-        state.currentStoryId = storyId;
-        if (DEBUG) console.log('[Storylister] Story changed:', storyId);
+      const urlId = getCurrentStoryIdFromURL();
+      if (!urlId) {
+        // No id in URL (first story view) — still open Seen by
+        autoOpenViewers();
+      } else if (urlId !== state.currentStoryId) {
+        state.currentStoryId = urlId;
+        if (DEBUG) console.log('[Storylister] Story changed:', urlId);
         autoOpenViewers();
         cleanupOldStories(10);
       }
@@ -283,6 +322,14 @@
 
   window.addEventListener('storylister:panel_closed', () => {
     resumeVideos();
+  });
+
+  // OPTIONAL: resume when panel hides
+  window.addEventListener('storylister:hide_panel', () => {
+    document.querySelectorAll('video[data-sl-paused="1"]').forEach(v => {
+      try { v.play(); } catch(e) {}
+      delete v.dataset.slPaused;
+    });
   });
 
   (async function init() {

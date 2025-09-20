@@ -377,23 +377,31 @@
       this.lastSyncTime = now;
       
       try {
-        // Get story ID from URL  
-        const urlMatch = location.pathname.match(/\/stories\/[^\/]+\/(\d+)/);
-        if (!urlMatch) {
-          // Try legacy localStorage format
-          const metaStr = localStorage.getItem('panel_story_meta');
-          if (metaStr) {
-            storyMeta = JSON.parse(metaStr);
-          }
-          const storyStore = localStorage.getItem('panel_story_store');
-          if (storyStore) {
-            const parsed = JSON.parse(storyStore);
-            currentStory = Object.keys(parsed)[0];
+        // Prefer the active media announced by backend
+        const urlId = location.pathname.match(/\/stories\/[^\/]+\/(\d+)/)?.[1];
+        const currentKey = ACTIVE_MEDIA_ID_FROM_BACKEND || urlId;
+        
+        if (!currentKey) {
+          // Try legacy localStorage format or use last key
+          const storeRaw = localStorage.getItem('panel_story_store');
+          if (storeRaw) {
+            const store = JSON.parse(storeRaw);
+            const lastKey = Object.keys(store).at(-1); // last updated
+            if (lastKey && store[lastKey]) {
+              currentStory = lastKey;
+              const storyData = store[lastKey];
+              if (storyData.viewers) {
+                viewers.clear();
+                for (const [id, viewer] of storyData.viewers) {
+                  viewers.set(viewer.username || id, viewer);
+                }
+              }
+            }
           }
           return;
         }
         
-        const currentStoryId = urlMatch[1];
+        const currentStoryId = currentKey;
         currentStory = currentStoryId;
         
         // Get viewers from hybrid storage
@@ -1270,6 +1278,18 @@
     }
   }
   
+  // Track the active media ID from backend
+  let ACTIVE_MEDIA_ID_FROM_BACKEND = null;
+
+  // Listen for active media announcements from backend
+  window.addEventListener('storylister:active_media', (e) => {
+    ACTIVE_MEDIA_ID_FROM_BACKEND = e.detail?.storyId || null;
+    // force a refresh now that we know the correct key
+    if (typeof loadViewersFromStorage === 'function') {
+      loadViewersFromStorage();
+    }
+  });
+
   // Listen for data updates
   window.addEventListener('storylister:data_updated', (e) => {
     console.log('[Storylister] Data updated:', e.detail);

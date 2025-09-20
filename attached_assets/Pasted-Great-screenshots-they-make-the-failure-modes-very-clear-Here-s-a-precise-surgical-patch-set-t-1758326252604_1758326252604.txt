@@ -1,0 +1,390 @@
+Great screenshots — they make the failure modes very clear. Here’s a precise, *surgical* patch set that fixes each issue you reported without changing your UI or adding risky behavior. You can paste these diffs straight into your codebase.
+
+---
+
+## What’s going wrong (mapped to your screenshots)
+
+1. **Search box won’t accept typing**
+   Cause: our pagination loop keeps firing while you’re trying to type and sometimes steals focus or saturates the main thread.
+   Fix: stop pagination as soon as the viewer list finishes loading *or* when the panel input is focused.
+
+2. **Exploding console messages / “infinite” errors**
+   Cause A: `video.pause()` returns **void**; calling `.catch()` on it throws repeatedly.
+   Cause B: a `chrome.runtime.onMessage` handler somewhere returns `true` without ever calling `sendResponse`.
+   Fix A: wrap `pause()` in `try/catch` (no `.catch`) — see patch.
+   Fix B: update any message listener to either stop returning `true` or actually call `sendResponse` (snippet below).
+
+3. **IG viewer list shows duplicated rows**
+   Cause: our “END key + force scrollTop” loop can trigger overlapping IG fetch pages if it runs too aggressively.
+   Fix: throttle to \~300–400ms, stop after two “stable” cycles, and *never* run while the search input is focused.
+
+4. **Auto‑open doesn’t trigger on the first story (URL without ID)**
+   Cause: the first story page is often `/stories/<handle>/` (no numeric media id), so our “story changed” guard never fires.
+   Fix: if it’s your story (Seen by present) but there’s no media id in the URL, still open **Seen by** and let the network hook set the `mediaId` when the response arrives.
+
+5. **Recounting/indexing on every nav**
+   Cause: UI read was keyed only to the URL id; when first story has no id, UI doesn’t see the data we just stored.
+   Fix: when a chunk arrives we broadcast the active media id and the UI prefers that id; we also cache per–mediaId and only compute “NEW” by diffing vs. the last saved viewer set for that mediaId.
+
+---
+
+## Exact patches
+
+### 1) `content-backend.js` — drop-in replacements / additions
+
+**A. Fix video pause errors & add safe resume**
+
+```js
+// REPLACE your pauseVideosIfNeeded with this:
+const pauseVideosIfNeeded = () => {
+  if (!Settings.cache.pauseVideos) return;
+  document.querySelectorAll('video').forEach(v => {
+    try {
+      if (!v.paused && !v.dataset.slPaused) {
+        v.pause();                // pause() returns void, not a Promise
+        v.dataset.slPaused = '1';
+      }
+    } catch (e) {
+      // ignore
+    }
+  });
+};
+
+// OPTIONAL: resume when panel hides
+window.addEventListener('storylister:hide_panel', () => {
+  document.querySelectorAll('video[data-sl-paused="1"]').forEach(v => {
+    try { v.play(); } catch(e) {}
+    delete v.dataset.slPaused;
+  });
+});
+```
+
+**B. Auto-open even when the URL has no numeric story id**
+
+```js
+// keep your getCurrentStoryIdFromURL()
+
+// In your throttled DOM observer (onDOMChange), change this block:
+if (await isOnOwnStory()) {
+  window.dispatchEvent(new CustomEvent('storylister:show_panel'));
+  ensureInjected();
+
+  const urlId = getCurrentStoryIdFromURL();
+  if (!urlId) {
+    // No id in URL (first story view) — still open Seen by
+    autoOpenViewers();
+  } else if (urlId !== state.currentStoryId) {
+    state.currentStoryId = urlId;
+    autoOpenViewers();
+  }
+} else {
+  window.dispatchEvent(new CustomEvent('storylister:hide_panel'));
+}
+```
+
+**C. Stop pagination stealing focus / causing duplicates**
+
+```js
+// Helper to know if our search input is focused
+function searchIsActive() {
+  const el = document.querySelector('#sl-search, input#sl-search');
+  return el && document.activeElement === el;
+}
+
+// REPLACE startFastPagination with this guarded version:
+function startFastPagination(scroller, maxMs = 8000) {
+  let lastHeight = 0, stable = 0, running = true;
+  const started = Date.now();
+
+  const tick = () => {
+    if (!running || !document.contains(scroller)) return;
+
+    // Stop quickly if user is interacting with the panel
+    if (searchIsActive()) return;
+
+    // hard stop after maxMs
+    if (Date.now() - started > maxMs) return;
+
+    const height = scroller.scrollHeight;
+    if (height === lastHeight) {
+      if (++stable >= 2) return; // loaded
+    } else {
+      stable = 0;
+      lastHeight = height;
+    }
+
+    // No synthetic keyboard if the element has no focusable context
+    // Force a simple scroll that IG listens to
+    scroller.scrollTop = scroller.scrollHeight;
+
+    // Pace requests to avoid duplicates (was 120ms)
+    setTimeout(tick, 360);
+  };
+
+  tick();
+  return () => { running = false; };
+}
+```
+
+**D. Broadcast active mediaId when we actually receive it**
+(lets the UI render correctly even when the URL had no id)
+
+```js
+// In your window.addEventListener('message', ...) handler,
+// after you set/merge the viewers for a given mediaId:
+
+state.currentStoryId = String(mediaId); // trust network value
+window.dispatchEvent(new CustomEvent('storylister:active_media', {
+  detail: { storyId: state.currentStoryId }
+}));
+
+mirrorToLocalStorageDebounced();
+```
+
+**E. Small tightening: only open once at a time**
+
+```js
+function autoOpenViewers() {
+  if (!Settings.cache.autoOpen) return;
+  if (state.autoOpenInProgress) return;
+
+  const btn = findSeenByButton();
+  if (!btn) return;
+
+  state.autoOpenInProgress = true;
+  try { btn.click(); } catch (e) { /* ignore */ }
+
+  setTimeout(() => {
+    const scroller = findScrollableInDialog();
+    if (scroller) startFastPagination(scroller);
+    // release the guard a little later so double opens don't happen
+    setTimeout(() => { state.autoOpenInProgress = false; }, 1200);
+  }, 500);
+}
+```
+
+---
+
+### 2) **Fix the 3,000+ async errors once, everywhere**
+
+Search your codebase for `chrome.runtime.onMessage.addListener`. For each listener, choose ONE of these patterns:
+
+```js
+// (a) synchronous handler (no async work) → do NOT return true
+chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
+  // ...do stuff...
+  sendResponse({ ok: true });   // optional
+  // return nothing (or return false)
+});
+
+// (b) asynchronous handler → return true AND send a response later
+chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
+  (async () => {
+    try {
+      // await async work...
+      sendResponse({ ok: true });
+    } catch (e) {
+      sendResponse({ ok: false, error: String(e) });
+    }
+  })();
+  return true; // keep channel open for the async response
+});
+```
+
+If you **return true** and never call `sendResponse`, Chrome logs that error on every message.
+
+---
+
+### 3) `injected.js` — safe, passive interception (small tweaks)
+
+* Don’t do anything to IG responses other than `clone().json()` and `postMessage`.
+* Add GraphQL to URL checks (already in your latest) and no `eval` anywhere.
+
+```js
+const originalFetch = window.fetch;
+
+window.fetch = async function(...args) {
+  const res = await originalFetch.apply(this, args);
+
+  try {
+    const url = String(args[0] || '');
+    const looksRelevant =
+      url.includes('/api/') ||
+      url.includes('/graphql') ||
+      /viewer|story|reel|seen/i.test(url);
+
+    if (!looksRelevant) return res;
+
+    const cloned = res.clone();
+    cloned.json().then(data => {
+      if (!data) return;
+
+      let viewers = null, mediaId = null;
+
+      // Extract viewers (cover common REST + GraphQL shapes)
+      if (Array.isArray(data.users))           viewers = data.users;
+      else if (data?.viewers)                 viewers = data.viewers;
+      else if (data?.data?.media?.story_viewers?.edges)
+        viewers = data.data.media.story_viewers.edges.map(e => e.node || e.user || e);
+      else if (data?.data?.xdt_api__v1__media__story_viewers?.viewers)
+        viewers = data.data.xdt_api__v1__media__story_viewers.viewers;
+
+      if (!viewers || !viewers.length) return;
+
+      // media id hints
+      const urlId = location.pathname.match(/\/stories\/[^/]+\/(\d+)/)?.[1] || null;
+      mediaId = data.media_id || data.reel?.id || urlId;
+      if (!mediaId) return;
+
+      window.postMessage({
+        type: 'STORYLISTER_VIEWERS_CHUNK',
+        data: {
+          mediaId: String(mediaId),
+          viewers: viewers.map((v, i) => ({
+            id: String(v.id || v.pk || i),
+            username: v.username || '',
+            full_name: v.full_name || '',
+            profile_pic_url: v.profile_pic_url || '',
+            is_verified: !!v.is_verified,
+            followed_by_viewer: !!v.followed_by_viewer,
+            follows_viewer: !!v.follows_viewer,
+            originalIndex: i,
+            viewedAt: v.timestamp || v.viewed_at || Date.now()
+          })),
+          totalCount: data.user_count || data.total_viewer_count || viewers.length
+        }
+      }, '*');
+    }).catch(() => {});
+  } catch (_) {
+    // never break the page
+  }
+
+  return res;
+};
+```
+
+---
+
+### 4) `content.js` — make the UI always pick the right story and stop fighting with typing
+
+**A. Prefer the active media announced by backend**
+
+```js
+// Add once in content.js boot:
+let ACTIVE_MEDIA_ID_FROM_BACKEND = null;
+
+window.addEventListener('storylister:active_media', (e) => {
+  ACTIVE_MEDIA_ID_FROM_BACKEND = e.detail?.storyId || null;
+  // force a refresh now that we know the correct key
+  if (typeof loadViewersFromStorage === 'function') {
+    loadViewersFromStorage();
+  }
+});
+
+// In your loadViewersFromStorage(), change how you choose the key:
+
+const storeRaw = localStorage.getItem('panel_story_store');
+if (!storeRaw) return;
+const store = JSON.parse(storeRaw);
+
+const urlId = location.pathname.match(/\/stories\/[^/]+\/(\d+)/)?.[1];
+const currentKey = ACTIVE_MEDIA_ID_FROM_BACKEND || urlId || Object.keys(store).at(-1); // last updated
+if (!currentKey || !store[currentKey]) return;
+
+const storyData = store[currentKey];
+// ...render as you already do...
+```
+
+**B. Let typing in the search box suspend pagination**
+
+Nothing to add here in `content.js` — the guard we added in `content‑backend.js` (`searchIsActive()`) already watches `#sl-search` focus and the pagination loop bails automatically when you type.
+
+---
+
+### 5) `content.css` — ensure panel is always visible & not intercepting unexpectedly
+
+(If you haven’t added these yet, they fix the “only appears after resize” quirk.)
+
+```css
+#storylister-right-rail{
+  position:fixed!important;
+  top:12px!important;right:12px!important;
+  width:380px!important;
+  max-width:calc(100vw - 24px)!important;
+  max-height:calc(100vh - 24px)!important;
+  z-index:2147483647!important;
+  display:none;
+  overflow:hidden;
+}
+#storylister-right-rail.active{display:block!important;}
+
+@media (max-width:768px){
+  #storylister-right-rail{
+    width:100%!important;right:0!important;top:0!important;
+    max-width:100%!important;max-height:100%!important;border-radius:0!important;
+  }
+}
+```
+
+---
+
+## “NEW” viewer tagging & caching plan (zero-UI-change, works today)
+
+* We already key the cache by **mediaId**.
+* Add a tiny “last seen set” per mediaId and compute diffs:
+
+```js
+// content-backend.js, near mirrorToLocalStorageDebounced()
+const lastSeenKey = `sl:last_seen:${state.currentStoryId}`;
+const currentSet = new Set(Array.from(state.viewerStore.get(state.currentStoryId)?.values() || []).map(v => v.username));
+const prevSet = new Set(JSON.parse(localStorage.getItem(lastSeenKey) || '[]'));
+const newOnes = [...currentSet].filter(u => !prevSet.has(u));
+localStorage.setItem(lastSeenKey, JSON.stringify([...currentSet]));
+
+// When mirroring viewers, you can mark isNew for the UI to read:
+for (const [id, viewer] of m.entries()) {
+  viewer.isNew = !prevSet.has(viewer.username);
+}
+```
+
+No UI change needed — your renderer can already read `viewer.isNew` if present.
+
+---
+
+## Sanity checks to run in DevTools (copy/paste)
+
+* **Seen by** present check (true only on your stories):
+
+```js
+!!Array.from(document.querySelectorAll('button,[role="button"],span,div'))
+  .find(el => /^Seen by(\s+[0-9,]+)?$/i.test(el.textContent?.trim() || ''))
+```
+
+* Verify we’re tracking the right media key:
+
+```js
+console.log('ACTIVE_MEDIA_ID_FROM_BACKEND=', window.ACTIVE_MEDIA_ID_FROM_BACKEND);
+console.log('URL media id=', location.pathname.match(/\/stories\/[^/]+\/(\d+)/)?.[1]);
+```
+
+* Watch incoming chunks (one time):
+
+```js
+window.addEventListener('message', e => {
+  if (e.data?.type === 'STORYLISTER_VIEWERS_CHUNK') console.log('CHUNK', e.data);
+}, { once: true });
+```
+
+---
+
+## Why this fixes your bullets
+
+* **Can’t type into search** → pagination suspends while the input is focused.
+* **Growing errors** → no `.catch` on `pause()`, and message listeners corrected.
+* **IG duplicating rows** → pagination interval relaxed and stops when stable.
+* **Auto‑open on profile bubble** → we open even when URL has no id; backend announces the mediaId for the UI.
+* **Recounting on every nav** → cache by mediaId; UI uses the backend-announced id; “NEW” is computed by diff.
+
+All of this preserves your existing UI and behavior; it only hardens timing, security, and data flow.
+
+If you want, paste the specific erroring `chrome.runtime.onMessage` listener you have — I’ll rewrite that listener exactly so it stops the 3k+ console spam.
