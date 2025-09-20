@@ -7,6 +7,8 @@
     injected: false,
     currentStoryId: null,
     autoOpenInProgress: false,
+    userClosedViewers: false,      // NEW: respect user close
+    stopPaginate: null,            // NEW: cancel pagination function
     viewerStore: new Map(),       // Map<mediaId, Map<viewerId, viewer>>
     mirrorTimer: null,
     lastAutoOpenedStoryId: null,  // Prevents re-opening
@@ -109,6 +111,22 @@
     }
   }
 
+  // Normalize viewers from any Instagram payload shape
+  function normalizeViewer(v, idx) {
+    const u = v?.user || v?.node?.user || v?.node || v;
+    return {
+      id: String(u?.id || u?.pk || u?.username || idx),
+      username: u?.username || '',
+      full_name: u?.full_name || u?.fullname || '',
+      profile_pic_url: u?.profile_pic_url || u?.profile_picture_url || u?.profile_pic_url_hd || '',
+      is_verified: !!(u?.is_verified || u?.verified || u?.is_verified_badge),
+      followed_by_viewer: !!u?.followed_by_viewer,
+      follows_viewer: !!u?.follows_viewer,
+      viewedAt: v?.viewed_at || v?.timestamp || u?.latest_reel_media || (Date.now() - idx * 1000),
+      originalIndex: typeof v?.originalIndex === 'number' ? v.originalIndex : idx
+    };
+  }
+
   function mirrorToLocalStorageDebounced() {
     if (state.mirrorTimer) return;
     state.mirrorTimer = setTimeout(() => {
@@ -140,15 +158,21 @@
           generation: 1
         };
       }
+      
       try {
+        // Only update if data actually changed (prevents UI rerenders)
+        const hash = JSON.stringify({ sid: state.currentStoryId, sizes: [...state.viewerStore].map(([k, v]) => [k, v.size]) });
+        if (localStorage.getItem('panel_story_store_hash') === hash) return;  // unchanged
+        
         localStorage.setItem('panel_story_store', JSON.stringify(store));
+        localStorage.setItem('panel_story_store_hash', hash);
         window.dispatchEvent(new CustomEvent('storylister:data_updated', {
           detail: { storyId: state.currentStoryId }
         }));
       } catch (e) {
         console.error('[Storylister] Storage error:', e);
       }
-    }, 120);
+    }, 250);  // Increased delay to reduce UI thrashing
   }
 
   // --- Secure bridge from page to extension context ---
@@ -168,19 +192,9 @@
     }
     const m = state.viewerStore.get(mediaId);
 
-    viewers.forEach((v, idx) => {
-      const id = String(v.id || v.pk || v.username || idx);
-      m.set(id, {
-        id,
-        username: v.username || '',
-        full_name: v.full_name || '',
-        profile_pic_url: v.profile_pic_url || '',
-        is_verified: !!v.is_verified,
-        followed_by_viewer: !!v.followed_by_viewer,
-        follows_viewer: !!v.follows_viewer,
-        viewedAt: v.viewedAt || v.timestamp || Date.now(),
-        originalIndex: typeof v.originalIndex === 'number' ? v.originalIndex : idx
-      });
+    viewers.forEach((raw, idx) => {
+      const v = normalizeViewer(raw, idx);
+      m.set(v.id, v);  // dedupe by id
     });
 
     // Broadcast active mediaId when we actually receive it
@@ -262,7 +276,7 @@
       scroller.scrollTop = scroller.scrollHeight;
       
       // Pace requests to avoid duplicates
-      setTimeout(tick, 360);
+      setTimeout(tick, 180);  // Reduced from 360ms for faster loading
     };
     
     tick();
@@ -272,6 +286,7 @@
   function autoOpenViewers() {
     if (!Settings.cache.autoOpen) return;
     if (state.autoOpenInProgress) return;
+    if (state.userClosedViewers) return;  // Respect user action
 
     // Open only once per story to avoid re-open loop
     if (state.currentStoryId && state.lastAutoOpenedStoryId === state.currentStoryId) return;
@@ -285,13 +300,38 @@
     setTimeout(() => {
       const scroller = findScrollableInDialog();
       if (scroller) {
-        // Cancel any previous paginator (safety)
-        if (typeof state.cancelPaginator === 'function') state.cancelPaginator();
-        state.cancelPaginator = startFastPagination(scroller);
+        // Cancel any previous paginator
+        if (state.stopPaginate) { state.stopPaginate(); state.stopPaginate = null; }
+        state.stopPaginate = startFastPagination(scroller);
       }
+      
+      // Stop when dialog closes or user presses Escape / clicks X
+      const dlg = document.querySelector('[role="dialog"]');
+      if (dlg) {
+        const markClosed = () => {
+          state.userClosedViewers = true;
+          if (state.stopPaginate) { state.stopPaginate(); state.stopPaginate = null; }
+        };
+        
+        dlg.addEventListener('keydown', (e) => { 
+          if (e.key === 'Escape') markClosed(); 
+        }, { once: true, capture: true });
+        
+        const xBtn = dlg.querySelector('[aria-label="Close"], [role="button"] svg[aria-label="Close"]')?.closest('[role="button"],button');
+        if (xBtn) xBtn.addEventListener('click', markClosed, { once: true, capture: true });
+        
+        const mo = new MutationObserver(() => { 
+          if (!document.contains(dlg)) { 
+            markClosed(); 
+            mo.disconnect(); 
+          }
+        });
+        mo.observe(document.body, { childList: true, subtree: true });
+      }
+      
       state.lastAutoOpenedStoryId = state.currentStoryId || state.lastAutoOpenedStoryId;
-      setTimeout(() => { state.autoOpenInProgress = false; }, 800);
-    }, 450);
+      setTimeout(() => { state.autoOpenInProgress = false; }, 1000);
+    }, 500);
   }
 
   function cleanupOldStories(max = 10) {
@@ -335,19 +375,21 @@
       if (storyId && storyId !== state.currentStoryId) {
         state.currentStoryId = storyId;
         state.lastAutoOpenedStoryId = null;      // allow one open for this story
-        if (typeof state.cancelPaginator === 'function') state.cancelPaginator(); // cancel old paginator
+        state.userClosedViewers = false;         // reset user close state for new story
+        if (state.stopPaginate) { state.stopPaginate(); state.stopPaginate = null; }
         if (DEBUG) console.log('[Storylister] Story changed:', storyId);
         autoOpenViewers();
         cleanupOldStories(10);
       } else if (!storyId) {
         // No id in URL (first story view) — still open Seen by
         state.lastAutoOpenedStoryId = null;
-        if (typeof state.cancelPaginator === 'function') state.cancelPaginator();
+        state.userClosedViewers = false;
+        if (state.stopPaginate) { state.stopPaginate(); state.stopPaginate = null; }
         autoOpenViewers();
       }
     } else {
       window.dispatchEvent(new CustomEvent('storylister:hide_panel'));
-      if (typeof state.cancelPaginator === 'function') state.cancelPaginator();
+      if (state.stopPaginate) { state.stopPaginate(); state.stopPaginate = null; }
     }
   }, 200);
 
