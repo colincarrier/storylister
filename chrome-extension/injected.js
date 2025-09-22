@@ -135,19 +135,18 @@
 
   // Normalize viewer data from various Instagram API shapes
   function normalizeViewer(v, idx) {
-    const n = v?.node || v?.user || v; // unify shapes from GraphQL/REST
-    const id = String(n?.id ?? n?.pk ?? n?.pk_id ?? idx);
-    const username = n?.username || '';
-    const full_name = n?.full_name || '';
-    const profile_pic_url = n?.profile_pic_url_hd || n?.profile_pic_url || '';
-
+    const u = v?.user || v?.node?.user || v?.node || v; // unify shapes from GraphQL/REST
+    
     return {
-      id, username, full_name, profile_pic_url,
-      is_verified: !!n?.is_verified,
-      followed_by_viewer: !!n?.followed_by_viewer,
-      follows_viewer: !!n?.follows_viewer,
+      id: String(u.id || u.pk || u.pk_id || u.username || idx),
+      username: u.username || '',
+      full_name: u.full_name || u.fullname || u.name || '',
+      profile_pic_url: u.profile_pic_url || u.profile_pic_url_hd || '',
+      is_verified: !!(u.is_verified || u.blue_verified || u.is_verified_badge),
+      followed_by_viewer: !!(u.followed_by_viewer || u.is_following),
+      follows_viewer: !!(u.follows_viewer || u.is_follower),
       originalIndex: idx,
-      viewedAt: n?.timestamp || n?.viewed_at || Date.now()
+      viewedAt: u.timestamp || u.viewed_at || Date.now()
     };
   }
 })();
