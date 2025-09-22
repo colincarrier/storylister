@@ -1,0 +1,321 @@
+You’re right to push for the simplest thing that works. I agree with the spirit of Claude’s suggestions and I’d keep them—but with a couple of guardrails so we don’t regress on per‑story accuracy or create new race conditions.
+
+Below is a **tight, surgical patch set** that fixes the issues you’re seeing **without changing your UI** or the overall architecture.
+
+---
+
+## TL;DR (what changes & why)
+
+* **Use one stable storage key** (`location.pathname`) so the “first story” (no numeric id) and deep links both work the same.
+* **Delay pausing** by \~800 ms and never re‑pause a video the user has manually played.
+* **Deduplicate by username** (lower‑cased) to remove off‑by‑one count glitches.
+* **Mirror data consistently** to the exact same key the UI reads.
+* **Skip non‑JSON responses** in the injector to avoid delays & wasted work.
+* **Avatar rendering**: no `crossorigin`/`referrerpolicy`; robust inline fallback.
+* **Panel height** stays within the viewport and results area scrolls.
+* **Async message warning** removed (no `return true` without `sendResponse`).
+
+---
+
+## Minimal code edits
+
+### 1) `content-backend.js`
+
+**Add once near the top (helpers + state):**
+
+```js
+const DEBUG = false;
+
+function getStorageKey() {
+  // Works for /stories/<user>/ (first story) and /stories/<user>/<id>/
+  return location.pathname;
+}
+
+// Extend state to track the current key instead of only numeric id
+const state = {
+  injected: false,
+  currentKey: null,            // <— NEW
+  autoOpenInProgress: false,
+  userClosedForStory: null,
+  viewerStore: new Map(),      // Map<mediaId, Map<viewerKey, viewer>>
+  mirrorTimer: null
+};
+```
+
+**Natural video pause (replace your pause function):**
+
+```js
+function pauseVideosIfNeeded() {
+  if (!Settings.cache.pauseVideos) return;
+
+  // Natural feel, avoid “botty” pauses
+  setTimeout(() => {
+    document.querySelectorAll('video').forEach(v => {
+      if (v.dataset.userPlayed === '1') return; // respect manual play
+      if (!v.paused && !v.dataset.slPaused) {
+        try { v.pause(); v.dataset.slPaused = '1'; } catch (_) {}
+      }
+    });
+  }, 800);
+}
+
+// Mark when user plays a video so we never re-pause it
+document.addEventListener('play', (e) => {
+  const v = e.target;
+  if (v && v.tagName === 'VIDEO') v.dataset.userPlayed = '1';
+}, true);
+```
+
+**Deduplicate by username (lower‑cased) in your `window.addEventListener('message', ...)` handler:**
+
+```js
+// inside the handler after you get `const storeMap = state.viewerStore.get(mediaId)`
+viewers.forEach((v, idx) => {
+  const viewerKey =
+    (v.username ? String(v.username).toLowerCase() : null) ||
+    String(v.id || v.pk || idx);
+
+  storeMap.set(viewerKey, {
+    ...v,
+    originalIndex: typeof v.originalIndex === 'number' ? v.originalIndex : idx,
+    viewedAt: v.viewedAt || v.timestamp || Date.now()
+  });
+});
+```
+
+**Mirror to a single, stable key that the UI also reads (replace your mirror/debounce):**
+
+```js
+function mirrorToLocalStorageDebounced() {
+  if (state.mirrorTimer) return;
+  state.mirrorTimer = setTimeout(() => {
+    state.mirrorTimer = null;
+
+    // Flatten all mediaId buckets → one session view for this path
+    const flat = new Map();
+    for (const [, perMediaMap] of state.viewerStore) {
+      for (const [k, v] of perMediaMap) flat.set(k, v);
+    }
+
+    const key = getStorageKey();
+    const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+    store[key] = {
+      viewers: Array.from(flat.entries()),
+      fetchedAt: Date.now()
+    };
+    localStorage.setItem('panel_story_store', JSON.stringify(store));
+
+    window.dispatchEvent(new CustomEvent('storylister:data_updated', {
+      detail: { storyId: key }
+    }));
+  }, 200);
+}
+```
+
+**Simple observer that works for “first story” too (replace your URL‑change logic):**
+
+```js
+const onDOMChange = (() => {
+  let t = 0;
+  return async function throttled() {
+    const now = Date.now();
+    if (now - t < 200) return; // throttle
+    t = now;
+
+    const key = getStorageKey();
+
+    if (await isOnOwnStory()) {
+      window.dispatchEvent(new CustomEvent('storylister:show_panel'));
+      ensureInjected();
+      pauseVideosIfNeeded();
+
+      if (key !== state.currentKey) {
+        state.userClosedForStory = null;
+        state.currentKey = key;
+        autoOpenViewers();      // works even if the first story has no numeric id
+      }
+    } else {
+      window.dispatchEvent(new CustomEvent('storylister:hide_panel'));
+    }
+  };
+})();
+
+new MutationObserver(onDOMChange).observe(
+  document.documentElement || document.body,
+  { childList: true, subtree: true }
+);
+onDOMChange();
+```
+
+**Auto‑open viewers (unchanged logic, but no portal & with a small guard is fine).**
+
+> If you still have **any** `chrome.runtime.onMessage.addListener` that returns `true` without calling `sendResponse`, fix it like this:
+
+```js
+// WRONG (causes the “message channel closed” error)
+chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
+  // …do work…
+  return true; // but never calls sendResponse
+});
+
+// RIGHT (either respond or don't return true)
+chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
+  // synchronous:
+  sendResponse({ ok: true });
+  return false;
+});
+
+// or for async:
+chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
+  (async () => {
+    // await work…
+    sendResponse({ ok: true });
+  })();
+  return true; // keep the channel open
+});
+```
+
+---
+
+### 2) `injected.js`
+
+**Skip non‑JSON responses before cloning** (eliminates noisy delays):
+
+```js
+const res = await origFetch.apply(this, args);
+
+// Only try to parse JSON responses
+const ct = res.headers?.get('content-type') || '';
+if (!/json/i.test(ct)) return res;
+```
+
+(Keep your normalization. You already handle both REST and GraphQL shapes.)
+
+---
+
+### 3) `content.js`
+
+**Read exactly the same storage key as backend (right before you read localStorage):**
+
+```js
+function currentStoreKey() {
+  return location.pathname; // must match content-backend.js
+}
+
+function loadViewersFromStorage() {
+  const key = currentStoreKey();
+  const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+  const data = store[key];
+  if (!data?.viewers) return;
+
+  // Each entry is [viewerKey, viewerObj]
+  const rows = data.viewers.map(([_, v]) => ({
+    username: v.username,
+    displayName: v.full_name || v.displayName || v.username || '—',
+    isVerified: !!v.is_verified,
+    profilePic: v.profile_pic_url || v.profilePic || '',
+    viewedAt: v.viewedAt || v.timestamp || 0,
+    originalIndex: v.originalIndex ?? 0
+  }));
+
+  // your existing render/update call with rows
+  updateViewerListFromRows(rows);
+}
+```
+
+**Robust avatar HTML (no CORS attrs, with inline fallback):**
+
+```js
+function slAvatarHTML(url, username) {
+  const initial = (username || 'U')[0].toUpperCase();
+  const fallback = `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'%3E%3Crect width='40' height='40' fill='%23e4e4e7'/%3E%3Ctext x='50%25' y='50%25' text-anchor='middle' dy='.35em' fill='%23666' font-size='20'%3E${initial}%3C/text%3E%3C/svg%3E`;
+
+  if (!url) return `<img class="sl-avatar" src="${fallback}" alt="${username || ''}">`;
+
+  return `<img class="sl-avatar" src="${url}" loading="lazy"
+    onerror="this.onerror=null; this.src='${fallback}'"
+    alt="${username || ''}">`;
+}
+```
+
+**(Optional) simple session cleanup you can call on navigation**
+(keeps only this user’s current path keys; doesn’t touch anything else):
+
+```js
+function cleanupOldStoriesForThisUser() {
+  const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+  const path = location.pathname.split('/'); // ["", "stories", "<user>", ...]
+  const user = path[2];
+  if (!user) return;
+
+  for (const k of Object.keys(store)) {
+    if (!k.startsWith(`/stories/${user}/`)) delete store[k];
+  }
+  localStorage.setItem('panel_story_store', JSON.stringify(store));
+}
+```
+
+---
+
+### 4) `content.css` (ensure viewport‑safe panel)
+
+```css
+/* Keep your existing styles; add/ensure these: */
+.storylister-panel {
+  max-height: calc(100vh - 24px) !important;
+  display: flex;
+  flex-direction: column;
+}
+
+.storylister-results {
+  flex: 1 1 auto;
+  min-height: 0;        /* critical so the scroller gets space */
+  overflow-y: auto;
+}
+```
+
+*(You already switched to the pointer‑events layering earlier so IG’s close buttons work. Keep that.)*
+
+---
+
+## Why this solves your specific screenshots
+
+* **First story shows “0 viewers” then old data:** caused by storing under a different key than the UI read. Using `location.pathname` in both places fixes it.
+* **Profile pics were flashing / never loading:** caused by `referrerpolicy`/`crossorigin`. The new avatar helper eliminates the CORS block.
+* **Counts off by 1 & occasional duplicates:** deduping by **lower‑cased username** removes dupes across endpoints.
+* **Auto‑pause too aggressive:** 800 ms delay + “don’t re‑pause after the user hits play” fixes the UX and makes behavior look human.
+* **Insights showing stale/extra stories:** use the same key and (optionally) call the lightweight cleanup to scope the session to the current user’s path.
+
+---
+
+## Quick validation checklist (60 seconds)
+
+Open DevTools Console and confirm:
+
+```js
+// Same key on both scripts
+location.pathname
+JSON.parse(localStorage.getItem('panel_story_store')||'{}') [location.pathname] !== undefined
+
+// No message channel warning for onMessage
+// (if you still see it, there’s a listener returning true without sendResponse)
+```
+
+Then on your story:
+
+1. Storylister appears, video pauses after \~0.8s, and you can manually play.
+2. “Seen by” dialog opens (or you click it) → **data appears within 1–2s**.
+3. Viewer count in panel matches IG’s count; no duplicate usernames.
+4. Avatars load; no ERR\_BLOCKED\_BY\_RESPONSE.NotSameOrigin spam.
+5. “Story to Story Insights” reflects only the current session.
+
+---
+
+## Where I differ slightly from Claude (and why)
+
+* **Pathname as the storage key** – agreed. It’s the fewest moving parts and fixes the first‑story edge case.
+* **Keep per‑media maps internally** – we still collect per‑media chunks (good for pagination), but we mirror a flattened view for your panel under that single path key. This gets you the simplicity you want without losing flexibility later.
+
+---
+
+If you paste these changes in as‑is, you’ll keep the nice UI, remove the jank, and get **reliable, fast data flow** with minimal code.

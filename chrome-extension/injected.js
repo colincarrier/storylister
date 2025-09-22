@@ -8,6 +8,10 @@
   window.fetch = async function(...args) {
     const res = await origFetch.apply(this, args);
 
+    // Only try to parse JSON responses
+    const ct = res.headers?.get('content-type') || '';
+    if (!/json/i.test(ct)) return res;
+
     try {
       const url = String(args?.[0] || '');
       const relevant =

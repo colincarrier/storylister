@@ -5,7 +5,7 @@
 
   const state = {
     injected: false,
-    currentStoryId: null,
+    currentKey: null,             // Track by path instead of ID
     autoOpenInProgress: false,
     userClosedForStory: null,     // Which story ID the user closed
     stopPagination: null,         // Holds cancel function for running paginator
@@ -72,8 +72,9 @@
     return m ? m[1] : null;
   }
 
-  function currentStoreKey() {
-    return getCurrentStoryIdFromURL() || getStoryOwnerFromURL() || 'current';
+  function getStorageKey() {
+    // Works for /stories/<user>/ (first story) and /stories/<user>/<id>/
+    return location.pathname;
   }
 
   function hasSeenByUI() {
@@ -143,20 +144,16 @@
     state.mirrorTimer = setTimeout(() => {
       state.mirrorTimer = null;
 
-      // Aggregate all viewers we've captured for this story
-      const all = new Map();
-      for (const [, map] of state.viewerStore) {
-        for (const [id, viewer] of map) {
-          // Dedup by username when available; fallback to id
-          const key = viewer.username || id;
-          if (!all.has(key)) all.set(key, viewer);
-        }
+      // Flatten all mediaId buckets → one session view for this path
+      const flat = new Map();
+      for (const [, perMediaMap] of state.viewerStore) {
+        for (const [k, v] of perMediaMap) flat.set(k, v);
       }
 
-      const key = currentStoreKey();
+      const key = getStorageKey();
       const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
       store[key] = {
-        viewers: Array.from(all.entries()),
+        viewers: Array.from(flat.entries()),
         fetchedAt: Date.now()
       };
       localStorage.setItem('panel_story_store', JSON.stringify(store));
@@ -186,13 +183,16 @@
 
     viewers.forEach((raw, idx) => {
       const v = normalizeViewer(raw, idx);
-      m.set(v.id, v);  // dedupe by id
+      // Deduplicate by username (lower-cased) or id
+      const viewerKey = 
+        (v.username ? String(v.username).toLowerCase() : null) ||
+        String(v.id || v.pk || idx);
+      m.set(viewerKey, v);
     });
 
     // Broadcast active mediaId when we actually receive it
-    state.currentStoryId = String(mediaId); // trust network value
     window.dispatchEvent(new CustomEvent('storylister:active_media', {
-      detail: { storyId: state.currentStoryId }
+      detail: { storyId: String(mediaId) }
     }));
 
     if (DEBUG) console.log(`[Storylister] Received ${viewers.length} viewers for ${mediaId}`, { totalCount });
@@ -223,7 +223,7 @@
     if (!dlg || !dlg.parentElement) return;
     const mo = new MutationObserver(() => {
       if (!document.contains(dlg)) {
-        state.userClosedForStory = state.currentStoryId; // respect the user's intent
+        state.userClosedForStory = state.currentKey; // respect the user's intent
         mo.disconnect();
       }
     });
@@ -252,7 +252,7 @@
   function autoOpenViewers() {
     if (!Settings.cache.autoOpen) return;
     if (state.autoOpenInProgress) return;
-    if (state.userClosedForStory === state.currentStoryId) return; // don't re-open if user closed
+    if (state.userClosedForStory === state.currentKey) return; // don't re-open if user closed
 
     const btn = findSeenByButton();
     if (!btn) return;
@@ -280,19 +280,19 @@
     toRemove.forEach(k => state.viewerStore.delete(k));
   }
 
-  // Handle video pausing if needed
+  // Natural video pause with delay
   function pauseVideosIfNeeded() {
     if (!Settings.cache.pauseVideos) return;
-    document.querySelectorAll('video').forEach(v => {
-      try {
+
+    // Natural feel, avoid "botty" pauses
+    setTimeout(() => {
+      document.querySelectorAll('video').forEach(v => {
+        if (v.dataset.userPlayed === '1') return; // respect manual play
         if (!v.paused && !v.dataset.slPaused) {
-          v.pause();                // HTMLMediaElement.pause() returns void
-          v.dataset.slPaused = '1';
+          try { v.pause(); v.dataset.slPaused = '1'; } catch (_) {}
         }
-      } catch (_) {
-        /* no-op */
-      }
-    });
+      });
+    }, 800);
   }
 
   const resumeVideos = () => {
@@ -320,9 +320,9 @@
     pauseVideosIfNeeded();
 
     // run auto-open once per story-view, even if urlId is missing
-    if (key !== state.currentStoryId) {
+    if (key !== state.currentKey) {
       resetStoryState();
-      state.currentStoryId = key || 'first-story';
+      state.currentKey = key;
       autoOpenViewers();
     }
   }, 200);
@@ -343,6 +343,12 @@
       delete v.dataset.slPaused;
     });
   });
+
+  // Mark when user plays a video so we never re-pause it
+  document.addEventListener('play', (e) => {
+    const v = e.target;
+    if (v && v.tagName === 'VIDEO') v.dataset.userPlayed = '1';
+  }, true);
 
   (async function init() {
     await Settings.load();

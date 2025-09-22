@@ -401,8 +401,7 @@
       
       try {
         // Prefer the active media announced by backend
-        const m = location.pathname.match(/\/stories\/[^\/]+\/(\d+)/);
-        const currentKey = ACTIVE_MEDIA_ID_FROM_BACKEND || (m ? m[1] : location.pathname);
+        const currentKey = ACTIVE_MEDIA_ID_FROM_BACKEND || slStoreKey();
         
         if (!currentKey) {
           // Try legacy localStorage format or use last key
@@ -502,23 +501,16 @@
   
   // Load viewers from storage (backwards compatibility wrapper)
   function loadViewersFromStorage() {
-    const m = location.pathname.match(/\/stories\/[^/]+\/(\d+)/);
-    const key = m ? m[1] : location.pathname;
-
+    const key = slStoreKey(); // Use same key as backend
     const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
     const data = store[key];
     if (!data?.viewers) return;
 
-    // Dedup by username (or id) to keep counts aligned with IG
-    const unique = new Map();
-    for (const [, v] of data.viewers) {
-      const k = v.username || v.id;
-      if (!unique.has(k)) unique.set(k, v);
-    }
-
     viewers.clear();
-    Array.from(unique.values()).forEach((v, i) => {
-      viewers.set(v.username || v.id, {
+    // Each entry is [viewerKey, viewerObj] from backend's dedup
+    data.viewers.forEach(([_, v], i) => {
+      const viewerKey = v.username || v.id || v.pk;
+      viewers.set(viewerKey, {
         id: v.id || v.pk || v.username,
         username: v.username || '',
         displayName: v.full_name || v.displayName || v.username || 'Anonymous',
@@ -1774,8 +1766,8 @@
   }
   
   function slStoreKey() {
-    const m = location.pathname.match(/\/stories\/[^/]+\/(\d+)/);
-    return m ? m[1] : location.pathname;
+    // Must match content-backend.js
+    return location.pathname;
   }
   
   // Ensure button handlers work (delegation for dynamic elements)
