@@ -1,0 +1,265 @@
+still issues:
+ - first story (i land on instagram.com, click on my profile icon, stories pop up, and nothing happens.)
+- when I go to my next story, then  data gets pulled in seemingly correctly.
+- when I nagivate back, it doesn't start picking it up
+- if I don't touch anything it seemingly is clicking 'end' endless and I see the bottom spinning wheel constantly - u can see it in screen shot
+
+
+need to handle landing on this first story better.
+
+i still can't play the story, it automatically pauses it, so only advances a micro second ahead.
+
+i noticed sometimes the ig viewer list will show the same name ore than once, including 4x here with happy_holly_ways... we should be messing with anything that renders that list
+
+how are we getting following and followers exactly? were not hitting an api are we?  are u using implied from the viewer list somehow?  
+
+story to story data is not corre. t. right not there are only 2 stori. s live. this is saying 5.  the data isn't correct for the story 4,which really is story 1 in what's liv.  right now. story 5 = story 2, and that 270 number is correct.
+
+
+ChatGPT said:
+Request for GPT-5 Pro
+Reasoned for 8m 37s
+
+Thanks for the clear screenshots and the injected.js/console details—those make the failure modes obvious. Here’s a focused “fix pack” that keeps the extension simple and fixes the exact things you’re seeing:
+
+What’s going wrong (short + concrete)
+
+First-story never loads
+IG often doesn’t include the numeric media ID in the URL for the first story. Our code keyed storage and auto-open logic off that numeric ID → nothing fires until you navigate to the next story.
+
+Runaway spinner / duplicate names
+Pagination keeps “scrolling to bottom” even after we’ve loaded enough. That can cause the IG list to visually duplicate entries and keeps the spinner alive.
+
+Too‑aggressive pausing
+We pause immediately, which (a) looks botty and (b) makes advancing feel broken.
+
+Counts / stale cache / wrong insights
+Viewer data is mirrored under a different key than the UI expects; old session data isn’t discarded → wrong totals (e.g., “5 stories” when only 2 are live).
+
+Profile pictures
+Fixed already (by removing referrerpolicy/crossorigin). Keep it that way.
+
+Followers/Following
+We do not hit any new APIs. We can only display these flags if IG includes a friendship_status block in the viewer payload (sometimes present, sometimes not).
+
+Fix pack (minimal, surgical changes)
+
+Goal: use a single stable storage key, open the first story, stop pagination when enough viewers are captured, pause naturally, dedupe by username, and scope insights to the current page session only.
+
+1) content-backend.js — storage key, first-story, pause, pagination, dedupe
+
+Add at top (helpers):
+
+// Always the same for a given story view; works even when there's no numeric ID.
+function getStorageKey() {
+  return location.pathname; // e.g. "/stories/colincarrier/" or "/stories/colincarrier/372..."
+}
+
+// Extract "Seen by N" target so we know when to stop paginating
+function getSeenByCount() {
+  const el = Array.from(document.querySelectorAll('a,button,span,div'))
+    .find(n => /^Seen by(\s+\d[\d,]*)?$/i.test((n.textContent || '').trim()));
+  if (!el) return null;
+  const m = (el.textContent || '').match(/(\d[\d,]*)/);
+  return m ? parseInt(m[1].replace(/,/g, ''), 10) : null;
+}
+
+
+Gentle, natural video pause (replace your current pause function):
+
+function pauseVideosIfNeeded() {
+  if (!Settings.cache.pauseVideos) return;
+  // Give the story a moment to play so this doesn't look botty
+  setTimeout(() => {
+    document.querySelectorAll('video').forEach(v => {
+      // If user hit play we do not re-pause it
+      v.addEventListener('play', () => { v.dataset.userPlayed = '1'; }, { once: true });
+      if (!v.paused && !v.dataset.userPlayed) {
+        try { v.pause(); v.dataset.slPaused = '1'; } catch(_) {}
+      }
+    });
+  }, 800);
+}
+
+
+Viewer-store + mirror (use pathname key, dedupe by username):
+
+// In your window.addEventListener('message', ...) handler:
+const storeKey = getStorageKey();
+if (!state.viewerStore) state.viewerStore = new Map();
+if (!state.viewerStore.has(storeKey)) state.viewerStore.set(storeKey, new Map());
+const map = state.viewerStore.get(storeKey);
+
+// Deduplicate by username (preferred) with fallback to id
+viewers.forEach((v, idx) => {
+  const key = (v.username || v.id || v.pk || String(idx)).toLowerCase();
+  map.set(key, v);
+});
+
+// Debounced mirror to localStorage, scoped to this session
+function mirrorToLocalStorageDebounced() {
+  if (state.mirrorTimer) return;
+  state.mirrorTimer = setTimeout(() => {
+    state.mirrorTimer = null;
+    const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+    const sessionId = state.sessionId || (state.sessionId = Date.now().toString(36));
+    const all = state.viewerStore.get(getStorageKey());
+    store[getStorageKey()] = {
+      viewers: Array.from(all.entries()), // [key, viewer]
+      fetchedAt: Date.now(),
+      sessionId
+    };
+    localStorage.setItem('panel_story_store', JSON.stringify(store));
+    window.dispatchEvent(new CustomEvent('storylister:data_updated', {
+      detail: { storyKey: getStorageKey(), sessionId }
+    }));
+  }, 200);
+}
+
+
+Make first-story auto-open (even if no numeric id yet):
+
+// In your MutationObserver/throttled callback:
+const storyKey = getStorageKey();
+if (!(await isOnOwnStory())) {
+  window.dispatchEvent(new CustomEvent('storylister:hide_panel'));
+  return;
+}
+window.dispatchEvent(new CustomEvent('storylister:show_panel'));
+ensureInjected();
+pauseVideosIfNeeded();
+
+// Only auto-open once per storyKey
+state.openedForKey = state.openedForKey || new Set();
+if (!state.openedForKey.has(storyKey)) {
+  state.openedForKey.add(storyKey);
+  setTimeout(() => autoOpenViewers(), 300);
+}
+
+
+Pagination that stops intelligently (replace your current pagination loop):
+
+function startPagination(scroller, maxMs = 6000) {
+  const start = Date.now();
+  let stopped = false;
+
+  const tick = () => {
+    if (stopped || !document.contains(scroller)) return;
+    if (Date.now() - start > maxMs) return;
+
+    // Stop when we've captured at least Seen-by N (if present)
+    const target = getSeenByCount();
+    const loaded = (state.viewerStore.get(getStorageKey()) || new Map()).size;
+    if (target && loaded >= target) return;
+
+    // Just scroll; no keyboard events
+    scroller.scrollTop = scroller.scrollHeight;
+
+    // Slow down near bottom
+    const nearBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 8;
+    setTimeout(tick, nearBottom ? 450 : 250);
+  };
+  tick();
+  return () => { stopped = true; };
+}
+
+
+Auto-open but do not fight the user / IG dialog:
+
+function autoOpenViewers() {
+  if (!Settings.cache.autoOpen) return;
+  if (document.querySelector('[role="dialog"]')) return; // already open
+
+  const seenByBtn =
+    document.querySelector('a[href*="/seen_by/"]') ||
+    Array.from(document.querySelectorAll('[role="button"],button'))
+      .find(b => /^Seen by(\s+\d[\d,]*)?$/i.test((b.textContent||'').trim()));
+  if (!seenByBtn) return;
+
+  try { seenByBtn.click(); } catch(_) {}
+
+  setTimeout(() => {
+    const dialog = document.querySelector('[role="dialog"]');
+    const scroller =
+      dialog?.querySelector('[style*="overflow-y"]') ||
+      Array.from(dialog?.querySelectorAll('div') || [])
+        .find(el => el.scrollHeight > el.clientHeight + 40) || dialog;
+    if (scroller) state.stopPagination = startPagination(scroller);
+  }, 400);
+}
+
+
+Clean per-story state when you navigate:
+
+function resetStoryState() {
+  if (state.stopPagination) { state.stopPagination(); state.stopPagination = null; }
+}
+
+
+Call resetStoryState() any time getStorageKey() changes.
+
+2) content.js — read the same key, fix avatars, scope insights to this session
+
+Use the same storage key everywhere:
+
+function currentStoreKey() { return location.pathname; }
+
+function loadViewersFromStorage() {
+  const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+  const entry = store[currentStoreKey()];
+  if (!entry?.viewers) return;
+
+  // entry.viewers is [key, viewer] pairs
+  const viewers = entry.viewers.map(([,v]) => v);
+
+  // name + avatar normalizations (keep it simple)
+  viewers.forEach(v => {
+    v.displayName = v.full_name || v.username || '—';
+    v.profilePic = v.profile_pic_url || '';
+  });
+
+  renderViewers(viewers); // your existing renderer
+  updateCounts(viewers);  // your existing counter logic
+}
+
+// React to backend updates
+window.addEventListener('storylister:data_updated', (e) => {
+  const { storyKey } = e.detail || {};
+  if (!storyKey || storyKey !== currentStoreKey()) return;
+  loadViewersFromStorage();
+});
+
+
+Avatar HTML (no CORS attributes):
+
+function slAvatarHTML(url, username) {
+  const initial = (username || 'U')[0].toUpperCase();
+  const fallback = `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'%3E%3Crect width='40' height='40' fill='%23e4e4e7'/%3E%3Ctext x='50%25' y='50%25' text-anchor='middle' dy='.35em' fill='%23666' font-size='20'%3E${initial}%3C/text%3E%3C/svg%3E`;
+  if (!url) return `<img class="sl-avatar" src="${fallback}" alt="${username||''}">`;
+  return `<img class="sl-avatar" src="${url}" loading="lazy" onerror="this.onerror=null;this.src='${fallback}'" alt="${username||''}">`;
+}
+
+
+Session-scoped insights (avoid “5 stories” from old cache):
+
+function buildStoryToStoryInsights() {
+  const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+  const current = store[currentStoreKey()];
+  if (!current) return showInsights({ stories: [], totals: {} });
+
+  // Only consider entries from THIS sessionId
+  const sessionId = current.sessionId;
+  const sameUserKeys = Object.keys(store).filter(k => k.startsWith('/stories/'));
+  const entries = sameUserKeys
+    .map(k => store[k])
+    .filter(e => e.sessionId === sessionId);
+
+  // Sort by fetchedAt (approx viewing order)
+  entries.sort((a,b) => a.fetchedAt - b.fetchedAt);
+
+  // Your existing aggregation over entries[*].viewers (dedupe by username)
+  // ...
+}
+
+
+(If you’d prefer to keep your existing insight code, the critical part is filtering by sessionId.)

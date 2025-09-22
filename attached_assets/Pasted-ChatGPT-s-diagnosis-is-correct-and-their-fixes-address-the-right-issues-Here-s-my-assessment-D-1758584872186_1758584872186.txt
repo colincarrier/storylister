@@ -1,0 +1,62 @@
+ChatGPT's diagnosis is correct and their fixes address the right issues. Here's my assessment:
+
+## Diagnosis ✅ Correct:
+
+1. **First story fails** - No numeric ID in URL, key mismatch
+2. **Endless scrolling** - Pagination never stops, causing IG to duplicate entries
+3. **Aggressive pause** - Pauses immediately, looks bot-like
+4. **Wrong insights** - Old session data not cleared
+5. **Followers/Following** - Only from IG's response, no API calls
+
+## Key Fixes (Simplified):
+
+### 1. **Use pathname as key everywhere**:
+```javascript
+function getStorageKey() {
+  return location.pathname; // Works for both /stories/user/ and /stories/user/123456
+}
+```
+
+### 2. **Stop pagination intelligently**:
+```javascript
+// ChatGPT's solution is good - stop when count reached
+const target = getSeenByCount();
+const loaded = (state.viewerStore.get(getStorageKey()) || new Map()).size;
+if (target && loaded >= target) return; // Stop scrolling
+```
+
+### 3. **Natural pause with user override**:
+```javascript
+setTimeout(() => {
+  v.addEventListener('play', () => { v.dataset.userPlayed = '1'; }, { once: true });
+  if (!v.paused && !v.dataset.userPlayed) {
+    v.pause();
+  }
+}, 800);
+```
+
+### 4. **Session scoping** (important for insights):
+```javascript
+// Add sessionId to stored data
+const sessionId = state.sessionId || (state.sessionId = Date.now().toString(36));
+```
+
+## About Instagram Duplicates:
+
+You're right - don't touch Instagram's rendering. The duplicates happen because pagination keeps firing. Once you stop pagination when target count is reached, Instagram won't duplicate.
+
+## About Followers/Following:
+
+ChatGPT is correct - this comes from Instagram's `friendship_status` field in the viewer response. No API calls are made. If Instagram doesn't include it, you can't show it.
+
+## The One Thing I'd Simplify:
+
+ChatGPT's `getSeenByCount()` extraction is clever but could be simpler:
+```javascript
+// Just look for the number after "Seen by"
+const seenByText = document.querySelector('[href*="/seen_by/"]')?.textContent || '';
+const count = seenByText.match(/\d+/)?.[0];
+return count ? parseInt(count) : null;
+```
+
+Apply ChatGPT's fixes - they're correct and will solve your issues. The key insight is using pathname as the storage key and stopping pagination when you have enough viewers.

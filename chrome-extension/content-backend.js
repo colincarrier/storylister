@@ -10,7 +10,9 @@
     userClosedForStory: null,     // Which story ID the user closed
     stopPagination: null,         // Holds cancel function for running paginator
     viewerStore: new Map(),       // Map<mediaId, Map<viewerId, viewer>>
-    mirrorTimer: null
+    mirrorTimer: null,
+    sessionId: Date.now().toString(36),  // Session ID for data scoping
+    openedForKey: new Set()      // Track which stories we've auto-opened
   };
 
   function resetStoryState() {
@@ -60,6 +62,30 @@
         fn(...args);
       }, ms - (now - last));
     };
+  }
+
+  // Extract "Seen by N" count from Instagram UI
+  function getSeenByCount() {
+    // Look for the "Seen by N" button or link
+    const seenByLink = document.querySelector('a[href*="/seen_by/"]');
+    if (seenByLink) {
+      const text = seenByLink.textContent || '';
+      const match = text.match(/(\d+)/);
+      return match ? parseInt(match[1], 10) : null;
+    }
+    
+    // Fallback: check all buttons for "Seen by N" pattern
+    const buttons = Array.from(document.querySelectorAll('[role="button"],button,span,div'));
+    for (const btn of buttons) {
+      const text = (btn.textContent || '').trim();
+      if (/^Seen by\s+(\d[\d,]*)/i.test(text)) {
+        const match = text.match(/(\d[\d,]*)/);
+        if (match) {
+          return parseInt(match[1].replace(/,/g, ''), 10);
+        }
+      }
+    }
+    return null;
   }
 
   function getStoryOwnerFromURL() {
@@ -144,22 +170,25 @@
     state.mirrorTimer = setTimeout(() => {
       state.mirrorTimer = null;
 
-      // Flatten all mediaId buckets → one session view for this path
-      const flat = new Map();
-      for (const [, perMediaMap] of state.viewerStore) {
-        for (const [k, v] of perMediaMap) flat.set(k, v);
+      // Use the current pathname as key
+      const key = getStorageKey();
+      const currentViewers = state.viewerStore.get(key);
+      
+      if (!currentViewers || currentViewers.size === 0) {
+        // Don't write empty data
+        return;
       }
 
-      const key = getStorageKey();
       const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
       store[key] = {
-        viewers: Array.from(flat.entries()),
-        fetchedAt: Date.now()
+        viewers: Array.from(currentViewers.entries()),
+        fetchedAt: Date.now(),
+        sessionId: state.sessionId  // Add session ID for scoping
       };
       localStorage.setItem('panel_story_store', JSON.stringify(store));
 
       window.dispatchEvent(new CustomEvent('storylister:data_updated', {
-        detail: { storyId: key }
+        detail: { storyId: key, sessionId: state.sessionId }
       }));
     }, 200);
   }
@@ -176,10 +205,12 @@
     const { mediaId, viewers, totalCount } = msg.data || {};
     if (!mediaId || !Array.isArray(viewers)) return;
 
-    if (!state.viewerStore.has(mediaId)) {
-      state.viewerStore.set(mediaId, new Map());
+    // Store viewers under the current pathname key
+    const key = getStorageKey();
+    if (!state.viewerStore.has(key)) {
+      state.viewerStore.set(key, new Map());
     }
-    const m = state.viewerStore.get(mediaId);
+    const m = state.viewerStore.get(key);
 
     viewers.forEach((raw, idx) => {
       const v = normalizeViewer(raw, idx);
@@ -190,12 +221,12 @@
       m.set(viewerKey, v);
     });
 
-    // Broadcast active mediaId when we actually receive it
+    // Broadcast active media with pathname key
     window.dispatchEvent(new CustomEvent('storylister:active_media', {
-      detail: { storyId: String(mediaId) }
+      detail: { storyId: key }
     }));
 
-    if (DEBUG) console.log(`[Storylister] Received ${viewers.length} viewers for ${mediaId}`, { totalCount });
+    if (DEBUG) console.log(`[Storylister] Received ${viewers.length} viewers for ${key}`, { totalCount });
     mirrorToLocalStorageDebounced();
   });
 
@@ -230,7 +261,7 @@
     mo.observe(dlg.parentElement, { childList: true });
   }
 
-  function startPagination(scroller, maxMs = 5000) {
+  function startPagination(scroller, maxMs = 6000) {
     const start = Date.now();
     let stopped = false;
 
@@ -238,11 +269,22 @@
       if (stopped || !document.contains(scroller)) return;
       if (Date.now() - start > maxMs) return;
 
-      // Just scroll to bottom; Instagram will load more.
+      // Stop when we've captured at least "Seen by N" viewers
+      const target = getSeenByCount();
+      const currentViewers = state.viewerStore.get(getStorageKey());
+      const loaded = currentViewers ? currentViewers.size : 0;
+      
+      if (target && loaded >= target) {
+        if (DEBUG) console.log(`[Storylister] Stopping pagination: loaded ${loaded} >= target ${target}`);
+        return; // We have enough viewers
+      }
+
+      // Just scroll to bottom; Instagram will load more
       scroller.scrollTop = scroller.scrollHeight;
 
+      // Slow down when near bottom
       const nearBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 10;
-      setTimeout(tick, nearBottom ? 500 : 200);
+      setTimeout(tick, nearBottom ? 450 : 250);
     };
 
     tick();
@@ -252,25 +294,34 @@
   function autoOpenViewers() {
     if (!Settings.cache.autoOpen) return;
     if (state.autoOpenInProgress) return;
-    if (state.userClosedForStory === state.currentKey) return; // don't re-open if user closed
-
+    
+    const storyKey = getStorageKey();
+    
+    // Don't re-open if user closed this story
+    if (state.userClosedForStory === storyKey) return;
+    
+    // Only auto-open once per story key
+    if (state.openedForKey.has(storyKey)) return;
+    
     const btn = findSeenByButton();
     if (!btn) return;
 
+    state.openedForKey.add(storyKey);
     state.autoOpenInProgress = true;
+    
     setTimeout(() => {
       try { btn.click(); } catch (_) {}
       setTimeout(() => {
         const scroller = findScrollableInDialog();
         if (scroller) {
-          // cancel any previous run
+          // Cancel any previous pagination
           if (state.stopPagination) state.stopPagination();
           state.stopPagination = startPagination(scroller);
           watchDialogCloseOnce();
         }
         state.autoOpenInProgress = false;
       }, 400);
-    }, 100);
+    }, 300);  // Slightly longer delay for first story
   }
 
   function cleanupOldStories(max = 10) {
@@ -304,9 +355,7 @@
 
   // --- DOM observer -> gate + inject + open ---
   const onDOMChange = throttle(async () => {
-    const urlId = getCurrentStoryIdFromURL();
-    const owner = getStoryOwnerFromURL();
-    const key = urlId || owner;
+    const storyKey = getStorageKey();
 
     // Only attach on your own story
     if (!(await isOnOwnStory())) {
@@ -319,10 +368,10 @@
     ensureInjected();
     pauseVideosIfNeeded();
 
-    // run auto-open once per story-view, even if urlId is missing
-    if (key !== state.currentKey) {
+    // Run auto-open once per story-view using pathname key
+    if (storyKey !== state.currentKey) {
       resetStoryState();
-      state.currentKey = key;
+      state.currentKey = storyKey;
       autoOpenViewers();
     }
   }, 200);
