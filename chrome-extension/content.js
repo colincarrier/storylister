@@ -504,7 +504,31 @@
   
   // Load viewers from storage (backwards compatibility wrapper)
   function loadViewersFromStorage() {
-    DataSyncManager.performSync();
+    try {
+      const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+      const story = store[slStoreKey()];
+      if (!story || !Array.isArray(story.viewers)) return;
+
+      viewers.clear();
+      story.viewers.forEach(([id, v], i) => {
+        viewers.set(v.username || id, {
+          id: v.id || id,
+          username: v.username || '',
+          displayName: v.full_name || v.displayName || v.username || 'Anonymous',
+          profilePic: v.profile_pic_url || v.profilePic || '',
+          isVerified: !!v.is_verified,
+          isFollower: !!v.followed_by_viewer,
+          isFollowing: !!v.follows_viewer,
+          viewedAt: v.viewedAt || v.timestamp || Date.now(),
+          originalIndex: Number.isFinite(v.originalIndex) ? v.originalIndex : i
+        });
+      });
+
+      updateViewerList();
+      console.log(`[Storylister] Loaded ${viewers.size} viewers for story ${slStoreKey()}`);
+    } catch (e) {
+      console.error('[Storylister] load error:', e);
+    }
   }
   
   // Toggle tag
@@ -1726,45 +1750,12 @@
   
   // Listen for data updates from backend
   window.addEventListener('storylister:data_updated', (evt) => {
-    const storyId = evt.detail?.storyId || getCurrentStoryIdFromURL();
-    if (!storyId) return;
-    
-    try {
-      const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
-      const data = store[storyId];
-      
-      if (!data?.viewers) return;
-      
-      // Call existing viewer loader if defined
+    // If the update is for the current story key, refresh the list
+    const key = evt.detail?.storyId;
+    if (!key || key === slStoreKey()) {
       if (typeof loadViewersFromStorage === 'function') {
         loadViewersFromStorage();
-      } else {
-        // Convert to format the UI expects
-        const viewerMap = new Map();
-        data.viewers.forEach(([id, v]) => {
-          viewerMap.set(v.username || id, v);
-        });
-        
-        // Update global viewers map
-        viewers = viewerMap;
-        
-        // Update the UI
-        if (typeof updateViewerList === 'function') {
-          updateViewerList(viewerMap);
-        }
-        
-        // Update count displays
-        const countElements = document.querySelectorAll('#sl-viewer-count, .viewer-count, [data-viewer-count]');
-        countElements.forEach(el => {
-          el.textContent = data.viewers.length;
-        });
-        
-        // Remove waiting message if present
-        const waitingMsg = document.querySelector('.waiting-message, .no-data');
-        if (waitingMsg) waitingMsg.style.display = 'none';
       }
-    } catch(e) {
-      console.error('[Storylister] Data update failed:', e);
     }
   });
   
@@ -1772,6 +1763,17 @@
   function getCurrentStoryIdFromURL() {
     const m = location.pathname.match(/\/stories\/[^/]+\/(\d+)/);
     return m ? m[1] : null;
+  }
+  
+  function getStoryOwnerFromURL() {
+    const m = location.pathname.match(/\/stories\/([^/]+)/);
+    return m ? m[1] : null;
+  }
+  
+  function slStoreKey() {
+    const id = getCurrentStoryIdFromURL();
+    const owner = getStoryOwnerFromURL();
+    return id || owner || 'current';
   }
   
   // Ensure button handlers work (delegation for dynamic elements)

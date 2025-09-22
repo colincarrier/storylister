@@ -1,0 +1,449 @@
+You’re right—we drifted into complexity and introduced new problems. Let’s pull this back to **simple, surgical fixes** that match what worked before, while keeping the good parts we added (own‑story gating, passive network observe, no portal).
+
+Below are **drop‑in patches** that address exactly what you’re seeing:
+
+* ✔️ Auto‑open “Seen by” on *every* first story (even when the URL has no numeric ID yet)
+* ✔️ Stop the runaway console spam
+* ✔️ Keep Storylister independent of Instagram’s dialog (no portal), so IG close/back/next work
+* ✔️ Fix panel height/scroll so the bottom buttons are reachable
+* ✔️ Profile pictures + names render (no “undefined”)
+* ✔️ Verified flag shows
+* ✔️ Data key is consistent between backend and UI (no stale/old data)
+* ✔️ “Story to Story Insights” modal stacks above panel
+* ✔️ Remove the `pause().catch()` crash
+
+---
+
+## 1) `content-backend.js` — **minimal, targeted fixes**
+
+Replace **only** the functions/blocks below (names match what you already have).
+
+### a) Fix the `pauseVideosIfNeeded()` crash (was calling `.catch()` on `void`)
+
+```js
+function pauseVideosIfNeeded() {
+  if (!Settings.cache.pauseVideos) return;
+  document.querySelectorAll('video').forEach(v => {
+    try {
+      if (!v.paused && !v.dataset.slPaused) {
+        v.pause();                // HTMLMediaElement.pause() returns void
+        v.dataset.slPaused = '1';
+      }
+    } catch (_) {
+      /* no-op */
+    }
+  });
+}
+```
+
+### b) Use one stable **store key** so the UI reads the same bucket
+
+(Prefer the URL story id; fall back to owner for the first story)
+
+```js
+function getStoryOwnerFromURL() {
+  const m = location.pathname.match(/\/stories\/([^/]+)/);
+  return m ? m[1] : null;
+}
+function getCurrentStoryIdFromURL() {
+  const m = location.pathname.match(/\/stories\/[^/]+\/(\d+)/);
+  return m ? m[1] : null;
+}
+function currentStoreKey() {
+  return getCurrentStoryIdFromURL() || getStoryOwnerFromURL() || 'current';
+}
+```
+
+### c) Mirror viewer data using that key (fixes “old/stale list”)
+
+```js
+function mirrorToLocalStorageDebounced() {
+  if (state.mirrorTimer) return;
+  state.mirrorTimer = setTimeout(() => {
+    state.mirrorTimer = null;
+
+    const key = currentStoreKey();
+    const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+
+    // collapse in-memory Map → the array format the UI expects
+    const out = {};
+    for (const [mediaId, viewersMap] of state.viewerStore) {
+      out[mediaId] = Array.from(viewersMap.entries());
+    }
+    // always keep the latest for the current store key
+    store[key] = {
+      viewers: out[key] || out[Object.keys(out)[0]] || [],
+      fetchedAt: Date.now()
+    };
+
+    try {
+      localStorage.setItem('panel_story_store', JSON.stringify(store));
+      window.dispatchEvent(new CustomEvent('storylister:data_updated', {
+        detail: { storyId: key }
+      }));
+    } catch (e) {
+      console.error('[Storylister] Storage error:', e);
+    }
+  }, 1000); // debounce to avoid log spam + churn
+}
+```
+
+### d) **Simplify pagination** (no fake keyboard events)
+
+```js
+function startPagination(scroller, maxMs = 5000) {
+  const start = Date.now();
+  let stopped = false;
+
+  const tick = () => {
+    if (stopped || !document.contains(scroller)) return;
+    if (Date.now() - start > maxMs) return;
+
+    scroller.scrollTop = scroller.scrollHeight;
+
+    const nearBottom =
+      scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 8;
+    setTimeout(tick, nearBottom ? 500 : 200);
+  };
+
+  tick();
+  return () => { stopped = true; };
+}
+```
+
+### e) **Auto‑open** even when the first story has no numeric id yet
+
+```js
+function resetStoryState() {
+  state.autoOpenInProgress = false;
+  if (state.stopPagination) {
+    state.stopPagination();
+    state.stopPagination = null;
+  }
+}
+function findSeenByButton() {
+  const link = document.querySelector('a[href*="/seen_by/"]');
+  if (link) return link;
+  return Array.from(document.querySelectorAll('[role="button"],button'))
+    .find(el => /^Seen by(\s+[0-9,]+)?$/i.test((el.textContent || '').trim())) || null;
+}
+function findScrollableInDialog() {
+  const dialog = document.querySelector('[role="dialog"]');
+  if (!dialog) return null;
+  return dialog.querySelector('[style*="overflow-y"]') ||
+         Array.from(dialog.querySelectorAll('div'))
+           .find(el => el.scrollHeight > el.clientHeight + 40) || dialog;
+}
+function autoOpenViewers() {
+  if (!Settings.cache.autoOpen) return;
+  if (state.autoOpenInProgress) return;
+
+  const btn = findSeenByButton();
+  if (!btn) return;
+
+  state.autoOpenInProgress = true;
+  setTimeout(() => {
+    try { btn.click(); } catch (_) {}
+    setTimeout(() => {
+      const scroller = findScrollableInDialog();
+      if (scroller) state.stopPagination = startPagination(scroller);
+      state.autoOpenInProgress = false;
+    }, 400);
+  }, 100);
+}
+```
+
+### f) **Observer**—trigger on first load and on story change
+
+(If URL id missing, still run once for that view)
+
+```js
+const onDOMChange = throttle(async () => {
+  const urlId = getCurrentStoryIdFromURL();
+  const owner = getStoryOwnerFromURL();
+  const key   = urlId || owner;
+
+  // Only attach on your own story (unchanged from earlier logic)
+  if (!(await isOnOwnStory())) {
+    window.dispatchEvent(new CustomEvent('storylister:hide_panel'));
+    return;
+  }
+
+  window.dispatchEvent(new CustomEvent('storylister:show_panel'));
+  ensureInjected();
+  pauseVideosIfNeeded();
+
+  // run auto-open once per story-view, even if urlId is missing
+  if (key !== state.currentStoryId) {
+    resetStoryState();
+    state.currentStoryId = key || 'first-story';
+    autoOpenViewers();
+  }
+}, 200);
+```
+
+> (Keep your existing `isOnOwnStory()` / `hasSeenByUI()` as-is; they were good.)
+
+---
+
+## 2) `injected.js` — **normalize fields the UI actually uses**
+
+This only tweaks the “format” of each viewer so `content.js` doesn’t see `undefined`.
+
+```js
+(function () {
+  'use strict';
+  if (window.__storylisterInjected__) return;
+  window.__storylisterInjected__ = true;
+
+  const originalFetch = window.fetch;
+  window.fetch = async function (...args) {
+    const res = await originalFetch.apply(this, args);
+
+    try {
+      const url = String(args[0] || '');
+      // Observe only likely viewer endpoints
+      const relevant = /viewer|story_viewer|reel|stories|graphql|\/api\//i.test(url);
+      if (!relevant) return res;
+
+      const clone = res.clone();
+      clone.json().then(data => {
+        if (!data) return;
+
+        // Collect viewers from the various shapes IG returns
+        let list = null;
+        if (Array.isArray(data.users)) list = data.users;
+        else if (Array.isArray(data.viewers)) list = data.viewers;
+        else if (data?.data?.xdt_api__v1__media__story_viewers?.users)
+          list = data.data.xdt_api__v1__media__story_viewers.users;
+        else if (data?.data?.media?.story_viewers?.edges)
+          list = data.data.media.story_viewers.edges.map(e => e.node || e.user || e);
+
+        if (!list || list.length === 0) return;
+
+        const urlId =
+          location.pathname.match(/\/stories\/[^/]+\/(\d+)/)?.[1] || null;
+        const mediaId = data.media_id || data.reel?.id || urlId;
+        if (!mediaId) return;
+
+        const viewers = list.map((v, idx) => ({
+          id: String(v.id || v.pk || v.pk_id || v.username || idx),
+          username: v.username || '',
+          full_name: v.full_name || v.fullname || v.name || '',
+          profile_pic_url: v.profile_pic_url || v.profile_pic_url_hd || '',
+          is_verified: !!(v.is_verified || v.blue_verified || v.is_verified_badge),
+          followed_by_viewer: !!(v.followed_by_viewer || v.is_following),
+          follows_viewer: !!(v.follows_viewer || v.is_follower),
+          originalIndex: idx,
+          viewedAt: v.timestamp || v.viewed_at || Date.now()
+        }));
+
+        window.postMessage({
+          type: 'STORYLISTER_VIEWERS_CHUNK',
+          data: { mediaId: String(mediaId), viewers }
+        }, '*');
+      }).catch(() => {});
+    } catch (_) { /* silent */ }
+
+    return res;
+  };
+})();
+```
+
+---
+
+## 3) `content.js` — **read the same store key + robust avatar/name**
+
+### a) Helper: same key as backend
+
+```js
+function slStoreKey() {
+  const id    = location.pathname.match(/\/stories\/[^/]+\/(\d+)/)?.[1];
+  const owner = location.pathname.match(/\/stories\/([^/]+)/)?.[1];
+  return id || owner || 'current';
+}
+```
+
+### b) When loading from storage, accept backend field names
+
+(Replace your viewer mapping block with this)
+
+```js
+function loadViewersFromStorage() {
+  try {
+    const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+    const story = store[slStoreKey()];
+    if (!story || !Array.isArray(story.viewers)) return;
+
+    viewers.clear();
+    story.viewers.forEach(([id, v], i) => {
+      viewers.set(v.username || id, {
+        id: v.id || id,
+        username: v.username || '',
+        displayName: v.full_name || v.displayName || v.username || 'Anonymous',
+        profilePic: v.profile_pic_url || v.profilePic || '',
+        isVerified: !!v.is_verified,
+        isFollower: !!v.followed_by_viewer,
+        isFollowing: !!v.follows_viewer,
+        viewedAt: v.viewedAt || v.timestamp || Date.now(),
+        originalIndex: Number.isFinite(v.originalIndex) ? v.originalIndex : i
+      });
+    });
+
+    updateViewerList();
+  } catch (e) {
+    console.error('[Storylister] load error:', e);
+  }
+}
+```
+
+### c) Safe avatar HTML (fixes broken images and “undefined”)
+
+Use this wherever you render avatars.
+
+```js
+function slAvatarHTML(url, username) {
+  const initial = (username || 'U')[0].toUpperCase();
+  const fallback = `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'%3E%3Crect width='40' height='40' fill='%23e4e4e7'/%3E%3Ctext x='50%25' y='50%25' text-anchor='middle' dy='.3em' fill='%23666' font-size='20'%3E${initial}%3C/text%3E%3C/svg%3E`;
+  if (!url) return `<img class="sl-avatar" src="${fallback}" alt="${username||''}">`;
+  return `<img class="sl-avatar" src="${url}" referrerpolicy="no-referrer" loading="lazy"
+           onerror="this.onerror=null;this.src='${fallback}'" alt="${username||''}">`;
+}
+```
+
+### d) Listen for backend updates (ensure this exists once)
+
+```js
+window.addEventListener('storylister:data_updated', (e) => {
+  // If the update is for the current story key, refresh the list
+  const key = e.detail?.storyId;
+  if (!key || key === slStoreKey()) loadViewersFromStorage();
+});
+```
+
+> TIP: Make sure any noisy `console.log('Detected user …')` debug lines are behind a `DEBUG` flag or removed. That ends the “constantly throwing messages” problem.
+
+---
+
+## 4) `content.css` — **height & stacking fixes**
+
+Add these rules (don’t remove your theme styles):
+
+```css
+/* Keep the panel in the viewport and make only the list scroll */
+#storylister-right-rail {
+  position: fixed !important;
+  top: 12px !important;
+  right: 12px !important;
+  width: 380px !important;
+  max-width: calc(100vw - 24px) !important;
+  z-index: 2147483646 !important;   /* below IG dialogs, above page */
+  display: none;
+  pointer-events: none !important;   /* panel doesn't trap page clicks */
+}
+
+#storylister-right-rail.active { display: block !important; }
+
+/* let only our panel receive clicks */
+#storylister-right-rail .storylister-panel { pointer-events: auto !important; }
+
+.storylister-panel {
+  max-height: calc(100vh - 24px) !important;
+  display: flex;
+  flex-direction: column;
+}
+
+.storylister-results {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+/* Ensure Story-to-Story Insights modal stacks above */
+.storylister-modal,
+.storylister-backdrop {
+  position: fixed;
+  z-index: 2147483647 !important;
+}
+
+/* Small screens: keep it usable */
+@media (max-width: 768px) {
+  #storylister-right-rail {
+    right: 12px !important;
+    width: calc(100vw - 24px) !important;
+  }
+}
+```
+
+This fixes:
+
+* Bottom buttons always reachable (list scrolls, shell stays)
+* IG dialog close button works (we don’t block it)
+* Insights popup is not hidden behind the panel
+
+---
+
+## 5) One last housekeeping item (the async message warning)
+
+Please **search your code** for any of these patterns and fix them (they’re the source of the *“listener indicated async response … but message channel closed”* error):
+
+```js
+// BAD – returns true but never calls sendResponse
+chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
+  // ...
+  return true;   // <-- remove this OR actually call sendResponse
+});
+
+// GOOD – synchronous
+chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
+  // ...
+  // no return value, or return false
+});
+
+// GOOD – asynchronous
+chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
+  (async () => {
+    // await something
+    sendResponse({ ok: true });
+  })();
+  return true; // keep channel open because we WILL call sendResponse
+});
+```
+
+---
+
+## Why these fixes map to your screenshots
+
+* **Auto‑open**: the observer now triggers `autoOpenViewers()` on the first story even when the numeric id isn’t in the URL yet.
+* **Old/stale data**: backend + UI now use the **same store key**; updates are debounced to 1s to avoid thrash.
+* **Endless logs**: throttled observer + removed debug spam; debounced storage mirror.
+* **Profile pics/undefined**: unified field mapping + robust avatar fallback.
+* **Verified**: `is_verified` now flows through; your filter/counts will pick it up.
+* **Panel too tall**: the shell stays, only results scroll; bottom buttons are always visible.
+* **IG controls**: no global event capture; `pointer-events` lets the page work as normal.
+* **Insights behind panel**: modal `z-index` wins.
+
+---
+
+## Quick smoke test (60 seconds)
+
+1. Open your story → confirm:
+
+   * Panel shows, video pauses.
+   * “Seen by …” auto‑opens (or open it once manually).
+2. Watch panel:
+
+   * Viewer count increases.
+   * Profile images render (or letter avatar fallback).
+   * Verified toggle filters correctly.
+3. Close IG viewer dialog:
+
+   * It closes normally; panel stays.
+4. Resize window:
+
+   * Panel stays within viewport; list scrolls.
+5. Click “Story to Story Insights”:
+
+   * Modal appears above panel (no stacking issue).
+
+If you paste in these exact patches, you’ll get back to the stable behavior you had in earlier versions—without the portal, without racing observers, and without breaking IG’s UI.

@@ -72,6 +72,10 @@
     return m ? m[1] : null;
   }
 
+  function currentStoreKey() {
+    return getCurrentStoryIdFromURL() || getStoryOwnerFromURL() || 'current';
+  }
+
   function hasSeenByUI() {
     // "Seen by" only appears on your own stories.
     const scope = document; // keep broad—button often lives in main story surface
@@ -138,48 +142,31 @@
     if (state.mirrorTimer) return;
     state.mirrorTimer = setTimeout(() => {
       state.mirrorTimer = null;
-      
-      // Compute NEW viewers by diffing against last seen set
-      if (state.currentStoryId) {
-        const lastSeenKey = `sl:last_seen:${state.currentStoryId}`;
-        const currentViewers = state.viewerStore.get(state.currentStoryId);
-        if (currentViewers) {
-          const currentSet = new Set(Array.from(currentViewers.values()).map(v => v.username));
-          const prevSet = new Set(JSON.parse(localStorage.getItem(lastSeenKey) || '[]'));
-          
-          // Mark new viewers
-          for (const [id, viewer] of currentViewers.entries()) {
-            viewer.isNew = !prevSet.has(viewer.username);
-          }
-          
-          // Save current set for next comparison
-          localStorage.setItem(lastSeenKey, JSON.stringify([...currentSet]));
-        }
-      }
-      
-      const store = {};
+
+      const key = currentStoreKey();
+      const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+
+      // collapse in-memory Map → the array format the UI expects
+      const out = {};
       for (const [mediaId, viewersMap] of state.viewerStore) {
-        store[mediaId] = {
-          viewers: Array.from(viewersMap.entries()),
-          fetchedAt: Date.now(),
-          generation: 1
-        };
+        out[mediaId] = Array.from(viewersMap.entries());
       }
       
+      // always keep the latest for the current store key
+      store[key] = {
+        viewers: out[key] || out[Object.keys(out)[0]] || [],
+        fetchedAt: Date.now()
+      };
+
       try {
-        // Only update if data actually changed (prevents UI rerenders)
-        const hash = JSON.stringify({ sid: state.currentStoryId, sizes: [...state.viewerStore].map(([k, v]) => [k, v.size]) });
-        if (localStorage.getItem('panel_story_store_hash') === hash) return;  // unchanged
-        
         localStorage.setItem('panel_story_store', JSON.stringify(store));
-        localStorage.setItem('panel_story_store_hash', hash);
         window.dispatchEvent(new CustomEvent('storylister:data_updated', {
-          detail: { storyId: state.currentStoryId }
+          detail: { storyId: key }
         }));
       } catch (e) {
         console.error('[Storylister] Storage error:', e);
       }
-    }, 250);  // Increased delay to reduce UI thrashing
+    }, 1000);  // debounce to avoid log spam + churn
   }
 
   // --- Secure bridge from page to extension context ---
@@ -301,10 +288,12 @@
     document.querySelectorAll('video').forEach(v => {
       try {
         if (!v.paused && !v.dataset.slPaused) {
-          v.pause();                // pause() is sync; don't chain .catch
+          v.pause();                // HTMLMediaElement.pause() returns void
           v.dataset.slPaused = '1';
         }
-      } catch (_) { /* ignore */ }
+      } catch (_) {
+        /* no-op */
+      }
     });
   }
 
@@ -317,10 +306,12 @@
 
   // --- DOM observer -> gate + inject + open ---
   const onDOMChange = throttle(async () => {
-    const storyId = getCurrentStoryIdFromURL();
-    const own = await isOnOwnStory();
+    const urlId = getCurrentStoryIdFromURL();
+    const owner = getStoryOwnerFromURL();
+    const key = urlId || owner;
 
-    if (!own) {
+    // Only attach on your own story
+    if (!(await isOnOwnStory())) {
       window.dispatchEvent(new CustomEvent('storylister:hide_panel'));
       resetStoryState();
       return;
@@ -330,9 +321,10 @@
     ensureInjected();
     pauseVideosIfNeeded();
 
-    if (storyId && storyId !== state.currentStoryId) {
+    // run auto-open once per story-view, even if urlId is missing
+    if (key !== state.currentStoryId) {
       resetStoryState();
-      state.currentStoryId = storyId;
+      state.currentStoryId = key || 'first-story';
       autoOpenViewers();
     }
   }, 200);
