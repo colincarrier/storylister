@@ -90,7 +90,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
             callback(data);
           },
           set: (data, callback) => {
-            console.log('Chrome storage set:', data);
+            console.log('Chrome storage sync set:', data);
+            if (callback) callback();
+          }
+        },
+        local: {
+          get: (keys, callback) => {
+            // Return empty data for local storage
+            const data = {};
+            if (callback) callback(data);
+          },
+          set: (data, callback) => {
+            console.log('Chrome storage local set:', data);
             if (callback) callback();
           }
         }
