@@ -52,11 +52,10 @@
     }
     
     async saveViewers(storyId, viewers) {
-      // Fast save to localStorage for immediate UI
-      const sessionData = { [storyId]: { viewers, timestamp: Date.now() }};
-      localStorage.setItem('panel_story_store', JSON.stringify(sessionData));
+      // DISABLED: UI is read-only for viewer data, backend writes to panel_story_store
+      // Don't write to localStorage to prevent conflicts with backend
       
-      // Async save to IndexedDB if available
+      // Only save to IndexedDB for UI-specific caching if available
       if (this.db) {
         try {
           await this.initPromise;
