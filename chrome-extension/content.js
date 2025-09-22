@@ -157,6 +157,9 @@
   // Settings helpers for per-account tags
   const SETTINGS_KEY = 'storylister_settings';
   
+  // Track the active media ID from backend
+  let ACTIVE_MEDIA_ID_FROM_BACKEND = null;
+  
   function tagsKeyFromSettings(settings) {
     const handle = (settings?.accountHandle || 'default');
     return `sl_tags_${handle}`;
@@ -1328,9 +1331,6 @@
     }
   }
   
-  // Track the active media ID from backend
-  let ACTIVE_MEDIA_ID_FROM_BACKEND = null;
-
   // Listen for active media announcements from backend
   window.addEventListener('storylister:active_media', (e) => {
     ACTIVE_MEDIA_ID_FROM_BACKEND = e.detail?.storyId || null;
