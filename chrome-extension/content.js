@@ -942,16 +942,30 @@
     const storyStore = localStorage.getItem('panel_story_store');
     const allStories = storyStore ? JSON.parse(storyStore) : {};
     
-    // Calculate metrics
-    const storyIds = Object.keys(allStories);
+    // Get current session from the current story
+    const currentStory = allStories[slStoreKey()];
+    const currentSessionId = currentStory?.sessionId;
+    
+    // Filter stories to only include current session
+    const sessionStories = {};
+    if (currentSessionId) {
+      Object.entries(allStories).forEach(([key, story]) => {
+        if (story.sessionId === currentSessionId) {
+          sessionStories[key] = story;
+        }
+      });
+    }
+    
+    // Calculate metrics using only session stories
+    const storyIds = Object.keys(sessionStories);
     const totalStories = storyIds.length;
     const allViewers = new Set();
     const viewerFrequency = new Map();
     let totalViewerCount = 0;
     
-    // Process each story
+    // Process each story in this session
     storyIds.forEach(storyId => {
-      const story = allStories[storyId];
+      const story = sessionStories[storyId];
       if (story.viewers) {
         story.viewers.forEach(([compositeId, viewer]) => {
           allViewers.add(viewer.username);
@@ -991,10 +1005,17 @@
       breakdownList.innerHTML = '';
       
       if (storyIds.length === 0) {
-        breakdownList.innerHTML = '<div class="no-data">No story data available yet. View some stories first!</div>';
+        breakdownList.innerHTML = '<div class="no-data">No story data available for this session. View some stories first!</div>';
       } else {
-        storyIds.forEach((storyId, index) => {
-          const story = allStories[storyId];
+        // Sort stories by fetchedAt to show in chronological order
+        const sortedStoryIds = storyIds.sort((a, b) => {
+          const aTime = sessionStories[a].fetchedAt || 0;
+          const bTime = sessionStories[b].fetchedAt || 0;
+          return aTime - bTime;
+        });
+        
+        sortedStoryIds.forEach((storyId, index) => {
+          const story = sessionStories[storyId];
           const viewerCount = story.viewers ? story.viewers.length : 0;
           const newCount = story.viewers ? story.viewers.filter(([,v]) => v.isNew).length : 0;
           
