@@ -1,21 +1,21 @@
 /* Storylister Extension Styles - Exact UI from Mock Instagram */
 
-/* The container never blocks clicks outside the panel */
+/* Keep the panel in the viewport and make only the list scroll */
 #storylister-right-rail {
   position: fixed !important;
   top: 12px !important;
   right: 12px !important;
   width: 380px !important;
   max-width: calc(100vw - 24px) !important;
-  max-height: calc(100vh - 24px) !important;
-  z-index: 2147483646 !important;  /* below IG dialog which often hits max */
-  pointer-events: none !important;  /* let IG receive clicks */
+  z-index: 2147483646 !important;   /* below IG dialogs, above page */
   display: none;
+  pointer-events: none !important;   /* panel doesn't trap page clicks */
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
 
-/* Only panel catches events */
 #storylister-right-rail.active { display: block !important; }
+
+/* let only our panel receive clicks */
 #storylister-right-rail .storylister-panel { pointer-events: auto !important; }
 
 #storylister-right-rail * {
@@ -26,7 +26,7 @@
 .storylister-panel {
   pointer-events: auto !important;
   width: 100%;
-  height: 100%;
+  max-height: calc(100vh - 24px) !important;
   background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 50%, #6d28d9 100%);
   border-radius: 14px;
   padding: 3px;
@@ -43,6 +43,7 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  min-height: 0; /* Allow shrinking */
 }
 
 /* Header */
@@ -306,6 +307,7 @@
 .storylister-results {
   flex: 1;
   overflow-y: auto;
+  min-height: 0;
   padding: 8px 16px;
   background: #fafafa;
 }
@@ -496,5 +498,19 @@
 @media (min-width: 769px) and (max-width: 1024px) {
   #storylister-right-rail {
     width: min(380px, calc(100vw - 24px)) !important;
+  }
+}
+/* Ensure Story-to-Story Insights modal stacks above panel */
+.storylister-modal,
+.storylister-backdrop {
+  position: fixed;
+  z-index: 2147483647 !important;
+}
+
+/* Small screens: keep it usable */
+@media (max-width: 768px) {
+  #storylister-right-rail {
+    right: 12px !important;
+    width: calc(100vw - 24px) !important;
   }
 }
