@@ -39,7 +39,7 @@
         
         request.onsuccess = () => {
           this.db = request.result;
-          console.log('[Storylister] IndexedDB initialized');
+          // console.log('[Storylister] IndexedDB initialized');
           resolve();
         };
         
@@ -1121,7 +1121,7 @@
   async function showRightRail() {
     // Check if we can use the extension
     if (!(await canUseExtension())) {
-      console.log('[Storylister] Cannot use extension on this account (Pro required for multiple accounts)');
+      // console.log('[Storylister] Cannot use extension on this account (Pro required for multiple accounts)');
       const settings = await loadSettingsSync();
       if (settings.accountHandle) {
         showUpgradePrompt(settings.accountHandle);
@@ -1292,7 +1292,7 @@
       const usernameEl = e.target.closest('.storylister-viewer-username');
       if (avatarEl || usernameEl) {
         const username = (avatarEl || usernameEl).dataset.username;
-        console.log(`[Storylister] Would open profile: @${username}`);
+        // console.log(`[Storylister] Would open profile: @${username}`);
       }
     });
     
@@ -1350,14 +1350,14 @@
 
   // Listen for data updates
   window.addEventListener('storylister:data_updated', (e) => {
-    console.log('[Storylister] Data updated:', e.detail);
+    // console.log('[Storylister] Data updated:', e.detail);
     loadViewersFromStorage();
     updateViewerList();
   });
   
   // Listen for settings updates from chrome.storage
   window.addEventListener('storylister:settings_updated', (e) => {
-    console.log('[Storylister] Settings updated:', e.detail);
+    // console.log('[Storylister] Settings updated:', e.detail);
     // Re-check if we should show/hide based on new settings
     checkForStories();
   });
@@ -1714,7 +1714,7 @@
   
   // Initialize when DOM is ready
   async function initialize() {
-    console.log('[Storylister] Extension ready');
+    // console.log('[Storylister] Extension ready');
     
     // Load account-specific data
     currentUsername = detectActiveUsername();
