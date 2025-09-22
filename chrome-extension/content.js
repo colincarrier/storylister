@@ -2,7 +2,7 @@
 // This script renders the UI and reads data from localStorage
 
 (function() {
-  console.log('[Storylister] Initializing extension UI');
+  // console.log('[Storylister] Initializing extension UI');
   
   // Hybrid storage manager - IndexedDB for bulk data, localStorage for speed
   class HybridStorage {
@@ -179,7 +179,7 @@
     const navAvatar = document.querySelector('nav a[href^="/"] img[alt$="profile picture"]');
     if (navAvatar) {
       const username = navAvatar.alt.replace("'s profile picture", "");
-      console.log('[Storylister UI] Detected user from nav avatar:', username);
+      // console.log('[Storylister UI] Detected user from nav avatar:', username);
       return username;
     }
     
@@ -191,7 +191,7 @@
         const href = link.getAttribute('href');
         if (href && href !== '/' && !href.includes('/direct') && !href.includes('/explore')) {
           const username = href.replace(/\//g, '');
-          console.log('[Storylister UI] Detected user from nav link:', username);
+          // console.log('[Storylister UI] Detected user from nav link:', username);
           return username;
         }
       }
@@ -202,12 +202,12 @@
     for (const img of allImgs) {
       if (img.alt.includes("'s profile picture")) {
         const username = img.alt.split("'s profile picture")[0];
-        console.log('[Storylister UI] Detected user from profile pic alt:', username);
+        // console.log('[Storylister UI] Detected user from profile pic alt:', username);
         return username;
       }
     }
     
-    console.log('[Storylister UI] Could not detect logged-in user');
+    // console.log('[Storylister UI] Could not detect logged-in user');
     return null;
   }
   
@@ -220,7 +220,7 @@
     
     // Must match usernames (case-insensitive)
     if (!current || storyOwner.toLowerCase() !== current.toLowerCase()) {
-      console.log('[Storylister UI] Not own story - owner:', storyOwner, 'user:', current);
+      // console.log('[Storylister UI] Not own story - owner:', storyOwner, 'user:', current);
       return false;
     }
     
@@ -229,7 +229,7 @@
                         Array.from(document.querySelectorAll('button, [role="button"], span, div'))
                           .some(el => /^Seen by \d+$|^\d+ viewers?$|^\d+$/i.test(el.textContent?.trim()));
     
-    console.log('[Storylister UI] Own story check - owner matches, has viewer UI:', hasViewerUI);
+    // console.log('[Storylister UI] Own story check - owner matches, has viewer UI:', hasViewerUI);
     
     return hasViewerUI;
   }
@@ -525,7 +525,7 @@
       });
 
       updateViewerList();
-      console.log(`[Storylister] Loaded ${viewers.size} viewers for story ${slStoreKey()}`);
+      // console.log(`[Storylister] Loaded ${viewers.size} viewers for story ${slStoreKey()}`);
     } catch (e) {
       console.error('[Storylister] load error:', e);
     }
