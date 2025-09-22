@@ -130,6 +130,24 @@
   let currentUsername = null;
   let freeAccountUsername = null;
   
+  // Safe string helper to prevent undefined/null display
+  function slSafe(s) { return (typeof s === 'string' ? s : '') || ''; }
+
+  // Avatar HTML helper with proper fallbacks
+  function slAvatarHTML(url, username) {
+    const initial = (slSafe(username)[0] || 'U').toUpperCase();
+    const fallback = `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'%3E%3Crect width='40' height='40' fill='%23e4e4e7'/%3E%3Ctext x='50%25' y='50%25' text-anchor='middle' dy='.3em' fill='%23666' font-size='20'%3E${initial}%3C/text%3E%3C/svg%3E`;
+
+    if (!url) return `<img class="sl-avatar" src="${fallback}" alt="${slSafe(username)}" />`;
+
+    return `<img class="sl-avatar"
+                src="${url}"
+                referrerpolicy="no-referrer"
+                loading="lazy"
+                onerror="this.onerror=null; this.src='${fallback}'"
+                alt="${slSafe(username)}" />`;
+  }
+  
   // Custom tags for Pro mode
   const customTags = [
     { id: 'crush', emoji: '❤️', label: 'Crush' },
@@ -604,8 +622,8 @@
       }
       
       viewerEl.innerHTML = `
-        <div class="storylister-viewer-avatar" data-username="${viewer.username}">
-          <img src="${viewer.profilePic}" alt="${viewer.username}">
+        <div class="storylister-viewer-avatar" data-username="${slSafe(viewer.username)}">
+          ${slAvatarHTML(viewer.profilePic, viewer.username)}
         </div>
         <div class="storylister-viewer-info">
           <div class="storylister-viewer-username" data-username="${viewer.username}">
@@ -1757,6 +1775,16 @@
   }
   
   // Ensure button handlers work (delegation for dynamic elements)
+  // Make Manage Tags / Insights modals closeable
+  document.addEventListener('click', (e) => {
+    const closeBtn = e.target.closest('[data-sl-close]');
+    const backdrop = e.target.classList?.contains('sl-backdrop') ? e.target : null;
+    if (closeBtn || backdrop) {
+      // Hide any Storylister modal
+      document.querySelectorAll('.sl-modal.active').forEach(el => el.classList.remove('active'));
+    }
+  }, true);
+
   document.addEventListener('click', (e) => {
     if (e.target.closest('#sl-manage-tags')) {
       e.preventDefault();
