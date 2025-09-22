@@ -7,13 +7,20 @@
     injected: false,
     currentStoryId: null,
     autoOpenInProgress: false,
-    userClosedViewers: false,      // NEW: respect user close
-    stopPaginate: null,            // NEW: cancel pagination function
+    userClosedForStory: null,     // Which story ID the user closed
+    stopPagination: null,         // Holds cancel function for running paginator
     viewerStore: new Map(),       // Map<mediaId, Map<viewerId, viewer>>
-    mirrorTimer: null,
-    lastAutoOpenedStoryId: null,  // Prevents re-opening
-    cancelPaginator: null          // Stops old paginators
+    mirrorTimer: null
   };
+
+  function resetStoryState() {
+    state.autoOpenInProgress = false;
+    state.userClosedForStory = null;
+    if (state.stopPagination) {
+      state.stopPagination();
+      state.stopPagination = null;
+    }
+  }
 
   const Settings = {
     cache: { pro: false, autoOpen: true, accountHandle: null, pauseVideos: true },
@@ -218,120 +225,67 @@
   }
 
   function findScrollableInDialog() {
-    // The dialog may be the viewers list; otherwise find the largest scrollable region.
-    const dialog = document.querySelector('[role="dialog"]') || document;
-    const styled = dialog.querySelector('[style*="overflow-y"]') ||
-                   dialog.querySelector('[style*="overflow: hidden auto"]');
-    if (styled) return styled;
-    return Array.from(dialog.querySelectorAll('div'))
-      .find(el => el.scrollHeight > el.clientHeight + 40) || dialog;
+    const dlg = document.querySelector('[role="dialog"][aria-modal="true"]');
+    if (!dlg) return null;
+    return dlg.querySelector('[style*="overflow-y"]')
+        || dlg.querySelector('[style*="overflow: hidden auto"]')
+        || Array.from(dlg.querySelectorAll('div')).find(el => el.scrollHeight > el.clientHeight + 40)
+        || dlg;
   }
 
-  // Helper to know if our search input is focused
-  function searchIsActive() {
-    const el = document.querySelector('#sl-search, input#sl-search');
-    return el && document.activeElement === el;
+  function watchDialogCloseOnce() {
+    const dlg = document.querySelector('[role="dialog"][aria-modal="true"]');
+    if (!dlg || !dlg.parentElement) return;
+    const mo = new MutationObserver(() => {
+      if (!document.contains(dlg)) {
+        state.userClosedForStory = state.currentStoryId; // respect the user's intent
+        mo.disconnect();
+      }
+    });
+    mo.observe(dlg.parentElement, { childList: true });
   }
 
-  function startFastPagination(scroller, maxMs = 6000) {
-    let lastHeight = 0, stable = 0, running = true;
-    const started = Date.now();
-
-    const stop = () => { running = false; };
-    const userStop = () => stop();
-
-    // Stop when user interacts with the dialog in any way
-    const dlg = scroller.closest('[role="dialog"]') || document;
-    ['wheel','mousedown','keydown','touchstart'].forEach(evt =>
-      dlg.addEventListener(evt, userStop, { once: true, capture: true })
-    );
+  function startPagination(scroller, maxMs = 5000) {
+    const start = Date.now();
+    let stopped = false;
 
     const tick = () => {
-      if (!running || !document.contains(scroller)) return;
-      
-      // Stop quickly if user is interacting with the panel
-      if (searchIsActive()) return;
-      
-      // hard stop after maxMs
-      if (Date.now() - started > maxMs) return;
+      if (stopped || !document.contains(scroller)) return;
+      if (Date.now() - start > maxMs) return;
 
-      const h = scroller.scrollHeight;
-      if (h === lastHeight) {
-        if (++stable > 2) return;
-      } else {
-        stable = 0;
-        lastHeight = h;
-      }
-
-      // Simulate End key with non-bubbling event
-      const ev = new KeyboardEvent('keydown', { 
-        key: 'End', 
-        code: 'End', 
-        keyCode: 35, 
-        which: 35, 
-        bubbles: false,  // Don't bubble to prevent interference
-        cancelable: true
-      });
-      scroller.dispatchEvent(ev);
+      // Just scroll to bottom; Instagram will load more.
       scroller.scrollTop = scroller.scrollHeight;
-      
-      // Pace requests to avoid duplicates
-      setTimeout(tick, 180);  // Reduced from 360ms for faster loading
+
+      const nearBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 10;
+      setTimeout(tick, nearBottom ? 500 : 200);
     };
-    
+
     tick();
-    return stop;
+    return () => { stopped = true; };
   }
 
   function autoOpenViewers() {
     if (!Settings.cache.autoOpen) return;
     if (state.autoOpenInProgress) return;
-    if (state.userClosedViewers) return;  // Respect user action
-
-    // Open only once per story to avoid re-open loop
-    if (state.currentStoryId && state.lastAutoOpenedStoryId === state.currentStoryId) return;
+    if (state.userClosedForStory === state.currentStoryId) return; // don't re-open if user closed
 
     const btn = findSeenByButton();
     if (!btn) return;
 
     state.autoOpenInProgress = true;
-    try { btn.click(); } catch (e) { /* ignore */ }
-
     setTimeout(() => {
-      const scroller = findScrollableInDialog();
-      if (scroller) {
-        // Cancel any previous paginator
-        if (state.stopPaginate) { state.stopPaginate(); state.stopPaginate = null; }
-        state.stopPaginate = startFastPagination(scroller);
-      }
-      
-      // Stop when dialog closes or user presses Escape / clicks X
-      const dlg = document.querySelector('[role="dialog"]');
-      if (dlg) {
-        const markClosed = () => {
-          state.userClosedViewers = true;
-          if (state.stopPaginate) { state.stopPaginate(); state.stopPaginate = null; }
-        };
-        
-        dlg.addEventListener('keydown', (e) => { 
-          if (e.key === 'Escape') markClosed(); 
-        }, { once: true, capture: true });
-        
-        const xBtn = dlg.querySelector('[aria-label="Close"], [role="button"] svg[aria-label="Close"]')?.closest('[role="button"],button');
-        if (xBtn) xBtn.addEventListener('click', markClosed, { once: true, capture: true });
-        
-        const mo = new MutationObserver(() => { 
-          if (!document.contains(dlg)) { 
-            markClosed(); 
-            mo.disconnect(); 
-          }
-        });
-        mo.observe(document.body, { childList: true, subtree: true });
-      }
-      
-      state.lastAutoOpenedStoryId = state.currentStoryId || state.lastAutoOpenedStoryId;
-      setTimeout(() => { state.autoOpenInProgress = false; }, 1000);
-    }, 500);
+      try { btn.click(); } catch (_) {}
+      setTimeout(() => {
+        const scroller = findScrollableInDialog();
+        if (scroller) {
+          // cancel any previous run
+          if (state.stopPagination) state.stopPagination();
+          state.stopPagination = startPagination(scroller);
+          watchDialogCloseOnce();
+        }
+        state.autoOpenInProgress = false;
+      }, 400);
+    }, 100);
   }
 
   function cleanupOldStories(max = 10) {
@@ -342,19 +296,17 @@
   }
 
   // Handle video pausing if needed
-  const pauseVideosIfNeeded = () => {
+  function pauseVideosIfNeeded() {
     if (!Settings.cache.pauseVideos) return;
     document.querySelectorAll('video').forEach(v => {
       try {
         if (!v.paused && !v.dataset.slPaused) {
-          v.pause(); // pause() returns void, not a Promise
+          v.pause();                // pause() is sync; don't chain .catch
           v.dataset.slPaused = '1';
         }
-      } catch (e) {
-        // ignore
-      }
+      } catch (_) { /* ignore */ }
     });
-  };
+  }
 
   const resumeVideos = () => {
     document.querySelectorAll('video[data-sl-paused="1"]').forEach(v => {
@@ -366,30 +318,22 @@
   // --- DOM observer -> gate + inject + open ---
   const onDOMChange = throttle(async () => {
     const storyId = getCurrentStoryIdFromURL();
+    const own = await isOnOwnStory();
 
-    if (await isOnOwnStory()) {
-      window.dispatchEvent(new CustomEvent('storylister:show_panel'));
-      ensureInjected();
-      pauseVideosIfNeeded();
-
-      if (storyId && storyId !== state.currentStoryId) {
-        state.currentStoryId = storyId;
-        state.lastAutoOpenedStoryId = null;      // allow one open for this story
-        state.userClosedViewers = false;         // reset user close state for new story
-        if (state.stopPaginate) { state.stopPaginate(); state.stopPaginate = null; }
-        if (DEBUG) console.log('[Storylister] Story changed:', storyId);
-        autoOpenViewers();
-        cleanupOldStories(10);
-      } else if (!storyId) {
-        // No id in URL (first story view) — still open Seen by
-        state.lastAutoOpenedStoryId = null;
-        state.userClosedViewers = false;
-        if (state.stopPaginate) { state.stopPaginate(); state.stopPaginate = null; }
-        autoOpenViewers();
-      }
-    } else {
+    if (!own) {
       window.dispatchEvent(new CustomEvent('storylister:hide_panel'));
-      if (state.stopPaginate) { state.stopPaginate(); state.stopPaginate = null; }
+      resetStoryState();
+      return;
+    }
+
+    window.dispatchEvent(new CustomEvent('storylister:show_panel'));
+    ensureInjected();
+    pauseVideosIfNeeded();
+
+    if (storyId && storyId !== state.currentStoryId) {
+      resetStoryState();
+      state.currentStoryId = storyId;
+      autoOpenViewers();
     }
   }, 200);
 
