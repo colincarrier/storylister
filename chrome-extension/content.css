@@ -1,21 +1,22 @@
 /* Storylister Extension Styles - Exact UI from Mock Instagram */
 
-/* Root rail */
+/* The container never blocks clicks outside the panel */
 #storylister-right-rail {
-  position: fixed;
-  top: 12px;
-  right: 12px;
-  width: 380px;
-  height: calc(100vh - 24px);
+  position: fixed !important;
+  top: 12px !important;
+  right: 12px !important;
+  width: 380px !important;
+  max-width: calc(100vw - 24px) !important;
+  max-height: calc(100vh - 24px) !important;
+  z-index: 2147483646 !important;  /* below IG dialog which often hits max */
+  pointer-events: none !important;  /* let IG receive clicks */
   display: none;
-  z-index: 2147483646;
-  pointer-events: none;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
 
-#storylister-right-rail.active {
-  display: flex;
-}
+/* Only panel catches events */
+#storylister-right-rail.active { display: block !important; }
+#storylister-right-rail .storylister-panel { pointer-events: auto !important; }
 
 #storylister-right-rail * {
   box-sizing: border-box;
@@ -23,7 +24,7 @@
 
 /* Panel shell */
 .storylister-panel {
-  pointer-events: auto;
+  pointer-events: auto !important;
   width: 100%;
   height: 100%;
   background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 50%, #6d28d9 100%);
@@ -455,27 +456,14 @@
   font-size: 14px;
 }
 
-/* Responsive Panel Fixes - Ensures visibility at all window sizes */
-#storylister-right-rail {
-  position: fixed !important;
-  top: 12px !important;
-  right: 12px !important;
-  width: 380px !important;
-  max-width: calc(100vw - 24px) !important;
-  max-height: calc(100vh - 24px) !important;
-  z-index: 2147483647 !important; /* Maximum z-index */
-  overflow-y: auto !important;
-  overflow-x: hidden !important;
-}
-
-#storylister-right-rail.active {
-  display: block !important;
-}
+/* Keep IG dialog above dark scrim issues */
+[role="dialog"][aria-modal="true"] { z-index: 2147483647 !important; }
 
 /* Responsive sizing for tablets */
 @media (max-width: 768px) {
   #storylister-right-rail {
-    width: calc(100vw - 24px) !important;
+    right: 0 !important;
+    width: min(380px, 100vw) !important;
     top: 60px !important; /* Below Instagram header */
   }
   
