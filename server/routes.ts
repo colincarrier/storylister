@@ -83,7 +83,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         sync: {
           get: (keys, callback) => {
             const data = {
-              pro: false,
+              proMode: true,  // Set to true to bypass all account checks
               autoOpen: true,
               accountHandle: 'testuser'
             };
@@ -131,6 +131,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
     localStorage.setItem('panel_story_store', JSON.stringify(storyData));
     localStorage.setItem('panel_story_store_hash', JSON.stringify({ sid: '12345', sizes: [['12345', 5]] }));
+
+    // Force the URL to look like a stories page for the extension
+    window.history.pushState({}, '', '/stories/testuser/12345/');
+    
+    // Add mock "Seen by" elements that the extension looks for
+    const seenByLink = document.createElement('a');
+    seenByLink.href = '/seen_by/';
+    seenByLink.style.display = 'none';
+    document.body.appendChild(seenByLink);
+    
+    // Add mock navigation with profile picture so detectActiveUsername works
+    const nav = document.createElement('nav');
+    nav.style.display = 'none';
+    const navLink = document.createElement('a');
+    navLink.href = '/testuser';
+    const profileImg = document.createElement('img');
+    profileImg.alt = "testuser's profile picture";
+    profileImg.src = 'data:image/svg+xml,<svg/>';
+    navLink.appendChild(profileImg);
+    nav.appendChild(navLink);
+    document.body.appendChild(nav);
 
     // Helper functions
     function togglePanel() {
@@ -180,10 +201,31 @@ export async function registerRoutes(app: Express): Promise<Server> {
   <script src="/chrome-extension/content.js"></script>
   
   <script>
-    // Auto-show panel after load
+    // Force show panel after everything loads
     setTimeout(() => {
-      togglePanel();
-    }, 500);
+      // First ensure the extension has loaded
+      if (typeof showRightRail === 'function') {
+        console.log('[Preview] Calling showRightRail directly');
+        showRightRail();
+      } else {
+        console.log('[Preview] showRightRail not found, trying toggle');
+        togglePanel();
+      }
+      
+      // If panel still not visible, try forcing it
+      setTimeout(() => {
+        const rail = document.getElementById('storylister-right-rail');
+        if (rail && !rail.classList.contains('active')) {
+          console.log('[Preview] Force-activating panel');
+          rail.classList.add('active');
+          rail.style.display = 'flex';
+          rail.style.right = '0';
+          
+          // Also dispatch the data event to load viewers
+          window.dispatchEvent(new CustomEvent('storylister:data_updated', { detail: { storyId: '12345' } }));
+        }
+      }, 1000);
+    }, 2000);
   </script>
 </body>
 </html>`);
