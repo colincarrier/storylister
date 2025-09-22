@@ -1,0 +1,279 @@
+Short answer: **Claude’s two fixes match what I’ve been recommending** (drop the `referrerpolicy/crossorigin` on avatars and **use one consistent store key** for the story). Where we were different was mostly in *how much* code we wrapped around those ideas. Below is a **minimal, surgical patch set** that:
+
+* fixes **profile pics** (no more `ERR_BLOCKED_BY_RESPONSE.NotSameOrigin`)
+* makes **data appear immediately** (no 30‑second lag / stale list)
+* keeps the **count in sync** with IG (dedup)
+* makes the panel **fit the viewport** (no hidden bottom buttons)
+* keeps **Insights modal on top**
+* avoids console spam
+
+I’ve kept this to **small diffs**—no over‑engineering.
+
+---
+
+## 1) `content.js` — avatar + field names
+
+**Why**: IG’s CDN blocks images when `referrerpolicy/crossorigin` are present. Also, your UI expects `profilePic`, but the backend sends `profile_pic_url`.
+
+**Patch**
+
+```js
+// ADD once near your render helpers
+function slAvatarHTML(url, username) {
+  // Inline SVG fallback with the user's initial
+  const initial = (username || 'U').slice(0,1).toUpperCase();
+  const fallback = `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'%3E%3Crect width='40' height='40' fill='%23e4e4e7'/%3E%3Ctext x='50%25' y='50%25' text-anchor='middle' dy='.35em' fill='%23666' font-size='20'%3E${initial}%3C/text%3E%3C/svg%3E`;
+
+  if (!url) return `<img class="sl-avatar" src="${fallback}" alt="${username||''}">`;
+
+  // IMPORTANT: no referrerpolicy / crossorigin here
+  return `<img class="sl-avatar" src="${url}" loading="lazy"
+          onerror="this.onerror=null;this.src='${fallback}'" alt="${username||''}">`;
+}
+```
+
+Now, **everywhere you render a viewer row**, normalize fields once and use the helper:
+
+```js
+// Before you build each row item:
+const name = v.full_name || v.displayName || v.name || v.username || 'Anonymous';
+const user = v.username || ''; 
+const pic  = v.profile_pic_url || v.profilePic || '';
+const verified = !!v.is_verified;
+
+// Example usage inside your template:
+const avatar = slAvatarHTML(pic, user);
+const badge  = verified ? '<span class="sl-badge sl-verified">✓</span>' : '';
+// ...insert `avatar` and `badge` into your row HTML
+```
+
+> If you previously used `<img ... referrerpolicy="no-referrer">` or `crossorigin="anonymous"`, **remove those attributes**.
+
+---
+
+## 2) `content-backend.js` — one store key + immediate mirror
+
+**Why**: Your backend was storing under one key (mediaId) while the UI read another (URL ID). We’ll use **the same key in both places**: “URL story id if present, otherwise the path”.
+
+**Patch**
+
+```js
+// ADD near the top
+function currentStoreKey() {
+  const m = location.pathname.match(/\/stories\/[^/]+\/(\d+)/);
+  return m ? m[1] : location.pathname;
+}
+```
+
+**Replace your mirror function** with a tiny, consistent version:
+
+```js
+function mirrorToLocalStorageDebounced() {
+  if (state.mirrorTimer) return;
+  state.mirrorTimer = setTimeout(() => {
+    state.mirrorTimer = null;
+
+    // Aggregate all viewers we’ve captured for this story
+    const all = new Map();
+    for (const [, map] of state.viewerStore) {
+      for (const [id, viewer] of map) {
+        // Dedup by username when available; fallback to id
+        const key = viewer.username || id;
+        if (!all.has(key)) all.set(key, viewer);
+      }
+    }
+
+    const key = currentStoreKey();
+    const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+    store[key] = {
+      viewers: Array.from(all.entries()),
+      fetchedAt: Date.now()
+    };
+    localStorage.setItem('panel_story_store', JSON.stringify(store));
+
+    window.dispatchEvent(new CustomEvent('storylister:data_updated', {
+      detail: { storyId: key }
+    }));
+  }, 200);
+}
+```
+
+**Auto‑open first story (no numeric id yet)**—change the story change check to fire on initial load:
+
+```js
+// Where you previously had: if (storyId && storyId !== state.currentStoryId) { ... }
+if (storyId !== state.currentStoryId || !state.currentStoryId) {
+  resetStoryState?.();
+  state.currentStoryId = storyId || 'first-story';
+  autoOpenViewers();
+}
+```
+
+> This addresses your “first story didn’t auto-open, later ones did” symptom.
+
+---
+
+## 3) `content.js` — read via the same key + dedup before showing
+
+**Why**: UI must read the same key as the backend and dedup to match IG’s count exactly.
+
+**Patch**
+
+```js
+function loadViewersFromStorage() {
+  const m = location.pathname.match(/\/stories\/[^/]+\/(\d+)/);
+  const key = m ? m[1] : location.pathname;
+
+  const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+  const data  = store[key];
+  if (!data?.viewers) return;
+
+  // Dedup by username (or id) to keep counts aligned with IG
+  const unique = new Map();
+  for (const [, v] of data.viewers) {
+    const k = v.username || v.id;
+    if (!unique.has(k)) unique.set(k, v);
+  }
+
+  const viewers = Array.from(unique.values());
+  // update counts & render with normalized fields (see section #1)
+  updateCounts(viewers.length);
+  renderViewerList(viewers);
+}
+```
+
+Make sure you already have:
+
+```js
+window.addEventListener('storylister:data_updated', loadViewersFromStorage);
+```
+
+---
+
+## 4) `content.css` — keep panel inside viewport + bring modals to front
+
+**Why**: Bottom buttons going off-screen and the Insights modal appearing behind the panel.
+
+**Patch (append to your CSS)**
+
+```css
+/* Keep the shell un-intrusive */
+#storylister-right-rail{
+  position: fixed !important;
+  top: 12px !important;
+  right: 12px !important;
+  max-height: calc(100vh - 24px) !important;
+  max-width: calc(100vw - 24px) !important;
+  z-index: 2147483646 !important; /* panel layer */
+}
+
+/* Make panel content flex so list scrolls, footer stays visible */
+.storylister-panel{
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  max-height: calc(100vh - 24px) !important;
+}
+
+.storylister-results{
+  flex: 1 1 auto;
+  min-height: 0;           /* allows flex child to shrink */
+  overflow-y: auto;
+}
+
+/* Insights / manage-tags modals above everything */
+.sl-modal-overlay{
+  position: fixed;
+  inset: 0;
+  z-index: 2147483647 !important; /* above the panel */
+}
+```
+
+---
+
+## 5) Pagination (keep it simple) — only when the dialog is open
+
+If you trimmed pagination earlier and want a reliable, *simple* scroller:
+
+```js
+function startPagination(scroller, maxMs = 5000) {
+  const start = Date.now();
+  let stopped = false;
+
+  const tick = () => {
+    if (stopped || !document.contains(scroller)) return;
+    if (Date.now() - start > maxMs) return;
+
+    scroller.scrollTop = scroller.scrollHeight;
+
+    // slower near bottom, a bit faster earlier
+    const atBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 8;
+    setTimeout(tick, atBottom ? 500 : 200);
+  };
+  tick();
+  return () => { stopped = true; };
+}
+```
+
+Call it **after** the IG viewer dialog opens:
+
+```js
+setTimeout(() => {
+  const dlg = document.querySelector('[role="dialog"]');
+  if (!dlg) return;
+  const scroller =
+    dlg.querySelector('[style*="overflow-y"]') ||
+    Array.from(dlg.querySelectorAll('div')).find(el => el.scrollHeight > el.clientHeight + 40) ||
+    dlg;
+  if (scroller) state.stopPagination = startPagination(scroller);
+}, 400);
+```
+
+---
+
+## 6) Clean up noise & reflows
+
+* Wrap any `console.log` in `if (DEBUG) ...` (those “Detected user from profile pic alt:” lines are flooding your console).
+* Make sure you’re **not** setting `pointer-events: none` on the entire right‑rail without enabling them on `.storylister-panel` (you already have this, keep it).
+* Don’t call `preventDefault/stopPropagation` globally—only inside your own panel.
+
+---
+
+## 7) Quick sanity check (takes \~30 seconds)
+
+1. **Hard refresh** on your story page.
+2. Run this in the console once after the first viewer list opens:
+
+```js
+// Avatar sanity: first img in Storylister list should be a real CDN URL (no CORS attrs)
+document.querySelector('.sl-avatar')?.outerHTML
+
+// Storage keys match?
+const key = (location.pathname.match(/\/stories\/[^/]+\/(\d+)/)||[])[1] || location.pathname;
+const s = JSON.parse(localStorage.getItem('panel_story_store')||'{}');
+console.log('store keys:', Object.keys(s), 'current key:', key, 'has?', !!s[key]);
+
+// Count aligned?
+const igCount = document.querySelector('[role="dialog"]')?.querySelectorAll('a[role="link"],div[role="button"]').length;
+const slCount = (s[key]?.viewers || []).length;
+console.log('IG visible rows ~', igCount, 'SL stored', slCount);
+```
+
+You should now see:
+
+* profile pics rendering (no red image errors),
+* the panel list filling **within a second or two** after you open IG’s viewer dialog,
+* the count in Storylister matching IG once the IG list settles (we dedup on username),
+* Insights modal appearing above the panel,
+* bottom buttons always visible.
+
+---
+
+### TL;DR on “Is Claude’s fix the same as yours?”
+
+Yes—the **two essential fixes are identical** to what I’ve been pushing:
+
+1. **Remove `referrerpolicy/crossorigin`** from avatars, and
+2. **Use a single store key** (URL id if present, else pathname) across backend + UI.
+
+What I’ve given you here are **tight, line‑level patches** to drop in without changing your architecture or UI. If anything still feels off after these, send me your current `content.js` and `content-backend.js` again and I’ll mark the exact places where your build differs from the snippets above.
