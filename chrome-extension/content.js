@@ -401,8 +401,8 @@
       
       try {
         // Prefer the active media announced by backend
-        const urlId = location.pathname.match(/\/stories\/[^\/]+\/(\d+)/)?.[1];
-        const currentKey = ACTIVE_MEDIA_ID_FROM_BACKEND || urlId;
+        const m = location.pathname.match(/\/stories\/[^\/]+\/(\d+)/);
+        const currentKey = ACTIVE_MEDIA_ID_FROM_BACKEND || (m ? m[1] : location.pathname);
         
         if (!currentKey) {
           // Try legacy localStorage format or use last key
@@ -481,7 +481,7 @@
           storyMeta.domTotal = viewerData.length;
           storyMeta.collectedCount = viewers.size;
           
-          console.log(`[Storylister] Loaded ${viewers.size} viewers for story ${currentStoryId}`);
+          // console.log(`[Storylister] Loaded ${viewers.size} viewers for story ${currentStoryId}`);
           updateViewerList();
         }
       } catch (e) {
@@ -502,31 +502,36 @@
   
   // Load viewers from storage (backwards compatibility wrapper)
   function loadViewersFromStorage() {
-    try {
-      const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
-      const story = store[slStoreKey()];
-      if (!story || !Array.isArray(story.viewers)) return;
+    const m = location.pathname.match(/\/stories\/[^/]+\/(\d+)/);
+    const key = m ? m[1] : location.pathname;
 
-      viewers.clear();
-      story.viewers.forEach(([id, v], i) => {
-        viewers.set(v.username || id, {
-          id: v.id || id,
-          username: v.username || '',
-          displayName: v.full_name || v.displayName || v.username || 'Anonymous',
-          profilePic: v.profile_pic_url || v.profilePic || '',
-          isVerified: !!v.is_verified,
-          isFollower: !!v.followed_by_viewer,
-          isFollowing: !!v.follows_viewer,
-          viewedAt: v.viewedAt || v.timestamp || Date.now(),
-          originalIndex: Number.isFinite(v.originalIndex) ? v.originalIndex : i
-        });
-      });
+    const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+    const data = store[key];
+    if (!data?.viewers) return;
 
-      updateViewerList();
-      // console.log(`[Storylister] Loaded ${viewers.size} viewers for story ${slStoreKey()}`);
-    } catch (e) {
-      console.error('[Storylister] load error:', e);
+    // Dedup by username (or id) to keep counts aligned with IG
+    const unique = new Map();
+    for (const [, v] of data.viewers) {
+      const k = v.username || v.id;
+      if (!unique.has(k)) unique.set(k, v);
     }
+
+    viewers.clear();
+    Array.from(unique.values()).forEach((v, i) => {
+      viewers.set(v.username || v.id, {
+        id: v.id || v.pk || v.username,
+        username: v.username || '',
+        displayName: v.full_name || v.displayName || v.username || 'Anonymous',
+        profilePic: v.profile_pic_url || v.profilePic || '',
+        isVerified: !!v.is_verified,
+        isFollower: !!v.followed_by_viewer,
+        isFollowing: !!v.follows_viewer,
+        viewedAt: v.viewedAt || v.timestamp || Date.now(),
+        originalIndex: Number.isFinite(v.originalIndex) ? v.originalIndex : i
+      });
+    });
+    
+    updateViewerList();
   }
   
   // Toggle tag
@@ -1769,9 +1774,8 @@
   }
   
   function slStoreKey() {
-    const id = getCurrentStoryIdFromURL();
-    const owner = getStoryOwnerFromURL();
-    return id || owner || 'current';
+    const m = location.pathname.match(/\/stories\/[^/]+\/(\d+)/);
+    return m ? m[1] : location.pathname;
   }
   
   // Ensure button handlers work (delegation for dynamic elements)

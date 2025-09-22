@@ -143,30 +143,28 @@
     state.mirrorTimer = setTimeout(() => {
       state.mirrorTimer = null;
 
+      // Aggregate all viewers we've captured for this story
+      const all = new Map();
+      for (const [, map] of state.viewerStore) {
+        for (const [id, viewer] of map) {
+          // Dedup by username when available; fallback to id
+          const key = viewer.username || id;
+          if (!all.has(key)) all.set(key, viewer);
+        }
+      }
+
       const key = currentStoreKey();
       const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
-
-      // collapse in-memory Map → the array format the UI expects
-      const out = {};
-      for (const [mediaId, viewersMap] of state.viewerStore) {
-        out[mediaId] = Array.from(viewersMap.entries());
-      }
-      
-      // always keep the latest for the current store key
       store[key] = {
-        viewers: out[key] || out[Object.keys(out)[0]] || [],
+        viewers: Array.from(all.entries()),
         fetchedAt: Date.now()
       };
+      localStorage.setItem('panel_story_store', JSON.stringify(store));
 
-      try {
-        localStorage.setItem('panel_story_store', JSON.stringify(store));
-        window.dispatchEvent(new CustomEvent('storylister:data_updated', {
-          detail: { storyId: key }
-        }));
-      } catch (e) {
-        console.error('[Storylister] Storage error:', e);
-      }
-    }, 1000);  // debounce to avoid log spam + churn
+      window.dispatchEvent(new CustomEvent('storylister:data_updated', {
+        detail: { storyId: key }
+      }));
+    }, 200);
   }
 
   // --- Secure bridge from page to extension context ---
