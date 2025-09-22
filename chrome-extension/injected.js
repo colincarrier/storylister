@@ -46,17 +46,7 @@
           data.media_id || data.reel?.id || pathId || 'unknown'
         );
 
-        const formatted = viewers.map((v, idx) => ({
-          id: String(v.id || v.pk || idx),
-          username: v.username || '',
-          full_name: v.full_name || '',
-          profile_pic_url: v.profile_pic_url || '',
-          is_verified: !!v.is_verified,
-          followed_by_viewer: !!v.followed_by_viewer,
-          follows_viewer: !!v.follows_viewer,
-          originalIndex: idx,
-          viewedAt: v.timestamp || v.viewed_at || Date.now()
-        }));
+        const formatted = viewers.map((v, idx) => normalizeViewer(v, idx));
 
         window.postMessage({
           type: 'STORYLISTER_VIEWERS_CHUNK',
@@ -115,17 +105,14 @@
           
           if (!mediaId) return;
           
-          const formatted = viewers.map((u, idx) => ({
-            id: String(u.id || u.pk || idx),
-            username: u.username || '',
-            full_name: u.full_name || '',
-            profile_pic_url: u.profile_pic_url || '',
-            is_verified: !!u.is_verified,
-            followed_by_viewer: !!u.friendship_status?.followed_by,
-            follows_viewer: !!u.friendship_status?.following,
-            originalIndex: idx,
-            viewedAt: u.timestamp || u.viewed_at || Date.now()
-          }));
+          const formatted = viewers.map((u, idx) => {
+            // Handle friendship_status for XHR responses
+            if (u.friendship_status) {
+              u.followed_by_viewer = u.friendship_status.followed_by;
+              u.follows_viewer = u.friendship_status.following;
+            }
+            return normalizeViewer(u, idx);
+          });
           
           if (formatted.length > 0) {
             window.postMessage({
@@ -146,68 +133,21 @@
     return originalSend.apply(this, args);
   };
 
-  // Find the scrollable container inside the "Viewers" dialog
-  function findScrollableInViewersDialog() {
-    const dlg = document.querySelector('[role="dialog"]');
-    if (!dlg) return null;
+  // Normalize viewer data from various Instagram API shapes
+  function normalizeViewer(v, idx) {
+    const n = v?.node || v?.user || v; // unify shapes from GraphQL/REST
+    const id = String(n?.id ?? n?.pk ?? n?.pk_id ?? idx);
+    const username = n?.username || '';
+    const full_name = n?.full_name || '';
+    const profile_pic_url = n?.profile_pic_url_hd || n?.profile_pic_url || '';
 
-    // Most reliable: inline overflow-y styles
-    const styled = dlg.querySelector('[style*="overflow-y"]') ||
-                   dlg.querySelector('[style*="overflow: hidden auto"]');
-    if (styled) return styled;
-
-    // Fallback: largest scrollable DIV
-    return Array.from(dlg.querySelectorAll('div'))
-      .find(el => el.scrollHeight > el.clientHeight + 40) || dlg;
-  }
-
-  // Very fast pagination using End key
-  function pageAllViewers() {
-    const pane = findScrollableInViewersDialog();
-    if (!pane) return;
-
-    let lastH = 0, stableCount = 0, running = true;
-    const maxTime = 8000; // 8 seconds max
-    const startTime = Date.now();
-    
-    const tick = () => {
-      if (!running || !document.contains(pane)) return;
-      if (Date.now() - startTime > maxTime) return;
-
-      // focus + End key (mirrors user behavior)
-      pane.focus();
-      const endKey = new KeyboardEvent('keydown', { 
-        key: 'End', 
-        code: 'End', 
-        keyCode: 35, 
-        which: 35, 
-        bubbles: true
-      });
-      pane.dispatchEvent(endKey);
-      pane.scrollTop = pane.scrollHeight;
-
-      const h = pane.scrollHeight;
-      if (h === lastH) {
-        stableCount++;
-        if (stableCount >= 3) { 
-          running = false; 
-          return; 
-        }
-      } else {
-        stableCount = 0; 
-        lastH = h;
-      }
-      setTimeout(tick, 120);
+    return {
+      id, username, full_name, profile_pic_url,
+      is_verified: !!n?.is_verified,
+      followed_by_viewer: !!n?.followed_by_viewer,
+      follows_viewer: !!n?.follows_viewer,
+      originalIndex: idx,
+      viewedAt: n?.timestamp || n?.viewed_at || Date.now()
     };
-    setTimeout(tick, 300);
   }
-
-  // Start paging the moment the "Viewers" dialog appears
-  const dlgObserver = new MutationObserver(() => {
-    const title = document.querySelector('[role="dialog"] h2');
-    if (title && title.textContent?.trim() === 'Viewers') {
-      pageAllViewers();
-    }
-  });
-  dlgObserver.observe(document.documentElement || document.body, { childList: true, subtree: true });
 })();

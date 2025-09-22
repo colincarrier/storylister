@@ -1,0 +1,187 @@
+F. On SPA mutations, ensure only one paginator and clean story transitions:
+
+const onDOMChange = throttle(async () => {
+  const storyId = getCurrentStoryIdFromURL();
+  const own = await isOnOwnStory();
+
+  if (!own) {
+    window.dispatchEvent(new CustomEvent('storylister:hide_panel'));
+    resetStoryState();
+    return;
+  }
+
+  window.dispatchEvent(new CustomEvent('storylister:show_panel'));
+  ensureInjected();
+  pauseVideosIfNeeded();
+
+  if (storyId && storyId !== state.currentStoryId) {
+    resetStoryState();
+    state.currentStoryId = storyId;
+    autoOpenViewers();
+  }
+}, 200);
+
+
+Keep your existing window.addEventListener('message', …) + mirrorToLocalStorageDebounced(); they’re good.
+
+Do not add any global keydown/wheel handlers; if you already added them, remove them unless they’re scoped to #storylister-right-rail with a .closest() guard.
+
+2) injected.js — normalize viewer payloads (fixes undefined names/avatars)
+
+Add a normalizer right before you format and post the viewers:
+
+function normalizeViewer(v, idx) {
+  const n = v?.node || v?.user || v; // unify shapes from GraphQL/REST
+  const id = String(n?.id ?? n?.pk ?? n?.pk_id ?? idx);
+  const username = n?.username || '';
+  const full_name = n?.full_name || '';
+  const profile_pic_url = n?.profile_pic_url_hd || n?.profile_pic_url || '';
+
+  return {
+    id, username, full_name, profile_pic_url,
+    is_verified: !!n?.is_verified,
+    followed_by_viewer: !!n?.followed_by_viewer,
+    follows_viewer: !!n?.follows_viewer,
+    originalIndex: idx,
+    viewedAt: n?.timestamp || n?.viewed_at || Date.now()
+  };
+}
+
+
+Then replace the formatting step with:
+
+const formattedViewers = viewers.map((v, idx) => normalizeViewer(v, idx));
+
+
+This stops “undefined” names and gives the best available avatar URL.
+
+3) content.css — layering + click‑through outside the panel
+/* The container never blocks clicks outside the panel */
+#storylister-right-rail {
+  position: fixed !important;
+  top: 12px !important;
+  right: 12px !important;
+  width: 380px !important;
+  max-width: calc(100vw - 24px) !important;
+  max-height: calc(100vh - 24px) !important;
+  z-index: 2147483646 !important;  /* below IG dialog which often hits max */
+  pointer-events: none !important;  /* let IG receive clicks */
+  display: none;
+}
+
+/* Only panel catches events */
+#storylister-right-rail.active { display: block !important; }
+#storylister-right-rail .storylister-panel { pointer-events: auto !important; }
+
+/* Keep IG dialog above dark scrim issues */
+[role="dialog"][aria-modal="true"] { z-index: 2147483647 !important; }
+
+@media (max-width: 768px) {
+  #storylister-right-rail {
+    right: 0 !important;
+    width: min(380px, 100vw) !important;
+  }
+}
+
+
+This solves: can’t close IG dialog, typing blocked, and panel never “eats” the page.
+
+4) content.js — avatars, safe strings, closeable modals, instantaneous reopen
+
+A. Safe string + avatar HTML helpers (call during render):
+
+function slSafe(s) { return (typeof s === 'string' ? s : '') || ''; }
+
+function slAvatarHTML(url, username) {
+  const initial = (slSafe(username)[0] || 'U').toUpperCase();
+  const fallback = `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'%3E%3Crect width='40' height='40' fill='%23e4e4e7'/%3E%3Ctext x='50%25' y='50%25' text-anchor='middle' dy='.3em' fill='%23666' font-size='20'%3E${initial}%3C/text%3E%3C/svg%3E`;
+
+  if (!url) return `<img class="sl-avatar" src="${fallback}" alt="${slSafe(username)}" />`;
+
+  return `<img class="sl-avatar"
+              src="${url}"
+              referrerpolicy="no-referrer"
+              loading="lazy"
+              onerror="this.onerror=null; this.src='${fallback}'"
+              alt="${slSafe(username)}" />`;
+}
+
+
+B. Keep cache and render instantly on reopen
+No changes needed to your store key (panel_story_store). Ensure the panel’s close button only toggles visibility (do not clear storage or state.viewers). If you currently clear, remove that.
+
+C. Make Manage Tags / Insights modals closeable
+Add a generic close handler once:
+
+document.addEventListener('click', (e) => {
+  const closeBtn = e.target.closest('[data-sl-close]');
+  const backdrop = e.target.classList?.contains('sl-backdrop') ? e.target : null;
+  if (closeBtn || backdrop) {
+    // Hide any Storylister modal
+    document.querySelectorAll('.sl-modal.active').forEach(el => el.classList.remove('active'));
+  }
+}, true);
+
+
+Your modal markup should put data-sl-close on the ✕ button and the backdrop should use class="sl-backdrop"; both exist in your UI—this let’s users close modals reliably.
+
+D. Don’t intercept global keys
+If you added any global keydown to support pagination, remove it or scope it:
+
+document.addEventListener('keydown', (e) => {
+  if (!e.target.closest('#storylister-right-rail')) return; // only inside panel
+  // your keyboard shortcuts here…
+}, true);
+
+5) Message‑listener error (“return true” with no reply)
+
+That error comes from an onMessage that returns true but never calls sendResponse. In every file where you have a listener, do one of these:
+
+// synchronous
+chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
+  // …work…
+  sendResponse({ ok: true });
+  return; // not true
+});
+
+// OR truly async
+chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
+  (async () => {
+    // await work…
+    sendResponse({ ok: true });
+  })();
+  return true; // keep channel open for async
+});
+
+
+If you’re unsure which file, search the codebase for onMessage and fix each instance. This alone eliminates the “message channel closed” spam and any cascading breakage.
+
+Why this set works
+
+Isolation: pointer-events: none on the container plus pointer-events: auto on the panel prevents us from ever “sitting in front” of Instagram’s hit‑targets.
+
+No event conflict: we don’t capture global keys/wheel; pagination is a single timed scroll scoped to the dialog’s scroller.
+
+Resilience: viewer payloads normalized, so names/avatars render; safe fallbacks prevent flicker.
+
+UX: closing our UI or IG’s dialog never clears your cache; reopening Storylister is instant.
+
+Performance: one paginator, one debounced localStorage mirror, throttled observer—no runaways.
+
+Quick validation checklist (do these once after patch)
+
+Hard refresh your story page.
+
+Open your story → panel appears; IG “Seen by” opens automatically; list populates.
+
+Click IG dialog ✕ → it closes. Panel stays. Click our ✕ → panel hides; show again from the toolbar—data is still there.
+
+Type in Search → input accepts text; results filter.
+
+Scroll IG viewer list → no duplicates; no flicker; profile pics show (fallbacks for rare misses).
+
+Navigate to another story → panel follows; no blackouts; counts update.
+
+Console: no “return true” message‑channel errors; mutation logs are bounded.
+
+If anything above still misbehaves, the likely remaining culprit is a stray global event listener or an unfixed onMessage in one of your older modules. Apply the pattern above to those spots and you’ll be set.
