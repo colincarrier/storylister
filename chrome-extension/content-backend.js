@@ -15,6 +15,12 @@
     };
   }
 
+  const idToKey = new Map();
+  
+  function storageKey() {
+    return location.pathname; // works for /stories/<user>/ and /stories/<user>/<id>/
+  }
+  
   const state = {
     injected: false,
     currentKey: null,          // stable key = location.pathname (works with and w/o numeric id)
@@ -23,7 +29,6 @@
     stopPagination: null,
     viewerStore: new Map(),    // Map<storyKey, Map<viewerKey, viewer>>
     mirrorTimer: null,
-    idToKey: new Map(),        // Map<mediaId -> storyKey>
     userOverrodePauseByKey: new Set(),   // remembers you pressed play per story
   };
 
@@ -56,7 +61,7 @@
   };
 
   // ==== [B] UTILITIES ====
-  function getStorageKey() { return location.pathname; }  // first-story safe
+  function getStorageKey() { return storageKey(); }  // first-story safe
 
   function findSeenByButton() {
     return document.querySelector('a[href*="/seen_by/"]') ||
@@ -178,38 +183,19 @@
 
   // ==== [E] AUTO-OPEN — actually works for the first story ====
   async function autoOpenViewersOnceFor(key) {
-    if (!Settings.cache.autoOpen || state.openedForKey.has(key)) return;
-    const btn = await waitForSeenByButton(5000);
+    if (!Settings.cache.autoOpen) return;
+    if (state.openedForKey?.has?.(key)) return;
+    const btn = await waitForSeenByButton();
     if (!btn) return;
     state.openedForKey.add(key);
     try { btn.click(); } catch {}
-
+    
     setTimeout(() => {
       const scroller = findScrollableInDialog();
-      if (!scroller) return;
-
-      // bounded, stall-aware scrolling
-      let lastH = -1, stable = 0, stop = false;
-      state.stopPagination = () => { stop = true; };
-
-      (function tick() {
-        if (stop || !document.contains(scroller)) return;
-
-        const target = getSeenByCount();
-        const loaded = state.viewerStore.get(getStorageKey())?.size || 0;
-        if (target && loaded >= target - 1) return;  // ±1 tolerance
-
-        const h = scroller.scrollHeight;
-        if (h === lastH) {
-          if (++stable >= 8) return;                 // ~8 * 150ms ≈ 1.2s stall -> stop
-        } else {
-          stable = 0;
-          lastH = h;
-        }
-
-        scroller.scrollTop = scroller.scrollHeight;
-        setTimeout(tick, 150);
-      })();
+      if (scroller) {
+        if (state.stopPagination) state.stopPagination();
+        state.stopPagination = startPagination(scroller);
+      }
     }, 350);
   }
 
@@ -242,21 +228,20 @@
     const { mediaId, viewers } = msg.data || {};
     if (!mediaId || !Array.isArray(viewers)) return;
 
-    const activeKey = state.currentKey || getStorageKey();
-    if (!state.idToKey.has(mediaId)) state.idToKey.set(mediaId, activeKey);
-    const key = state.idToKey.get(mediaId);
+    const activeKey = state.currentKey || storageKey();
+    if (!idToKey.has(mediaId)) idToKey.set(mediaId, activeKey);
+    const key = idToKey.get(mediaId);
 
     if (!state.viewerStore.has(key)) state.viewerStore.set(key, new Map());
     const map = state.viewerStore.get(key);
 
-    viewers.forEach((v, i) => {
-      const k = (v.username ? String(v.username).toLowerCase() : null) || String(v.id || i);
+    viewers.forEach((v, idx) => {
+      const k = (v.username ? String(v.username).toLowerCase() : null) || String(v.id || idx);
       const prev = map.get(k) || {};
       map.set(k, { ...prev, ...v });                        // merge to avoid losing flags
     });
 
     mirrorToLocalStorageDebounced(key);
-    window.dispatchEvent(new CustomEvent('storylister:active_media', { detail: { storyId: key } }));
   });
 
 
