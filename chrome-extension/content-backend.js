@@ -109,23 +109,54 @@
     return await canRunForOwner(owner);
   }
 
-  // ==== [C] NATURAL PAUSE — pause only while the IG viewers dialog is open ====
+  // ==== [C] NATURAL PAUSE — pause only while dialog is open, resume when closed ====
+  let dialogCheckInterval = null;
+  
   function pauseVideosWhileViewerOpen() {
     if (!Settings.cache.pauseVideos) return;
-    const dlgOpen = !!document.querySelector('[role="dialog"][aria-modal="true"]');
-    if (!dlgOpen) return; // don't auto-pause when the dialog isn't open
-
-    setTimeout(() => {
-      document.querySelectorAll('video').forEach(v => {
-        if (v.dataset.userPlayed === '1') return; // respect manual play
-        if (!v.paused && !v.dataset.slPaused) {
-          try { v.pause(); v.dataset.slPaused = '1'; } catch {}
-        }
-      });
-    }, 1200); // breaths like a human
+    
+    // Clear any existing interval
+    if (dialogCheckInterval) {
+      clearInterval(dialogCheckInterval);
+      dialogCheckInterval = null;
+    }
+    
+    // Check for dialog state
+    dialogCheckInterval = setInterval(() => {
+      const dlgOpen = !!document.querySelector('[role="dialog"][aria-modal="true"]');
+      
+      if (dlgOpen) {
+        // Pause videos when dialog is open
+        document.querySelectorAll('video').forEach(v => {
+          if (v.dataset.userPlayed === '1') return; // respect manual play
+          if (!v.paused && !v.dataset.slPaused) {
+            try { 
+              v.pause(); 
+              v.dataset.slPaused = '1';
+              console.log('[SL] Paused video while dialog open');
+            } catch {}
+          }
+        });
+      } else {
+        // Resume videos when dialog is closed
+        document.querySelectorAll('video[data-sl-paused="1"]').forEach(v => {
+          try { 
+            v.play();
+            delete v.dataset.slPaused;
+            console.log('[SL] Resumed video after dialog closed');
+          } catch {}
+        });
+      }
+    }, 500); // Check every 500ms
   }
 
   function resumeAnyPausedVideos() {
+    // Clear interval when leaving stories
+    if (dialogCheckInterval) {
+      clearInterval(dialogCheckInterval);
+      dialogCheckInterval = null;
+    }
+    
     document.querySelectorAll('video[data-sl-paused="1"]').forEach(v => {
       try { v.play(); } catch {}
       delete v.dataset.slPaused;
@@ -157,21 +188,11 @@
     return () => { stopped = true; };
   }
 
-  // ==== [E] AUTO-OPEN — first story safe ====
+  // ==== [E] AUTO-OPEN — DISABLED to prevent popup issues ====
   async function autoOpenViewersOnceFor(key) {
-    if (!Settings.cache.autoOpen) return;
-    if (state.openedForKey.has(key)) return;
-    const btn = await waitForSeenByButton(5000);
-    if (!btn) return;
-    state.openedForKey.add(key);
-    try { btn.click(); } catch {}
-    setTimeout(() => {
-      const scroller = findScrollableInDialog();
-      if (scroller) {
-        if (state.stopPagination) state.stopPagination();
-        state.stopPagination = startPagination(scroller);
-      }
-    }, 350);
+    // Disabled auto-opening to prevent viewer list popup issues
+    // Users should manually click the "Seen by" button
+    return;
   }
 
   // ==== [F] MIRROR TO CACHE — key = pathname; write debounced ====
@@ -195,144 +216,85 @@
     }, 300);
   }
 
-  // ==== [G] MESSAGE BRIDGE — correct routing + dedupe ====
+  // ==== [G] MESSAGE BRIDGE — handle both old and new message formats ====
   window.addEventListener('message', (evt) => {
     if (evt.source !== window || evt.origin !== location.origin) return;
     const msg = evt.data;
-    if (!msg || msg.type !== 'STORYLISTER_VIEWERS_CHUNK') return;
+    if (!msg) return;
+    
+    // Handle new format from injected.js
+    if (msg.type === 'sl_viewer_chunk') {
+      const { mediaId, viewers, hasNext } = msg;
+      if (!mediaId || !Array.isArray(viewers)) return;
+      
+      const activeKey = state.currentKey || getStorageKey();
+      if (!state.idToKey.has(mediaId)) state.idToKey.set(mediaId, activeKey);
+      const key = state.idToKey.get(mediaId);
+      
+      if (!state.viewerStore.has(key)) state.viewerStore.set(key, new Map());
+      const map = state.viewerStore.get(key);
+      
+      viewers.forEach((v, idx) => {
+        // dedupe by username (lowercased) or id
+        const viewerKey = (v.username ? String(v.username).toLowerCase() : null) || String(v.id || idx);
+        const prev = map.get(viewerKey) || {};
+        map.set(viewerKey, { ...prev, ...v });
+      });
+      
+      mirrorToLocalStorageDebounced(key);
+      console.log(`[SL] Received ${viewers.length} viewers for story ${key}, hasNext: ${hasNext}`);
+    }
+    // Handle old format (fallback)
+    else if (msg.type === 'STORYLISTER_VIEWERS_CHUNK') {
+      const { mediaId, viewers } = msg.data || {};
+      if (!mediaId || !Array.isArray(viewers)) return;
 
-    const { mediaId, viewers } = msg.data || {};
-    if (!mediaId || !Array.isArray(viewers)) return;
+      const activeKey = state.currentKey || getStorageKey();
+      if (!state.idToKey.has(mediaId)) state.idToKey.set(mediaId, activeKey);
+      const key = state.idToKey.get(mediaId);
 
-    const activeKey = state.currentKey || getStorageKey();
-    if (!state.idToKey.has(mediaId)) state.idToKey.set(mediaId, activeKey);
-    const key = state.idToKey.get(mediaId);
+      if (!state.viewerStore.has(key)) state.viewerStore.set(key, new Map());
+      const map = state.viewerStore.get(key);
 
-    if (!state.viewerStore.has(key)) state.viewerStore.set(key, new Map());
-    const map = state.viewerStore.get(key);
+      viewers.forEach((v, idx) => {
+        // dedupe by username (lowercased) or id
+        const viewerKey = (v.username ? String(v.username).toLowerCase() : null) || String(v.id || idx);
+        const prev = map.get(viewerKey) || {};
+        map.set(viewerKey, { ...prev, ...v });
+      });
 
-    viewers.forEach((v, idx) => {
-      // dedupe by username (lowercased) or id
-      const viewerKey = (v.username ? String(v.username).toLowerCase() : null) || String(v.id || idx);
-      const prev = map.get(viewerKey) || {};
-      map.set(viewerKey, { ...prev, ...v });
-    });
-
-    mirrorToLocalStorageDebounced(key);
+      mirrorToLocalStorageDebounced(key);
+    }
   });
 
-  // Define the injected function that will be inlined
-  function injectedFunction() {
-    'use strict';
-    if (window.__storylisterInjected__) return;
-    window.__storylisterInjected__ = true;
 
-    const origFetch = window.fetch;
-    window.fetch = async function(...args) {
-      const res = await origFetch.apply(this, args);
-
-      try {
-        const url = String(args?.[0] || '');
-        // Only JSON
-        const ct = res.headers?.get('content-type') || '';
-        if (!/json/i.test(ct)) return res;
-
-        const relevant = url.includes('/api/') || url.includes('/graphql') || /viewer|viewers|story|reel|seen/i.test(url);
-        if (!relevant) return res;
-
-        const clone = res.clone();
-        clone.json().then(data => {
-          if (!data) return;
-
-          // Collect viewers from known shapes
-          let viewers = null;
-          if (Array.isArray(data.users)) viewers = data.users;
-          else if (Array.isArray(data.viewers)) viewers = data.viewers;
-          else if (data?.data?.xdt_api__v1__media__story_viewers?.viewers) viewers = data.data.xdt_api__v1__media__story_viewers.viewers;
-          else if (data?.data?.media?.story_viewers?.edges) viewers = data.data.media.story_viewers.edges.map(e => e.node || e.user || e);
-          else if (data?.data?.xdt_api__v1__stories__viewers__connection__edge?.edges) viewers = data.data.xdt_api__v1__stories__viewers__connection__edge.edges.map(e => e.node || e);
-
-          if (!viewers || viewers.length === 0) return;
-
-          // Media id: prefer payload, then URL id
-          const pathId = location.pathname.match(/\/stories\/[^/]+\/(\d+)/)?.[1];
-          const graphId = data?.media_id || data?.data?.media?.id || data?.data?.reel?.id;
-          const mediaId = String(graphId || pathId || Date.now());
-
-          const normalized = viewers.map((v, idx) => normalizeViewer(v, idx));
-
-          window.postMessage({
-            type: 'STORYLISTER_VIEWERS_CHUNK',
-            data: {
-              mediaId,
-              viewers: normalized,
-              totalCount: data.user_count || data.total_viewer_count || normalized.length
-            }
-          }, '*');
-        }).catch(() => {});
-      } catch {}
-      return res;
-    };
-
-    // (Optional) XHR backup for older endpoints
-    const XHR = window.XMLHttpRequest;
-    if (XHR) {
-      const P = XHR.prototype, _open = P.open, _send = P.send;
-      P.open = function(method, url, ...rest) { this.__slUrl = url; return _open.call(this, method, url, ...rest); };
-      P.send = function(...args) {
-        const url = this.__slUrl || '';
-        if (/story_viewers|list_reel_media_viewer|api\/v1\//.test(url)) {
-          this.addEventListener('load', function() {
-            try {
-              const data = JSON.parse(this.responseText);
-              const users = Array.isArray(data?.users) ? data.users : (Array.isArray(data?.viewers) ? data.viewers : null);
-              if (!users) return;
-
-              const pathId = location.pathname.match(/\/stories\/[^/]+\/(\d+)/)?.[1];
-              const mediaId = String(data.media_id || pathId || Date.now());
-              const normalized = users.map((u, idx) => normalizeViewer(u, idx));
-
-              window.postMessage({
-                type: 'STORYLISTER_VIEWERS_CHUNK',
-                data: { mediaId, viewers: normalized, totalCount: data.user_count || normalized.length }
-              }, '*');
-            } catch {}
-          });
-        }
-        return _send.apply(this, args);
-      };
-    }
-
-    function normalizeViewer(v, idx) {
-      const u = v?.user || v?.node?.user || v?.node || v;
-
-      // Robust profile pic: accept only absolute http(s) URLs
-      let pic = u?.profile_pic_url || u?.profile_pic_url_hd || u?.profile_picture_url || '';
-      if (typeof pic !== 'string' || !/^https?:\/\//i.test(pic)) pic = '';
-
-      // Reactions from known shapes; likes -> ❤️
-      const reaction =
-        v?.reaction?.emoji ||
-        v?.story_reaction?.emoji ||
-        v?.latest_reaction?.emoji ||
-        (v?.has_liked ? '❤️' : null);
-
-      return {
-        id: String(u?.id || u?.pk || u?.pk_id || u?.username || idx),
-        username: u?.username || '',
-        full_name: u?.full_name || u?.fullname || u?.name || '',
-        profile_pic_url: pic,
-        is_verified: !!(u?.is_verified || u?.blue_verified || u?.is_verified_badge || u?.verified),
-        followed_by_viewer: !!(u?.followed_by_viewer || u?.is_following),
-        follows_viewer: !!(u?.follows_viewer || u?.is_follower),
-        reaction: reaction || null,
-        originalIndex: idx,
-        viewedAt: v?.timestamp || v?.viewed_at || Date.now()
-      };
+  // ==== [H] INJECT EXTERNAL SCRIPT ====
+  function injectExternalScript() {
+    if (state.injected) return;
+    
+    try {
+      const s = document.createElement('script');
+      // Try chrome.runtime.getURL first
+      if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getURL) {
+        s.src = chrome.runtime.getURL('injected.js');
+        s.onload = () => {
+          console.log('[SL] External script loaded successfully');
+          state.injected = true;
+        };
+        s.onerror = () => {
+          console.warn('[SL] Failed to load external script - extension may need reload');
+          // Don't try inline injection as it will be blocked by CSP
+        };
+        (document.head || document.documentElement).appendChild(s);
+      } else {
+        console.warn('[SL] Chrome runtime not available - extension may need reload');
+      }
+    } catch (e) {
+      console.error('[SL] Script injection failed:', e);
     }
   }
 
-  // ==== [H] MAIN OBSERVER — first story, inject, pause only when dialog open ====
+  // ==== [I] MAIN OBSERVER — first story, inject, pause only when dialog open ====
   const onDOMChange = (() => {
     let lastKey = null;
     return async () => {
@@ -345,17 +307,9 @@
       }
 
       window.dispatchEvent(new CustomEvent('storylister:show_panel'));
-      // if injection fails because context reloaded, we still keep running
-      if (!state.injected) {
-        try {
-          const s = document.createElement('script');
-          // inline the payload to avoid getURL() errors on context reload
-          s.textContent = `(${injectedFunction.toString()})();`;
-          document.documentElement.appendChild(s);
-          s.remove();
-          state.injected = true;
-        } catch {}
-      }
+      
+      // Try to inject the script
+      injectExternalScript();
 
       const key = getStorageKey();
       if (key !== lastKey) {
