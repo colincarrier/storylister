@@ -112,6 +112,47 @@
   
   const storage = new HybridStorage();
   
+  // Helper to derive the store key from current path
+  function slStoreKey() {
+    // Always use the pathname
+    return location.pathname;
+  }
+
+  // Load cache map for current story
+  function loadCacheMapForCurrent() {
+    const key = location.pathname;
+    try {
+      const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+      const raw = store[key];
+      if (!raw || !Array.isArray(raw.viewers)) return new Map();
+      return new Map(raw.viewers); // Map<viewerKey, viewer>
+    } catch { return new Map(); }
+  }
+
+  // Render viewers from cache
+  function renderViewersFromCache() {
+    const map = loadCacheMapForCurrent();
+    viewers.clear();
+    
+    for (const [key, v] of map) {
+      viewers.set(v.username || key, {
+        id: v.id || v.pk || v.username,
+        username: v.username || '',
+        displayName: v.full_name || v.displayName || v.username || 'Anonymous',
+        profilePic: v.profile_pic_url || v.profilePic || '',
+        isVerified: !!v.is_verified,
+        isFollower: !!v.followed_by_viewer,
+        isFollowing: !!v.follows_viewer,
+        reaction: v.reaction || null,
+        viewedAt: v.viewedAt || v.timestamp || Date.now(),
+        originalIndex: v.originalIndex || 0,
+        isTagged: taggedUsers.has(v.username || v.id)
+      });
+    }
+    
+    updateViewerList();
+  }
+  
   // State management
   let isActive = false;
   let rightRail = null;
@@ -122,7 +163,8 @@
     query: '',
     type: 'all',
     sort: 'recent', // 'recent', 'oldest', 'original'
-    showTagged: false
+    showTagged: false,
+    showReacts: false
   };
   let taggedUsers = new Set();
   let isProMode = false;
@@ -375,6 +417,11 @@
       filteredViewers = filteredViewers.filter(v => v.isTagged);
     }
 
+    // Apply reactions filter
+    if (currentFilters.showReacts) {
+      filteredViewers = filteredViewers.filter(v => !!v.reaction);
+    }
+
     // Apply sorting
     switch (currentFilters.sort) {
       case 'oldest':
@@ -524,7 +571,9 @@
         isFollower: !!v.followed_by_viewer,
         isFollowing: !!v.follows_viewer,
         viewedAt: v.viewedAt || v.timestamp || Date.now(),
-        originalIndex: Number.isFinite(v.originalIndex) ? v.originalIndex : i
+        originalIndex: Number.isFinite(v.originalIndex) ? v.originalIndex : i,
+        reaction: v.reaction || null,
+        isTagged: taggedUsers.has(v.username || v.id)
       });
     });
     
@@ -752,6 +801,9 @@
           <div class="storylister-filter-buttons">
             <div class="filter-buttons-main">
               <button class="filter-btn active" data-filter-type="all">All</button>
+              <button class="filter-btn" data-filter-reacts="true">
+                ❤️ Reacts
+              </button>
               <button class="filter-btn" data-filter-type="verified">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="#1877F2" style="display: inline; vertical-align: middle;">
                   <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
@@ -1273,6 +1325,13 @@
       e.currentTarget.classList.toggle('active', currentFilters.showTagged);
       updateViewerList();
     });
+
+    // Reacts filter
+    document.querySelector('[data-filter-reacts]')?.addEventListener('click', (e) => {
+      currentFilters.showReacts = !currentFilters.showReacts;
+      e.currentTarget.classList.toggle('active', currentFilters.showReacts);
+      updateViewerList();
+    });
     
     // Sort toggle - three-way: newest -> oldest -> original
     document.getElementById('sl-sort')?.addEventListener('click', (e) => {
@@ -1366,8 +1425,10 @@
   // Listen for data updates
   window.addEventListener('storylister:data_updated', (e) => {
     // console.log('[Storylister] Data updated:', e.detail);
-    loadViewersFromStorage();
-    updateViewerList();
+    const currentKey = slStoreKey();
+    if (e.detail?.storyId === currentKey) {
+      renderViewersFromCache();
+    }
   });
   
   // Listen for settings updates from chrome.storage
