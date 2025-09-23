@@ -1,0 +1,292 @@
+Thanks for shipping the new package and the recording. I went through the files you attached (`content‑backend.js`, `injected.js`, and `content.js`) and compared them to what was working before. There are two regressions that explain the “whole page hung / nothing loads” behavior, plus a few smaller bugs that keep the first story from ever populating:
+
+---
+
+## What’s actually breaking the page
+
+1. **Inline script injection (older build) tripped Instagram’s CSP**
+   In one of the recent builds the content script injected the payload with:
+
+   ```js
+   s.textContent = `(${injectedFunction.toString()})();`
+   ```
+
+   That produces the exact error you screenshotted:
+
+   > Refused to execute inline script ... violates Content Security Policy …
+   > When that fires repeatedly during a MutationObserver storm, the tab becomes unresponsive.
+
+   ✅ Your current `content‑backend.js` (the one you just uploaded) **does** inject via:
+
+   ```js
+   s.src = chrome.runtime.getURL('injected.js')
+   ```
+
+   (no inline). Keep that. Don’t fall back to inlining.
+
+2. **The UI’s auto‑clicker is fighting the backend**
+   In `content.js` there’s an **autoTriggerViewerCollection()** routine (and a “humanClick” helper) that scans **all** `<span>` elements for the word “viewer”/“view” and fake‑clicks them on timers. That fights with the backend’s `autoOpenViewers()` and is exactly the sort of thing that:
+
+   * keeps the IG dialog “loading” spinner running,
+   * keeps the video instantly re‑pausing,
+   * and can lock the tab if it keeps clicking.
+
+   This didn’t exist (or was disabled) back in the “stable” versions, which is why the earlier builds felt lighter.
+
+---
+
+## Why the first story still doesn’t populate
+
+* In `content‑backend.js` you gate `isOnOwnStory()` by **`hasSeenByUI()`**. On the *first* story the “Seen by” button often appears a second later, so the gate returns false and nothing starts. Even though you have a `waitForSeenByButton()` later, you never reach it for the first slide because of that early return.
+
+* When network responses arrive while you are navigating, chunks can be misrouted (count off by 1–2) unless we map each **`mediaId → pathname`** at the moment the chunk arrives.
+
+* The UI script is also trying to auto‑open and paginate (the auto‑clicker), so when both sides scroll/paginate at once Instagram’s dialog can get stuck.
+
+---
+
+## Targeted hot‑fixes (minimal, surgical)
+
+> These are deliberately small changes; you can paste them as replacements in the current files. They remove the causes of the hang, make the first story reliable, stop the forced pausing, and prepare reactions (“❤️ reacts”).
+
+### 1) `content‑backend.js` — **don’t block on `hasSeenByUI()`** and throttle the observer
+
+**Replace** your current `isOnOwnStory()` with this:
+
+```js
+async function isOnOwnStory() {
+  if (!location.pathname.startsWith('/stories/')) return false;
+  // Do NOT require the "Seen by" UI here; it often appears late on the first story.
+  const owner = getStoryOwnerFromURL();
+  if (!owner) return false;
+  return await canRunForOwner(owner);
+}
+```
+
+**Throttle** the MutationObserver callback (this removes the storm that can freeze the tab):
+
+```js
+// near the top
+function throttle(fn, ms) {
+  let t = 0, id = null;
+  return (...args) => {
+    const now = Date.now();
+    if (now - t >= ms) { t = now; return fn(...args); }
+    clearTimeout(id);
+    id = setTimeout(() => { t = Date.now(); fn(...args); }, ms);
+  };
+}
+
+// at the bottom where you create the observer:
+const mo = new MutationObserver(throttle(onNav, 250));
+mo.observe(document.documentElement || document.body, { childList: true, subtree: true });
+onNav(); // initial pass
+```
+
+### 2) `content‑backend.js` — **map chunks to the right story, stop over‑count**
+
+Add this once near your state:
+
+```js
+// Map<mediaId, storyKey(pathname)>
+const idToKey = new Map();
+```
+
+In the **message listener** that receives `STORYLISTER_VIEWERS_CHUNK`, route by mapping:
+
+```js
+window.addEventListener('message', (evt) => {
+  if (evt.source !== window || evt.origin !== location.origin) return;
+  const msg = evt.data;
+  if (!msg || msg.type !== 'STORYLISTER_VIEWERS_CHUNK') return;
+
+  const { mediaId, viewers } = msg.data || {};
+  if (!mediaId || !Array.isArray(viewers)) return;
+
+  const activeKey = state.currentKey || getStorageKey(); // pathname
+  if (!idToKey.has(mediaId)) idToKey.set(mediaId, activeKey);
+  const key = idToKey.get(mediaId);
+
+  if (!state.viewerStore.has(key)) state.viewerStore.set(key, new Map());
+  const m = state.viewerStore.get(key);
+
+  viewers.forEach((raw, idx) => {
+    const v = normalizeViewer(raw, idx);
+    const k = (v.username ? v.username.toLowerCase() : '') || String(v.id || idx);
+    const prev = m.get(k) || {};
+    m.set(k, { ...prev, ...v }); // merge to avoid double counting
+  });
+
+  mirrorToLocalStorageDebounced(key);
+});
+```
+
+### 3) `content‑backend.js` — **auto‑open that actually works for the first story**
+
+Keep your `waitForSeenByButton()` helper and use it here:
+
+```js
+async function autoOpenViewersOnceFor(key) {
+  if (!Settings.cache.autoOpen) return;
+  if (state.openedForKey?.has?.(key)) return;
+
+  // Wait up to 5s for the "Seen by" button to exist on the first slide
+  const btn = await waitForSeenByButton(5000, 150);
+  if (!btn) return;
+
+  state.openedForKey.add(key);
+  try { btn.click(); } catch {}
+  setTimeout(() => {
+    const scroller = findScrollableInDialog();
+    if (scroller) {
+      if (state.stopPagination) state.stopPagination();
+      state.stopPagination = startPagination(scroller, 6000);
+    }
+  }, 350);
+}
+```
+
+### 4) `content‑backend.js` — **stop auto‑pausing unless the dialog is actually open**
+
+Replace your pause helper with:
+
+```js
+function pauseVideosWhileViewerOpen() {
+  if (!Settings.cache.pauseVideos) return; // consider defaulting this to false
+  const dlg = document.querySelector('[role="dialog"][aria-modal="true"]');
+  if (!dlg) return; // only while the IG viewer dialog is open
+
+  setTimeout(() => {
+    document.querySelectorAll('video').forEach(v => {
+      if (v.dataset.userPlayed === '1') return; // respect manual play
+      if (!v.paused && !v.dataset.slPaused) {
+        try { v.pause(); v.dataset.slPaused = '1'; } catch {}
+      }
+    });
+  }, 1200);
+}
+
+document.addEventListener('play', (e) => {
+  if (e.target?.tagName === 'VIDEO') e.target.dataset.userPlayed = '1';
+}, true);
+```
+
+> That lets you play the story after you click; we don’t repause once **you** press play.
+
+### 5) `injected.js` — **add reactions and sanitize profile pics; no active scraping**
+
+Do **not** paginate from here; only observe responses already coming from Instagram. In your normalizer add:
+
+```js
+function normalizeViewer(v, idx) {
+  const u = v?.user || v?.node?.user || v?.node || v;
+
+  // Accept only absolute http(s) profile pics
+  let pic = u?.profile_pic_url || u?.profile_pic_url_hd || u?.profile_picture_url || '';
+  if (typeof pic !== 'string' || !/^https?:\/\//i.test(pic)) pic = '';
+
+  const reaction =
+    v?.reaction?.emoji ||
+    v?.story_reaction?.emoji ||
+    v?.latest_reaction?.emoji ||
+    (v?.has_liked ? '❤️' : null);
+
+  return {
+    id: String(u?.id || u?.pk || u?.username || idx),
+    username: u?.username || '',
+    full_name: u?.full_name || u?.fullname || '',
+    profile_pic_url: pic,
+    is_verified: !!(u?.is_verified || u?.verified || u?.blue_verified),
+    followed_by_viewer: !!(u?.followed_by_viewer || u?.is_following),
+    follows_viewer: !!(u?.follows_viewer || u?.is_follower),
+    reaction: reaction || null,
+    originalIndex: idx,
+    viewedAt: v?.timestamp || v?.viewed_at || Date.now()
+  };
+}
+```
+
+> This is enough to capture ❤️ and other quick reactions **without** making new API calls.
+
+### 6) `content.js` — **disable the UI auto‑clicker and add the “❤️ Reacts” filter**
+
+* **Neutralize the auto‑clicker** (this is the thing that was clicking random “viewer” strings):
+
+  ```js
+  // Find the single call right after init:
+  // setTimeout(() => { autoTriggerViewerCollection(); }, getHumanDelay(500, 1000));
+
+  // Replace with:
+  // Backend owns opening the IG dialog; no UI auto-clicks:
+  // (disabled) autoTriggerViewerCollection();
+  ```
+
+  Or just make it a no‑op:
+
+  ```js
+  function autoTriggerViewerCollection(){ /* backend handles it */ }
+  ```
+
+* **Expose a simple “Reacts” toggle** (uses the `reaction` field normalized above):
+
+  ```js
+  // Wherever you build the filter row (next to Following / Followers / Non-followers):
+  const controls = document.querySelector('#storylister-controls'); // your existing container
+  const reactsBtn = document.createElement('button');
+  reactsBtn.className = 'sl-chip';
+  reactsBtn.textContent = '❤️ Reacts';
+  reactsBtn.onclick = () => {
+    state.filters.reactsOnly = !state.filters.reactsOnly;
+    renderViewerList();
+  };
+  controls.insertBefore(reactsBtn, controls.firstChild);
+
+  // In renderViewerList() filtering logic:
+  let list = Array.from(state.currentViewers.values());
+  if (state.filters.reactsOnly) {
+    list = list.filter(v => !!v.reaction);
+  }
+  ```
+
+---
+
+## Why you saw those DNS errors
+
+The long list of `ERR_NAME_NOT_RESOLVED` to `*.fna.fbcdn.net` isn’t Storylister “hitting an API”; it’s the browser trying (and retrying) to fetch a bunch of images that Instagram asked it to load. When the extension (1) was forcing the IG dialog to keep re-opening/re‑paginating and (2) the UI auto‑clicker kept poking the page, Instagram kept re‑queuing those image loads. Then Chrome dutifully re‑tried them and the console filled up. Removing the auto‑clicker + throttling the observer stops the flood.
+
+---
+
+## Quick verification checklist (1–2 minutes)
+
+1. **Clear just our cache once**
+   In the IG tab devtools console:
+
+   ```js
+   localStorage.removeItem('panel_story_store');
+   localStorage.removeItem('sl_settings');
+   ```
+
+   (No need to wipe cookies, we’re not touching them.)
+
+2. **Reload the IG tab** and click your profile bubble:
+
+   * The panel should appear.
+   * After up to \~1–2 s, the IG “Seen by …” dialog should **auto‑open**.
+   * The video **won’t** pause unless that dialog is open. If you click play, it stays playing.
+
+3. **First story populates** within a second or two (we wait for the button, then page).
+   Moving to the second story should **not** over‑count anymore (ID→key mapping).
+
+4. **“❤️ Reacts”** button filters the list immediately (and we’ll add it to export in a follow‑up).
+
+---
+
+## What I did **not** change (on purpose)
+
+* No new endpoints. We only observe responses the page already makes.
+* No more inline scripts. We always inject by **`src = chrome.runtime.getURL('injected.js')`**.
+* No global event captures that block Instagram’s own handlers.
+
+---
+
+If you apply the six patches above you’ll eliminate the hang, fix the first‑story gap, stop the constant re‑pausing, and get reactions captured with a simple UI control. If anything still feels off after that (e.g., Story‑to‑Story shows “5 stories” when two are live), send me one more recording and I’ll focus specifically on the session scoping in the insights roll‑up.

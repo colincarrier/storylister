@@ -4,6 +4,17 @@
   // ==== [A] TOP OF FILE: state + Settings ====
   const DEBUG = false;
 
+  // Add throttle function
+  function throttle(fn, ms) {
+    let t = 0, id = null;
+    return (...args) => {
+      const now = Date.now();
+      if (now - t >= ms) { t = now; return fn(...args); }
+      clearTimeout(id);
+      id = setTimeout(() => { t = Date.now(); fn(...args); }, ms);
+    };
+  }
+
   const state = {
     injected: false,
     currentKey: null,          // stable key = location.pathname (works with and w/o numeric id)
@@ -103,60 +114,29 @@
 
   async function isOnOwnStory() {
     if (!location.pathname.startsWith('/stories/')) return false;
-    if (!hasSeenByUI()) return false; // bulletproof indicator
+    // Do NOT require the "Seen by" UI here; it often appears late on the first story.
     const owner = getStoryOwnerFromURL();
     if (!owner) return false;
     return await canRunForOwner(owner);
   }
 
-  // ==== [C] NATURAL PAUSE — pause only while dialog is open, resume when closed ====
-  let dialogCheckInterval = null;
-  
+  // ==== [C] NATURAL PAUSE — pause only while the IG viewers dialog is open ====
   function pauseVideosWhileViewerOpen() {
-    if (!Settings.cache.pauseVideos) return;
-    
-    // Clear any existing interval
-    if (dialogCheckInterval) {
-      clearInterval(dialogCheckInterval);
-      dialogCheckInterval = null;
-    }
-    
-    // Check for dialog state
-    dialogCheckInterval = setInterval(() => {
-      const dlgOpen = !!document.querySelector('[role="dialog"][aria-modal="true"]');
-      
-      if (dlgOpen) {
-        // Pause videos when dialog is open
-        document.querySelectorAll('video').forEach(v => {
-          if (v.dataset.userPlayed === '1') return; // respect manual play
-          if (!v.paused && !v.dataset.slPaused) {
-            try { 
-              v.pause(); 
-              v.dataset.slPaused = '1';
-              console.log('[SL] Paused video while dialog open');
-            } catch {}
-          }
-        });
-      } else {
-        // Resume videos when dialog is closed
-        document.querySelectorAll('video[data-sl-paused="1"]').forEach(v => {
-          try { 
-            v.play();
-            delete v.dataset.slPaused;
-            console.log('[SL] Resumed video after dialog closed');
-          } catch {}
-        });
-      }
-    }, 500); // Check every 500ms
+    if (!Settings.cache.pauseVideos) return; // consider defaulting this to false
+    const dlg = document.querySelector('[role="dialog"][aria-modal="true"]');
+    if (!dlg) return; // only while the IG viewer dialog is open
+
+    setTimeout(() => {
+      document.querySelectorAll('video').forEach(v => {
+        if (v.dataset.userPlayed === '1') return; // respect manual play
+        if (!v.paused && !v.dataset.slPaused) {
+          try { v.pause(); v.dataset.slPaused = '1'; } catch {}
+        }
+      });
+    }, 1200);
   }
 
   function resumeAnyPausedVideos() {
-    // Clear interval when leaving stories
-    if (dialogCheckInterval) {
-      clearInterval(dialogCheckInterval);
-      dialogCheckInterval = null;
-    }
-    
     document.querySelectorAll('video[data-sl-paused="1"]').forEach(v => {
       try { v.play(); } catch {}
       delete v.dataset.slPaused;
@@ -188,11 +168,24 @@
     return () => { stopped = true; };
   }
 
-  // ==== [E] AUTO-OPEN — DISABLED to prevent popup issues ====
+  // ==== [E] AUTO-OPEN — actually works for the first story ====
   async function autoOpenViewersOnceFor(key) {
-    // Disabled auto-opening to prevent viewer list popup issues
-    // Users should manually click the "Seen by" button
-    return;
+    if (!Settings.cache.autoOpen) return;
+    if (state.openedForKey?.has?.(key)) return;
+
+    // Wait up to 5s for the "Seen by" button to exist on the first slide
+    const btn = await waitForSeenByButton(5000, 150);
+    if (!btn) return;
+
+    state.openedForKey.add(key);
+    try { btn.click(); } catch {}
+    setTimeout(() => {
+      const scroller = findScrollableInDialog();
+      if (scroller) {
+        if (state.stopPagination) state.stopPagination();
+        state.stopPagination = startPagination(scroller, 6000);
+      }
+    }, 350);
   }
 
   // ==== [F] MIRROR TO CACHE — key = pathname; write debounced ====
@@ -216,55 +209,30 @@
     }, 300);
   }
 
-  // ==== [G] MESSAGE BRIDGE — handle both old and new message formats ====
+  // ==== [G] MESSAGE BRIDGE — correct routing + dedupe ====
   window.addEventListener('message', (evt) => {
     if (evt.source !== window || evt.origin !== location.origin) return;
     const msg = evt.data;
-    if (!msg) return;
-    
-    // Handle new format from injected.js
-    if (msg.type === 'sl_viewer_chunk') {
-      const { mediaId, viewers, hasNext } = msg;
-      if (!mediaId || !Array.isArray(viewers)) return;
-      
-      const activeKey = state.currentKey || getStorageKey();
-      if (!state.idToKey.has(mediaId)) state.idToKey.set(mediaId, activeKey);
-      const key = state.idToKey.get(mediaId);
-      
-      if (!state.viewerStore.has(key)) state.viewerStore.set(key, new Map());
-      const map = state.viewerStore.get(key);
-      
-      viewers.forEach((v, idx) => {
-        // dedupe by username (lowercased) or id
-        const viewerKey = (v.username ? String(v.username).toLowerCase() : null) || String(v.id || idx);
-        const prev = map.get(viewerKey) || {};
-        map.set(viewerKey, { ...prev, ...v });
-      });
-      
-      mirrorToLocalStorageDebounced(key);
-      console.log(`[SL] Received ${viewers.length} viewers for story ${key}, hasNext: ${hasNext}`);
-    }
-    // Handle old format (fallback)
-    else if (msg.type === 'STORYLISTER_VIEWERS_CHUNK') {
-      const { mediaId, viewers } = msg.data || {};
-      if (!mediaId || !Array.isArray(viewers)) return;
+    if (!msg || msg.type !== 'STORYLISTER_VIEWERS_CHUNK') return;
 
-      const activeKey = state.currentKey || getStorageKey();
-      if (!state.idToKey.has(mediaId)) state.idToKey.set(mediaId, activeKey);
-      const key = state.idToKey.get(mediaId);
+    const { mediaId, viewers } = msg.data || {};
+    if (!mediaId || !Array.isArray(viewers)) return;
 
-      if (!state.viewerStore.has(key)) state.viewerStore.set(key, new Map());
-      const map = state.viewerStore.get(key);
+    const activeKey = state.currentKey || getStorageKey(); // pathname
+    if (!state.idToKey.has(mediaId)) state.idToKey.set(mediaId, activeKey);
+    const key = state.idToKey.get(mediaId);
 
-      viewers.forEach((v, idx) => {
-        // dedupe by username (lowercased) or id
-        const viewerKey = (v.username ? String(v.username).toLowerCase() : null) || String(v.id || idx);
-        const prev = map.get(viewerKey) || {};
-        map.set(viewerKey, { ...prev, ...v });
-      });
+    if (!state.viewerStore.has(key)) state.viewerStore.set(key, new Map());
+    const m = state.viewerStore.get(key);
 
-      mirrorToLocalStorageDebounced(key);
-    }
+    viewers.forEach((raw, idx) => {
+      const v = raw; // normalizeViewer is done in injected.js
+      const k = (v.username ? v.username.toLowerCase() : '') || String(v.id || idx);
+      const prev = m.get(k) || {};
+      m.set(k, { ...prev, ...v }); // merge to avoid double counting
+    });
+
+    mirrorToLocalStorageDebounced(key);
   });
 
 
@@ -324,8 +292,11 @@
     };
   })();
 
-  new MutationObserver(() => onDOMChange()).observe(document.documentElement || document.body, { childList: true, subtree: true });
-  onDOMChange();
+  // Throttle the MutationObserver callback
+  const onNav = throttle(onDOMChange, 250);
+  const mo = new MutationObserver(onNav);
+  mo.observe(document.documentElement || document.body, { childList: true, subtree: true });
+  onNav(); // initial pass
 
   // Initialize settings
   (async function init() {
