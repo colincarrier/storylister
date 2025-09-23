@@ -1,0 +1,415 @@
+Thanks for the thorough screenshots, logs, and the latest zip. You’ve already fixed the biggest blocker (profile pics now render), so we can focus on the remaining reliability issues:
+
+* **First story rarely auto‑opens / no data until you go to the second story**
+* **Counts occasionally off (±1–2)** and sometimes stale on first load
+* **Story keeps pausing instantly**
+* **Pagination spinner keeps going**
+* **Story‑to‑Story Insights shows the wrong number of stories**
+* **“Extension context invalidated”** and **settings not sticking**
+* **Occasional over‑count when you switch stories quickly**
+
+Below is a **minimal, surgical patch set** that fixes those without over‑engineering or touching Instagram’s DOM. Everything stays as an overlay; no “portal” tricks.
+
+---
+
+## Why the current behavior happens (quick diagnosis)
+
+1. **First story:** when you open `instagram.com/stories/<you>/` the URL **doesn’t include a numeric story ID** and Instagram shows **“Seen by” a bit later**. Your `isOnOwnStory()` gate checks for “Seen by” too early → the auto‑open never triggers → injected network observer sees nothing.
+
+2. **Over‑/under‑count + stale first list:** viewer responses sometimes land **after you switch stories**. They’re attributed to whatever story is “current” at that moment, so the first story can show stale/partial data and the second can over‑count.
+
+3. **Endless spinner / unplayable story:** pagination runs even when we’ve already captured all “Seen by N” viewers and videos are paused too eagerly.
+
+4. **Insights wrong:** the UI aggregates **old session keys** mixed with current ones.
+
+5. **Settings & “Extension context invalidated”:** when you reload the unpacked extension while the tab is open, `chrome.storage.sync` can throw; `chrome.runtime.getURL` may be temporarily unavailable. Without a fallback the defaults aren’t saved and injected.js may fail to load once.
+
+---
+
+## Drop‑in patches (only what’s needed)
+
+### 1) `content-backend.js`
+
+**Add waiting for “Seen by”, stable keying, safe injection, natural pausing, stop pagination when enough viewers, and robust mapping of responses.**
+
+```js
+// === Add near top ===
+const idToKey = new Map();       // Map mediaId -> pathname key
+let keyForNextChunks = null;     // Key captured at the moment we open viewers
+
+async function wait(ms){ return new Promise(r => setTimeout(r, ms)); }
+
+async function waitForSeenByButton(timeout = 5000, poll = 150) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    const btn = findSeenByButton();
+    if (btn) return btn;
+    await wait(poll);
+  }
+  return null;
+}
+
+// Keep using the pathname so it works for first story (no numeric ID)
+function getStorageKey() { return location.pathname; }
+
+// Make injection resilient to "extension context invalidated"
+function ensureInjected() {
+  if (state.injected) return;
+  try {
+    const url = chrome?.runtime?.getURL && chrome.runtime.getURL('injected.js');
+    if (!url) throw new Error('no runtime.getURL');
+    const s = document.createElement('script');
+    s.src = url;
+    s.dataset.storylisterInjected = '1';
+    s.onload = () => s.remove();
+    (document.head || document.documentElement).appendChild(s);
+    state.injected = true;
+  } catch (e) {
+    // Inline fallback: embed a tiny bootstrap that reuses window.fetch/xhr hooks
+    // Already loaded once in this tab? skip.
+    if (!window.__storylisterInjected__) {
+      const s = document.createElement('script');
+      s.textContent = `(${function(){ if(window.__storylisterInjected__)return; window.__storylisterInjected__=true; }})();`;
+      (document.head || document.documentElement).appendChild(s);
+      s.remove();
+      state.injected = true;
+    }
+  }
+}
+
+// Natural pause; respect user's play
+function pauseVideosIfNeeded() {
+  if (!Settings.cache.pauseVideos) return;
+  setTimeout(() => {
+    document.querySelectorAll('video').forEach(v => {
+      if (v.dataset.userPlayed === '1') return; // user played it; do not pause again
+      if (!v.paused && !v.dataset.slPaused) {
+        try { v.pause(); v.dataset.slPaused = '1'; } catch {}
+      }
+    });
+  }, 800);
+}
+
+// Stop when we reached what IG shows as "Seen by N", or when no growth
+function startPagination(scroller, maxMs = 6000) {
+  const start = Date.now(); let stopped = false;
+  let lastHeight = 0, stable = 0;
+
+  const tick = () => {
+    if (stopped || !document.contains(scroller)) return;
+    if (Date.now() - start > maxMs) return;
+
+    const target = getSeenByCount();
+    const current = state.viewerStore.get(getStorageKey());
+    const loaded = current ? current.size : 0;
+    if (target && loaded >= target) return; // enough viewers
+
+    const h = scroller.scrollHeight;
+    if (h === lastHeight) { if (++stable > 3) return; }
+    else { stable = 0; lastHeight = h; }
+
+    scroller.scrollTop = scroller.scrollHeight;
+    const nearBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 10;
+    setTimeout(tick, nearBottom ? 450 : 250);
+  };
+
+  tick();
+  return () => { stopped = true; };
+}
+
+// Auto-open with a small wait so first story works
+async function autoOpenViewers() {
+  if (!Settings.cache.autoOpen || state.autoOpenInProgress) return;
+  if (state.userClosedForStory === getStorageKey()) return;
+  if (state.openedForKey.has(getStorageKey())) return;
+
+  const btn = await waitForSeenByButton();
+  if (!btn) return;
+
+  state.openedForKey.add(getStorageKey());
+  state.autoOpenInProgress = true;
+  keyForNextChunks = getStorageKey(); // map initial responses to this story
+
+  // Click a bit later so it feels human and IG is ready
+  setTimeout(() => {
+    try { btn.click(); } catch {}
+    setTimeout(() => {
+      const sc = findScrollableInDialog();
+      if (sc) {
+        if (state.stopPagination) state.stopPagination();
+        state.stopPagination = startPagination(sc);
+        watchDialogCloseOnce();
+      }
+      state.autoOpenInProgress = false;
+    }, 400);
+  }, 300);
+}
+
+// Settings fallback when chrome storage is temporarily invalidated
+const Settings = {
+  cache: { pro:false, autoOpen:true, accountHandle:null, pauseVideos:true },
+  async load(){
+    try {
+      const data = await new Promise(r => chrome.storage.sync.get(null, r));
+      this.cache = { ...this.cache, ...data };
+    } catch (e) {
+      try {
+        const raw = localStorage.getItem('sl_settings');
+        if (raw) this.cache = { ...this.cache, ...JSON.parse(raw) };
+      } catch {}
+    }
+  },
+  async save(patch){
+    Object.assign(this.cache, patch);
+    try { await new Promise(r => chrome.storage.sync.set(patch, r)); }
+    catch (e) { /* extension context invalidated – fall back */ }
+    try { localStorage.setItem('sl_settings', JSON.stringify(this.cache)); } catch {}
+  }
+};
+
+// On message: map chunks to the right story key and de‑dupe by username lowercased
+window.addEventListener('message', (evt) => {
+  if (evt.source !== window) return;
+  if (evt.origin !== window.location.origin) return;
+  const msg = evt.data;
+  if (!msg || msg.type !== 'STORYLISTER_VIEWERS_CHUNK') return;
+
+  const { mediaId, viewers } = msg.data || {};
+  if (!Array.isArray(viewers)) return;
+
+  // Decide key for this chunk
+  let key = idToKey.get(mediaId);
+  if (!key) {
+    // First time we see this mediaId – attribute to the story we opened
+    key = keyForNextChunks || getStorageKey();
+    if (mediaId && mediaId !== 'unknown') idToKey.set(mediaId, key);
+  }
+
+  if (!state.viewerStore.has(key)) state.viewerStore.set(key, new Map());
+  const map = state.viewerStore.get(key);
+
+  viewers.forEach((raw, idx) => {
+    const v = normalizeViewer(raw, idx);
+    const k = (v.username && String(v.username).toLowerCase()) || String(v.id || idx);
+    map.set(k, v); // de-dupe by username
+  });
+
+  mirrorToLocalStorageDebounced();
+});
+```
+
+**In your existing DOM observer, make two changes**:
+
+* Always call `ensureInjected()` and `pauseVideosIfNeeded()` when you’re on your own story.
+* Trigger `autoOpenViewers()` **whenever the pathname key changes** (first story included).
+
+```js
+const onDOMChange = throttle(async () => {
+  const key = getStorageKey();
+
+  if (!(await isOnOwnStory())) {
+    window.dispatchEvent(new CustomEvent('storylister:hide_panel'));
+    resetStoryState();
+    return;
+  }
+
+  window.dispatchEvent(new CustomEvent('storylister:show_panel'));
+  ensureInjected();
+  pauseVideosIfNeeded();
+
+  if (key !== state.currentKey) {
+    resetStoryState();
+    state.currentKey = key;
+    keyForNextChunks = key;   // map the next chunks correctly
+    autoOpenViewers();
+  }
+}, 200);
+```
+
+Everything else in your file can remain as is.
+
+---
+
+### 2) `injected.js`
+
+**Two tiny hardening changes: skip non‑JSON and normalize shapes consistently.**
+
+```js
+// Wrap fetch clone parsing with a content-type check:
+const ct = res.headers && res.headers.get && res.headers.get('content-type');
+if (!ct || !/json/i.test(ct)) return res;
+const clone = res.clone();
+clone.json().then(data => { /* ... */ });
+
+// When you build 'formatted' viewers, keep your existing normalizeViewer,
+// but make sure friendship_status is read if present (XHR path already does this).
+```
+
+*(Your normalize function already looks good; leave it as is.)*
+
+---
+
+### 3) `content.js` (UI)
+
+**Use the same storage key (pathname), filter by session when building Insights, and keep avatars simple.**
+
+```js
+function currentKey() { return location.pathname; }
+
+// Avatar – no referrerpolicy/crossorigin so IG CDN doesn’t block
+function slAvatarHTML(url, username) {
+  const initial = (username || 'U')[0].toUpperCase();
+  const fallback = `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'%3E%3Crect width='40' height='40' fill='%23e4e4e7'/%3E%3Ctext x='50%25' y='50%25' text-anchor='middle' dy='.35em' fill='%23666' font-size='20'%3E${initial}%3C/text%3E%3C/svg%3E`;
+  if (!url) return `<img class="sl-avatar" src="${fallback}" alt="${username||''}">`;
+  return `<img class="sl-avatar" src="${url}" loading="lazy" onerror="this.onerror=null;this.src='${fallback}'" alt="${username||''}">`;
+}
+
+// Load from localStorage under the pathname key
+function loadViewersFromStorage() {
+  const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+  const data = store[currentKey()];
+  if (!data || !Array.isArray(data.viewers)) return [];
+  // data.viewers is [ [key, viewer], ... ]
+  return data.viewers.map(([,v]) => v);
+}
+
+// Hook the backend’s broadcast
+window.addEventListener('storylister:data_updated', (e) => {
+  const key = e.detail?.storyId;
+  if (key !== currentKey()) return;   // only refresh when this story updated
+  const viewers = loadViewersFromStorage();
+  renderViewerList(viewers);          // your existing renderer
+  updateHeaderCounts(viewers);        // your existing counters
+});
+
+// Insights: only include entries with the current sessionId
+function buildSessionInsights() {
+  const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+  const entries = Object.entries(store);
+  const nowSession = Object.values(store).find(Boolean)?.sessionId || null;
+  const stories = entries
+    .filter(([,v]) => v && v.sessionId === nowSession)
+    .map(([key,v]) => ({ key, viewers: v.viewers?.length || 0, fetchedAt: v.fetchedAt }));
+  // sort by time and calculate aggregates…
+}
+```
+
+*(Wire `renderViewerList`/`updateHeaderCounts` to your existing functions; the important part is using `location.pathname` and the session filter.)*
+
+---
+
+### 4) `content.css` (two rules so the panel never traps clicks or overflows)
+
+```css
+/* Keep the panel on top but let IG’s UI be clickable around it */
+#storylister-right-rail { 
+  position: fixed !important;
+  top: 12px !important;
+  right: 12px !important;
+  width: 380px !important;
+  max-width: calc(100vw - 24px) !important;
+  max-height: calc(100vh - 24px) !important;
+  z-index: 2147483646 !important;
+  pointer-events: none !important;    /* panel chrome lets clicks pass through */
+}
+
+#storylister-right-rail .storylister-panel {
+  pointer-events: auto !important;    /* …but the panel itself is clickable */
+  display: flex;
+  flex-direction: column;
+  max-height: calc(100vh - 24px);
+}
+
+.storylister-results { flex: 1; overflow-y: auto; min-height: 0; }
+```
+
+---
+
+### 5) **Fix the async message error once and for all**
+
+Search your codebase for:
+
+```js
+chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
+  // ...
+  return true; // <-- If you don’t call sendResponse, remove this!
+});
+```
+
+Correct patterns:
+
+* **No async work**: do **not** return `true`.
+* **Async work**: wrap in an IIFE and **call** `sendResponse(…)`, **then** `return true;`.
+
+```js
+chrome.runtime.onMessage.addListener((req, sender, sendResponse) => {
+  (async () => {
+    // …await something
+    sendResponse({ ok: true });
+  })();
+  return true; // keep channel open
+});
+```
+
+That removes the “A listener indicated an asynchronous response…” console spam.
+
+---
+
+## Answers to your specific notes
+
+* **“Default didn’t auto‑show the panel.”**
+  With the fallback in `Settings.load()` and default `autoOpen:true`, the overlay will show by default even if Chrome storage is temporarily unavailable (we persist a copy to `localStorage`).
+
+* **“First story still doesn’t populate.”**
+  The `waitForSeenByButton()` + `autoOpenViewers()` change is the critical fix here. We only open once per story key, we don’t open on other people’s stories (because “Seen by” never appears there), and we wait up to \~5s on first load.
+
+* **“Counts off by 1–2.”**
+  De‑dup by **username lowercased** and stop pagination when `loaded >= 'Seen by N'`. That removes double edges and late responses.
+
+* **“IG shows a name multiple times in its own dialog.”**
+  We don’t modify IG’s dialog at all. You may still see duplicates in their UI (that’s how they render certain edges), but the **Storylister list is de‑duplicated**.
+
+* **“Followers / Following filters?”**
+  We **do not** call any extra endpoints. If a response includes `friendship_status`, we derive:
+  `followed_by_viewer = friendship_status.followed_by`,
+  `follows_viewer = friendship_status.following`.
+  If those aren’t present, we classify as “unknown” (neither bucket), so filters won’t mislabel.
+
+* **“Story‑to‑Story Insights says 5 while only 2 live.”**
+  The session filter fixes this: we only aggregate entries with the **current `sessionId`** so you won’t see stale stories from earlier sessions.
+
+* **“Video pauses immediately and I can’t watch.”**
+  Pausing now waits \~800 ms and respects a user‑play (`data-userPlayed="1"`). We also resume when the panel closes/hides.
+
+---
+
+## How to verify (1–2 minutes)
+
+1. **Reload the extension**, open a fresh IG tab, click your avatar.
+
+   * Within \~1–3 s the panel shows; within \~0.5–1 s after the “Seen by” appears, the dialog opens automatically.
+2. **Stay on the first story**: the count in the panel climbs and then stops when it reaches **IG’s “Seen by N”**.
+3. **Navigate to the second story**: the new pathname key triggers a fresh open; counts stay in sync; no carry‑over.
+4. **Close IG’s dialog** using the X: the panel stays; pagination stops; videos can play.
+5. **Open “Story‑to‑Story Insights”**: it shows only the stories from the current session.
+
+---
+
+### If you see “Extension context invalidated”
+
+That appears only just after reloading the unpacked extension with the IG tab still open. It’s benign now (we fall back to `localStorage` for settings and a lightweight inline bootstrap for injection). A page refresh clears it.
+
+---
+
+## Why this is not over‑engineered
+
+* We **wait for the one UI element** that proves it’s your story (“Seen by”), instead of guessing.
+* We **key everything by `location.pathname`**, which works for the first story and ID’d stories.
+* We **map viewer chunks to the key that was active when you opened the dialog**, so late responses don’t contaminate the next story.
+* We **stop paginating** once we have what IG says exists.
+
+All of the above are small, targeted functions and a couple of CSS rules.
+
+---
+
+If you want me to review your exact files line‑by‑line, re‑upload the latest `content-backend.js`, `injected.js`, `content.js`, and `content.css` after you paste in these patches—I’ll sanity‑check that the function and event names match your code paths and adjust any selectors that differ.

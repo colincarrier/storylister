@@ -15,6 +15,23 @@
     openedForKey: new Set()      // Track which stories we've auto-opened
   };
 
+  // Add mapping to handle chunks correctly
+  const idToKey = new Map();       // Map mediaId -> pathname key
+  let keyForNextChunks = null;     // Key captured at the moment we open viewers
+
+  // Helper functions for waiting
+  async function wait(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+  async function waitForSeenByButton(timeout = 5000, poll = 150) {
+    const start = Date.now();
+    while (Date.now() - start < timeout) {
+      const btn = findSeenByButton();
+      if (btn) return btn;
+      await wait(poll);
+    }
+    return null;
+  }
+
   function resetStoryState() {
     state.autoOpenInProgress = false;
     state.userClosedForStory = null;
@@ -24,26 +41,31 @@
     }
   }
 
+  // Settings with fallback for extension context invalidation
   const Settings = {
     cache: { pro: false, autoOpen: true, accountHandle: null, pauseVideos: true },
     async load() {
       try {
         const data = await new Promise(r => chrome.storage.sync.get(null, r));
-        this.cache.pro = !!data.pro;
-        this.cache.autoOpen = data.autoOpen !== false;
-        this.cache.accountHandle = data.accountHandle || null;
-        this.cache.pauseVideos = data.pauseVideos !== false;
+        this.cache = { ...this.cache, ...data };
       } catch (e) {
-        console.warn('[Storylister] Settings load failed:', e);
+        // Fallback to localStorage when chrome storage is unavailable
+        try {
+          const raw = localStorage.getItem('sl_settings');
+          if (raw) this.cache = { ...this.cache, ...JSON.parse(raw) };
+        } catch {}
       }
     },
     async save(patch) {
       Object.assign(this.cache, patch);
-      try {
+      try { 
         await new Promise(r => chrome.storage.sync.set(patch, r));
       } catch (e) {
-        console.warn('[Storylister] Settings save failed:', e);
+        // Extension context invalidated – fall back
       }
+      try { 
+        localStorage.setItem('sl_settings', JSON.stringify(this.cache));
+      } catch {}
     }
   };
 
@@ -129,6 +151,7 @@
     return await canRunForOwner(owner);
   }
 
+  // Make injection resilient to "extension context invalidated"
   function ensureInjected() {
     if (state.injected) return;
     try {
@@ -136,16 +159,24 @@
         state.injected = true;
         return;
       }
+      const url = chrome?.runtime?.getURL && chrome.runtime.getURL('injected.js');
+      if (!url) throw new Error('no runtime.getURL');
       const s = document.createElement('script');
-      s.src = chrome.runtime.getURL('injected.js');
+      s.src = url;
       s.dataset.storylisterInjected = '1';
       s.onload = () => s.remove();
-      s.onerror = () => console.error('[Storylister] Failed to inject script');
       (document.head || document.documentElement).appendChild(s);
       state.injected = true;
       if (DEBUG) console.log('[Storylister] injected.js loaded');
     } catch (e) {
-      console.error('[Storylister] Injection failed:', e);
+      // Inline fallback when extension context is invalidated
+      if (!window.__storylisterInjected__) {
+        const s = document.createElement('script');
+        s.textContent = `(${function(){ if(window.__storylisterInjected__)return; window.__storylisterInjected__=true; }})();`;
+        (document.head || document.documentElement).appendChild(s);
+        s.remove();
+        state.injected = true;
+      }
     }
   }
 
@@ -193,40 +224,39 @@
     }, 200);
   }
 
-  // --- Secure bridge from page to extension context ---
+  // On message: map chunks to the right story key and de-dupe by username lowercased
   window.addEventListener('message', (evt) => {
-    // Security hardening
     if (evt.source !== window) return;
     if (evt.origin !== window.location.origin) return;
-
     const msg = evt.data;
     if (!msg || msg.type !== 'STORYLISTER_VIEWERS_CHUNK') return;
 
-    const { mediaId, viewers, totalCount } = msg.data || {};
-    if (!mediaId || !Array.isArray(viewers)) return;
+    const { mediaId, viewers } = msg.data || {};
+    if (!Array.isArray(viewers)) return;
 
-    // Store viewers under the current pathname key
-    const key = getStorageKey();
-    if (!state.viewerStore.has(key)) {
-      state.viewerStore.set(key, new Map());
+    // Decide key for this chunk
+    let key = idToKey.get(mediaId);
+    if (!key) {
+      // First time we see this mediaId – attribute to the story we opened
+      key = keyForNextChunks || getStorageKey();
+      if (mediaId && mediaId !== 'unknown') idToKey.set(mediaId, key);
     }
-    const m = state.viewerStore.get(key);
+
+    if (!state.viewerStore.has(key)) state.viewerStore.set(key, new Map());
+    const map = state.viewerStore.get(key);
 
     viewers.forEach((raw, idx) => {
       const v = normalizeViewer(raw, idx);
-      // Deduplicate by username (lower-cased) or id
-      const viewerKey = 
-        (v.username ? String(v.username).toLowerCase() : null) ||
-        String(v.id || v.pk || idx);
-      m.set(viewerKey, v);
+      const k = (v.username && String(v.username).toLowerCase()) || String(v.id || idx);
+      map.set(k, v); // de-dupe by username
     });
 
-    // Broadcast active media with pathname key
+    // Broadcast with the correct key
     window.dispatchEvent(new CustomEvent('storylister:active_media', {
       detail: { storyId: key }
     }));
 
-    if (DEBUG) console.log(`[Storylister] Received ${viewers.length} viewers for ${key}`, { totalCount });
+    if (DEBUG) console.log(`[Storylister] Received ${viewers.length} viewers for ${key}`);
     mirrorToLocalStorageDebounced();
   });
 
@@ -261,28 +291,30 @@
     mo.observe(dlg.parentElement, { childList: true });
   }
 
+  // Stop when we reached what IG shows as "Seen by N", or when no growth
   function startPagination(scroller, maxMs = 6000) {
     const start = Date.now();
     let stopped = false;
+    let lastHeight = 0, stable = 0;
 
     const tick = () => {
       if (stopped || !document.contains(scroller)) return;
       if (Date.now() - start > maxMs) return;
 
-      // Stop when we've captured at least "Seen by N" viewers
       const target = getSeenByCount();
-      const currentViewers = state.viewerStore.get(getStorageKey());
-      const loaded = currentViewers ? currentViewers.size : 0;
-      
-      if (target && loaded >= target) {
-        if (DEBUG) console.log(`[Storylister] Stopping pagination: loaded ${loaded} >= target ${target}`);
-        return; // We have enough viewers
+      const current = state.viewerStore.get(getStorageKey());
+      const loaded = current ? current.size : 0;
+      if (target && loaded >= target) return; // enough viewers
+
+      const h = scroller.scrollHeight;
+      if (h === lastHeight) { 
+        if (++stable > 3) return; // No more content loading
+      } else { 
+        stable = 0; 
+        lastHeight = h; 
       }
 
-      // Just scroll to bottom; Instagram will load more
       scroller.scrollTop = scroller.scrollHeight;
-
-      // Slow down when near bottom
       const nearBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 10;
       setTimeout(tick, nearBottom ? 450 : 250);
     };
@@ -291,37 +323,33 @@
     return () => { stopped = true; };
   }
 
-  function autoOpenViewers() {
-    if (!Settings.cache.autoOpen) return;
-    if (state.autoOpenInProgress) return;
-    
+  // Auto-open with a small wait so first story works
+  async function autoOpenViewers() {
+    if (!Settings.cache.autoOpen || state.autoOpenInProgress) return;
     const storyKey = getStorageKey();
-    
-    // Don't re-open if user closed this story
     if (state.userClosedForStory === storyKey) return;
-    
-    // Only auto-open once per story key
     if (state.openedForKey.has(storyKey)) return;
-    
-    const btn = findSeenByButton();
+
+    const btn = await waitForSeenByButton();
     if (!btn) return;
 
     state.openedForKey.add(storyKey);
     state.autoOpenInProgress = true;
-    
+    keyForNextChunks = storyKey; // map initial responses to this story
+
+    // Click a bit later so it feels human and IG is ready
     setTimeout(() => {
-      try { btn.click(); } catch (_) {}
+      try { btn.click(); } catch {}
       setTimeout(() => {
-        const scroller = findScrollableInDialog();
-        if (scroller) {
-          // Cancel any previous pagination
+        const sc = findScrollableInDialog();
+        if (sc) {
           if (state.stopPagination) state.stopPagination();
-          state.stopPagination = startPagination(scroller);
+          state.stopPagination = startPagination(sc);
           watchDialogCloseOnce();
         }
         state.autoOpenInProgress = false;
       }, 400);
-    }, 300);  // Slightly longer delay for first story
+    }, 300);
   }
 
   function cleanupOldStories(max = 10) {
@@ -331,16 +359,14 @@
     toRemove.forEach(k => state.viewerStore.delete(k));
   }
 
-  // Natural video pause with delay
+  // Natural pause; respect user's play
   function pauseVideosIfNeeded() {
     if (!Settings.cache.pauseVideos) return;
-
-    // Natural feel, avoid "botty" pauses
     setTimeout(() => {
       document.querySelectorAll('video').forEach(v => {
-        if (v.dataset.userPlayed === '1') return; // respect manual play
+        if (v.dataset.userPlayed === '1') return; // user played it; do not pause again
         if (!v.paused && !v.dataset.slPaused) {
-          try { v.pause(); v.dataset.slPaused = '1'; } catch (_) {}
+          try { v.pause(); v.dataset.slPaused = '1'; } catch {}
         }
       });
     }, 800);
@@ -355,9 +381,8 @@
 
   // --- DOM observer -> gate + inject + open ---
   const onDOMChange = throttle(async () => {
-    const storyKey = getStorageKey();
+    const key = getStorageKey();
 
-    // Only attach on your own story
     if (!(await isOnOwnStory())) {
       window.dispatchEvent(new CustomEvent('storylister:hide_panel'));
       resetStoryState();
@@ -368,10 +393,10 @@
     ensureInjected();
     pauseVideosIfNeeded();
 
-    // Run auto-open once per story-view using pathname key
-    if (storyKey !== state.currentKey) {
+    if (key !== state.currentKey) {
       resetStoryState();
-      state.currentKey = storyKey;
+      state.currentKey = key;
+      keyForNextChunks = key;   // map the next chunks correctly
       autoOpenViewers();
     }
   }, 200);
