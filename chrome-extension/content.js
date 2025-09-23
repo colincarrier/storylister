@@ -204,6 +204,11 @@
   // Track the active media ID from backend
   let ACTIVE_MEDIA_ID_FROM_BACKEND = null;
   
+  function ownerKey() {
+    const m = location.pathname.match(/\/stories\/([^/]+)/);
+    return `sl_tags_${m ? m[1] : 'default'}`;
+  }
+  
   function tagsKeyFromSettings(settings) {
     const handle = (settings?.accountHandle || 'default');
     return `sl_tags_${handle}`;
@@ -302,29 +307,41 @@
     return `sl_${username}_`;
   }
   
-  // Load tagged users from chrome.storage (account-specific)
+  // Load tagged users from storage (account-specific)
   async function loadTaggedUsers() {
+    const key = ownerKey();
     try {
-      const settings = await loadSettingsSync();
-      const TAGS_KEY = tagsKeyFromSettings(settings);
-      
-      return new Promise(resolve => {
-        chrome.storage.local.get([TAGS_KEY], (obj) => {
-          const tags = obj[TAGS_KEY] || [];
-          taggedUsers = new Set(tags);
-          resolve();
-        });
-      });
-    } catch (e) {
+      // Try localStorage first
+      const ls = localStorage.getItem(key);
+      if (ls) {
+        taggedUsers = new Set(JSON.parse(ls));
+        return;
+      }
+    } catch {}
+
+    // Fallback to chrome.storage
+    try {
+      const obj = await new Promise(r => chrome.storage?.local?.get?.(key, r) || r({}));
+      taggedUsers = new Set(obj[key] || []);
+    } catch { 
       taggedUsers = new Set();
     }
   }
   
-  // Save tagged users to chrome.storage (account-specific)
+  // Save tagged users to storage (account-specific)
   async function saveTaggedUsers() {
-    const settings = await loadSettingsSync();
-    const TAGS_KEY = tagsKeyFromSettings(settings);
-    chrome.storage.local.set({ [TAGS_KEY]: Array.from(taggedUsers) });
+    const key = ownerKey();
+    const arr = Array.from(taggedUsers);
+    
+    // Save to localStorage
+    try { 
+      localStorage.setItem(key, JSON.stringify(arr));
+    } catch {}
+    
+    // Also save to chrome.storage
+    try { 
+      await new Promise(r => chrome.storage?.local?.set?.({ [key]: arr }, r) || r());
+    } catch {}
   }
   
   // Format time ago
@@ -1826,11 +1843,12 @@
   });
   
   // Listen for story change events to reset the panel
-  window.addEventListener('storylister:active_media', (e) => {
+  window.addEventListener('storylister:active_media', async (e) => {
     const key = e.detail?.storyId || location.pathname;
     // Reset viewer list and counts
     viewers.clear();
-    taggedUsers.clear();
+    // Reload tags for new story owner (DON'T clear tags!)
+    await loadTaggedUsers();
     updateViewerList();
     
     // Load data from cache if available
