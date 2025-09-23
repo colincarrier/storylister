@@ -24,6 +24,7 @@
     viewerStore: new Map(),    // Map<storyKey, Map<viewerKey, viewer>>
     mirrorTimer: null,
     idToKey: new Map(),        // Map<mediaId -> storyKey>
+    userOverrodePauseByKey: new Set(),   // remembers you pressed play per story
   };
 
   const Settings = {
@@ -122,13 +123,16 @@
 
   // ==== [C] NATURAL PAUSE — pause only while the IG viewers dialog is open ====
   function pauseVideosWhileViewerOpen() {
-    if (!Settings.cache.pauseVideos) return; // consider defaulting this to false
-    const dlg = document.querySelector('[role="dialog"][aria-modal="true"]');
-    if (!dlg) return; // only while the IG viewer dialog is open
+    if (!Settings.cache.pauseVideos) return;
+    const key = getStorageKey();
+    if (state.userOverrodePauseByKey.has(key)) return; // respect user action
+
+    const dlgOpen = !!document.querySelector('[role="dialog"][aria-modal="true"]');
+    if (!dlgOpen) return;
 
     setTimeout(() => {
       document.querySelectorAll('video').forEach(v => {
-        if (v.dataset.userPlayed === '1') return; // respect manual play
+        if (v.dataset.userPlayed === '1') return;
         if (!v.paused && !v.dataset.slPaused) {
           try { v.pause(); v.dataset.slPaused = '1'; } catch {}
         }
@@ -144,7 +148,11 @@
   }
 
   document.addEventListener('play', (e) => {
-    if (e.target?.tagName === 'VIDEO') e.target.dataset.userPlayed = '1';
+    const el = e.target;
+    if (el && el.tagName === 'VIDEO') {
+      el.dataset.userPlayed = '1';
+      state.userOverrodePauseByKey.add(getStorageKey());
+    }
   }, true);
 
   // ==== [D] PAGINATION — simple + bounded ====
@@ -170,21 +178,38 @@
 
   // ==== [E] AUTO-OPEN — actually works for the first story ====
   async function autoOpenViewersOnceFor(key) {
-    if (!Settings.cache.autoOpen) return;
-    if (state.openedForKey?.has?.(key)) return;
-
-    // Wait up to 5s for the "Seen by" button to exist on the first slide
-    const btn = await waitForSeenByButton(5000, 150);
+    if (!Settings.cache.autoOpen || state.openedForKey.has(key)) return;
+    const btn = await waitForSeenByButton(5000);
     if (!btn) return;
-
     state.openedForKey.add(key);
     try { btn.click(); } catch {}
+
     setTimeout(() => {
       const scroller = findScrollableInDialog();
-      if (scroller) {
-        if (state.stopPagination) state.stopPagination();
-        state.stopPagination = startPagination(scroller, 6000);
-      }
+      if (!scroller) return;
+
+      // bounded, stall-aware scrolling
+      let lastH = -1, stable = 0, stop = false;
+      state.stopPagination = () => { stop = true; };
+
+      (function tick() {
+        if (stop || !document.contains(scroller)) return;
+
+        const target = getSeenByCount();
+        const loaded = state.viewerStore.get(getStorageKey())?.size || 0;
+        if (target && loaded >= target - 1) return;  // ±1 tolerance
+
+        const h = scroller.scrollHeight;
+        if (h === lastH) {
+          if (++stable >= 8) return;                 // ~8 * 150ms ≈ 1.2s stall -> stop
+        } else {
+          stable = 0;
+          lastH = h;
+        }
+
+        scroller.scrollTop = scroller.scrollHeight;
+        setTimeout(tick, 150);
+      })();
     }, 350);
   }
 
@@ -199,10 +224,9 @@
       const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
       store[key] = { viewers: Array.from(map.entries()), fetchedAt: Date.now() };
 
-      // Also store aliases for mediaIds that map to this key (prevents mis-routing on refresh)
-      const aliases = {};
-      for (const [mid, k] of state.idToKey.entries()) if (k === key) aliases[mid] = k;
-      store.__aliases = Object.assign(store.__aliases || {}, aliases);
+      // also remember mediaId aliasing to survive refresh
+      store.__aliases = store.__aliases || {};
+      for (const [mid, k] of state.idToKey.entries()) if (k === key) store.__aliases[mid] = k;
 
       localStorage.setItem('panel_story_store', JSON.stringify(store));
       window.dispatchEvent(new CustomEvent('storylister:data_updated', { detail: { storyId: key } }));
@@ -218,51 +242,50 @@
     const { mediaId, viewers } = msg.data || {};
     if (!mediaId || !Array.isArray(viewers)) return;
 
-    const activeKey = state.currentKey || getStorageKey(); // pathname
+    const activeKey = state.currentKey || getStorageKey();
     if (!state.idToKey.has(mediaId)) state.idToKey.set(mediaId, activeKey);
     const key = state.idToKey.get(mediaId);
 
     if (!state.viewerStore.has(key)) state.viewerStore.set(key, new Map());
-    const m = state.viewerStore.get(key);
+    const map = state.viewerStore.get(key);
 
-    viewers.forEach((raw, idx) => {
-      const v = raw; // normalizeViewer is done in injected.js
-      const k = (v.username ? v.username.toLowerCase() : '') || String(v.id || idx);
-      const prev = m.get(k) || {};
-      m.set(k, { ...prev, ...v }); // merge to avoid double counting
+    viewers.forEach((v, i) => {
+      const k = (v.username ? String(v.username).toLowerCase() : null) || String(v.id || i);
+      const prev = map.get(k) || {};
+      map.set(k, { ...prev, ...v });                        // merge to avoid losing flags
     });
 
     mirrorToLocalStorageDebounced(key);
+    window.dispatchEvent(new CustomEvent('storylister:active_media', { detail: { storyId: key } }));
   });
 
 
   // ==== [H] INJECT EXTERNAL SCRIPT ====
-  function injectExternalScript() {
+  function ensureInjected() {
     if (state.injected) return;
-    
     try {
+      const src = chrome?.runtime?.getURL?.('injected.js');
+      if (!src) return;                // happens only while reloading the unpacked extension
       const s = document.createElement('script');
-      // Try chrome.runtime.getURL first
-      if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.getURL) {
-        s.src = chrome.runtime.getURL('injected.js');
-        s.onload = () => {
-          console.log('[SL] External script loaded successfully');
-          state.injected = true;
-        };
-        s.onerror = () => {
-          console.warn('[SL] Failed to load external script - extension may need reload');
-          // Don't try inline injection as it will be blocked by CSP
-        };
-        (document.head || document.documentElement).appendChild(s);
-      } else {
-        console.warn('[SL] Chrome runtime not available - extension may need reload');
-      }
+      s.src = src;
+      s.dataset.storylisterInjected = '1';
+      s.onload = () => { s.remove(); state.injected = true; };
+      (document.head || document.documentElement).appendChild(s);
     } catch (e) {
-      console.error('[SL] Script injection failed:', e);
+      console.warn('[Storylister] inject failed', e);
     }
   }
 
-  // ==== [I] MAIN OBSERVER — first story, inject, pause only when dialog open ====
+  // ==== [I] STORY CHANGE HANDLER ====
+  function onStoryChanged(newKey) {
+    if (state.stopPagination) { state.stopPagination(); state.stopPagination = null; }
+    state.currentKey = newKey;
+    state.userOverrodePauseByKey.delete(newKey);
+    autoOpenViewersOnceFor(newKey);
+    window.dispatchEvent(new CustomEvent('storylister:active_media', { detail: { storyId: newKey } }));
+  }
+
+  // ==== [J] MAIN OBSERVER — first story, inject, pause only when dialog open ====
   const onDOMChange = (() => {
     let lastKey = null;
     return async () => {
@@ -277,14 +300,13 @@
       window.dispatchEvent(new CustomEvent('storylister:show_panel'));
       
       // Try to inject the script
-      injectExternalScript();
+      ensureInjected();
 
       const key = getStorageKey();
       if (key !== lastKey) {
         // story changed
-        if (state.stopPagination) state.stopPagination();
-        lastKey = state.currentKey = key;
-        autoOpenViewersOnceFor(key);
+        lastKey = key;
+        onStoryChanged(key);
       }
 
       // pause only while viewers dialog is open
