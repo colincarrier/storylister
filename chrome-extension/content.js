@@ -1903,13 +1903,12 @@
   if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
     chrome.runtime.onMessage.addListener((req, _sender, sendResponse) => {
       try {
-        if (req?.cmd === 'sl:toggle') {
-          const rail = document.getElementById('storylister-right-rail');
-          if (rail) {
-            rail.classList.toggle('active');
-            sendResponse({ ok: true, visible: rail.classList.contains('active') });
-            return; // we already responded (no async work)
-          }
+        if (req?.cmd === 'sl:toggle' || req?.type === 'STORYLISTER_TOGGLE') {
+          const panel = document.getElementById('storylister-right-rail');
+          const show = !(panel && panel.classList.contains('active'));
+          window.dispatchEvent(new CustomEvent(show ? 'storylister:show_panel' : 'storylister:hide_panel'));
+          sendResponse({ ok: true, visible: show });
+          return true; // important: tell Chrome we'll send response async
         }
         if (req?.cmd === 'sl:show') {
           showRightRail?.(); 
@@ -1923,8 +1922,8 @@
         }
       } catch (e) {
         sendResponse({ ok: false, error: String(e) });
+        return true; // important: tell Chrome we sent response
       }
-      // don't return true here; we already sent a response
     });
   }
 
