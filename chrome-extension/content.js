@@ -1836,9 +1836,7 @@
     // Load data from cache if available
     const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
     const data = store[key];
-    if (data?.viewers) {
-      handleBundledData(data.viewers);
-    }
+    // Fixed: removed handleBundledData call that was causing runtime error
   });
   
   // Hook the backend's broadcast
