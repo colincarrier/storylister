@@ -141,8 +141,10 @@
         displayName: v.full_name || v.displayName || v.username || 'Anonymous',
         profilePic: v.profile_pic_url || v.profilePic || '',
         isVerified: !!v.is_verified,
-        isFollower: !!v.followed_by_viewer,
-        isFollowing: !!v.follows_viewer,
+        // IG semantics: "follows_viewer" → they follow YOU (i.e., your follower)
+        isFollower: !!(v.follows_viewer ?? v.is_follower),
+        youFollow:  !!(v.followed_by_viewer ?? v.is_following),
+        reacted:    !!v.reaction,
         reaction: v.reaction || null,
         viewedAt: v.viewedAt || v.timestamp || Date.now(),
         originalIndex: v.originalIndex || 0,
@@ -399,19 +401,19 @@
     // Apply type filter
     switch (currentFilters.type) {
       case 'reacts':
-        filteredViewers = filteredViewers.filter(v => !!v.reaction);
+        filteredViewers = filteredViewers.filter(v => v.reacted || !!v.reaction);
         break;
       case 'followers':
-        filteredViewers = filteredViewers.filter(v => v.followed_by_viewer || v.isFollower);
+        filteredViewers = filteredViewers.filter(v => v.isFollower);
         break;
       case 'non-followers':
-        filteredViewers = filteredViewers.filter(v => !(v.followed_by_viewer || v.isFollower));
+        filteredViewers = filteredViewers.filter(v => !v.isFollower);
         break;
       case 'following':
-        filteredViewers = filteredViewers.filter(v => v.follows_viewer || v.isFollowing);
+        filteredViewers = filteredViewers.filter(v => v.youFollow);     // you follow them
         break;
       case 'verified':
-        filteredViewers = filteredViewers.filter(v => v.is_verified || v.isVerified);
+        filteredViewers = filteredViewers.filter(v => v.isVerified);
         break;
     }
 
@@ -509,8 +511,8 @@
                     displayName: viewer.full_name || viewer.displayName || viewer.username || 'Anonymous',
                     profilePic: viewer.profile_pic_url || viewer.profilePic || `https://ui-avatars.com/api/?name=${viewer.username || 'U'}`,
                     isVerified: viewer.is_verified || false,
-                    isFollower: viewer.followed_by_viewer || false,
-                    isFollowing: viewer.follows_viewer || false,
+                    isFollower: viewer.follows_viewer || false,
+                    youFollow: viewer.followed_by_viewer || false,
                     isTagged: taggedUsers.has(viewer.username),
                     isNew: viewer.isNew || false,
                     reaction: viewer.reaction || viewer.reacted || null,
@@ -566,8 +568,8 @@
         displayName: v.full_name || v.displayName || v.username || 'Anonymous',
         profilePic: v.profile_pic_url || v.profilePic || '',
         isVerified: !!v.is_verified,
-        isFollower: !!v.followed_by_viewer,
-        isFollowing: !!v.follows_viewer,
+        isFollower: !!(v.follows_viewer ?? v.is_follower),
+        youFollow:  !!(v.followed_by_viewer ?? v.is_following),
         viewedAt: v.viewedAt || v.timestamp || Date.now(),
         originalIndex: Number.isFinite(v.originalIndex) ? v.originalIndex : i,
         reaction: v.reaction || null,
@@ -799,9 +801,6 @@
           <div class="storylister-filter-buttons">
             <div class="filter-buttons-main">
               <button class="filter-btn active" data-filter-type="all">All</button>
-              <button class="filter-btn" data-filter-reacts="true">
-                ❤️ Reacts
-              </button>
               <button class="filter-btn" data-filter-type="verified">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="#1877F2" style="display: inline; vertical-align: middle;">
                   <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/>
@@ -1826,6 +1825,22 @@
     }
   });
   
+  // Listen for story change events to reset the panel
+  window.addEventListener('storylister:active_media', (e) => {
+    const key = e.detail?.storyId || location.pathname;
+    // Reset viewer list and counts
+    viewers.clear();
+    taggedUsers.clear();
+    updateViewerList();
+    
+    // Load data from cache if available
+    const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+    const data = store[key];
+    if (data?.viewers) {
+      handleBundledData(data.viewers);
+    }
+  });
+  
   // Hook the backend's broadcast
   window.addEventListener('storylister:data_updated', (e) => {
     const key = e.detail?.storyId;
@@ -1872,6 +1887,35 @@
     }
   }, true);
   
+  // Chrome runtime message handler for popup
+  if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
+    chrome.runtime.onMessage.addListener((req, _sender, sendResponse) => {
+      try {
+        if (req?.cmd === 'sl:toggle') {
+          const rail = document.getElementById('storylister-right-rail');
+          if (rail) {
+            rail.classList.toggle('active');
+            sendResponse({ ok: true, visible: rail.classList.contains('active') });
+            return; // we already responded (no async work)
+          }
+        }
+        if (req?.cmd === 'sl:show') {
+          showRightRail?.(); 
+          sendResponse({ ok: true }); 
+          return;
+        }
+        if (req?.cmd === 'sl:hide') {
+          hideRightRail?.(); 
+          sendResponse({ ok: true }); 
+          return;
+        }
+      } catch (e) {
+        sendResponse({ ok: false, error: String(e) });
+      }
+      // don't return true here; we already sent a response
+    });
+  }
+
   // Start initialization
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', initialize);
