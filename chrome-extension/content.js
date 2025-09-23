@@ -302,29 +302,40 @@
     return `sl_${username}_`;
   }
   
-  // Load tagged users from chrome.storage (account-specific)
+  // Helper to get owner from URL
+  function getOwnerFromURL() {
+    return location.pathname.match(/\/stories\/([^/]+)/)?.[1] || 'default';
+  }
+  
+  // Load tagged users from localStorage + chrome.storage (account-specific)
   async function loadTaggedUsers() {
+    const key = `sl_tags_${getOwnerFromURL()}`;
     try {
-      const settings = await loadSettingsSync();
-      const TAGS_KEY = tagsKeyFromSettings(settings);
-      
-      return new Promise(resolve => {
-        chrome.storage.local.get([TAGS_KEY], (obj) => {
-          const tags = obj[TAGS_KEY] || [];
-          taggedUsers = new Set(tags);
-          resolve();
-        });
-      });
-    } catch (e) {
+      const ls = localStorage.getItem(key);
+      if (ls) { 
+        taggedUsers = new Set(JSON.parse(ls)); 
+        return; 
+      }
+    } catch {}
+    
+    try {
+      const data = await new Promise(r => chrome.storage?.local?.get?.(key, r) || r({}));
+      taggedUsers = new Set(data?.[key] || []);
+    } catch {
       taggedUsers = new Set();
     }
   }
   
-  // Save tagged users to chrome.storage (account-specific)
+  // Save tagged users to localStorage + chrome.storage (account-specific)
   async function saveTaggedUsers() {
-    const settings = await loadSettingsSync();
-    const TAGS_KEY = tagsKeyFromSettings(settings);
-    chrome.storage.local.set({ [TAGS_KEY]: Array.from(taggedUsers) });
+    const key = `sl_tags_${getOwnerFromURL()}`;
+    const arr = Array.from(taggedUsers);
+    try { 
+      localStorage.setItem(key, JSON.stringify(arr)); 
+    } catch {}
+    try { 
+      await new Promise(r => chrome.storage?.local?.set?.({ [key]: arr }, r) || r()); 
+    } catch {}
   }
   
   // Format time ago
