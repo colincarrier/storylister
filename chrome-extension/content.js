@@ -1837,7 +1837,11 @@
     const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
     const data = store[key];
     if (data?.viewers) {
-      handleBundledData(data.viewers);
+      // Rebuild viewers from cache
+      data.viewers.forEach(([k, v]) => {
+        viewers.set(k, v);
+      });
+      updateViewerList();
     }
   });
   
