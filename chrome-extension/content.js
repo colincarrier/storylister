@@ -404,13 +404,13 @@
         filteredViewers = filteredViewers.filter(v => v.reacted || !!v.reaction);
         break;
       case 'followers':
-        filteredViewers = filteredViewers.filter(v => v.isFollower);
+        filteredViewers = filteredViewers.filter(v => v.isFollower === true);
         break;
       case 'non-followers':
         filteredViewers = filteredViewers.filter(v => !v.isFollower);
         break;
       case 'following':
-        filteredViewers = filteredViewers.filter(v => v.youFollow);     // you follow them
+        filteredViewers = filteredViewers.filter(v => v.youFollow === true);     // you follow them
         break;
       case 'verified':
         filteredViewers = filteredViewers.filter(v => v.isVerified);
