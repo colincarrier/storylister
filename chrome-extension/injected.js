@@ -8,24 +8,30 @@
   function normalizeViewer(v, idx) {
     const u = v?.user || v?.node?.user || v?.node || v;
 
-    // Accept only absolute http(s) profile pics
+    // Robust profile picture: accept only absolute http(s) URLs
     let pic = u?.profile_pic_url || u?.profile_pic_url_hd || u?.profile_picture_url || '';
     if (typeof pic !== 'string' || !/^https?:\/\//i.test(pic)) pic = '';
 
+    // Reaction from known shapes; IG "like" → ❤️
     const reaction =
       v?.reaction?.emoji ||
       v?.story_reaction?.emoji ||
       v?.latest_reaction?.emoji ||
       (v?.has_liked ? '❤️' : null);
 
+    // Map friendship_status if present (old endpoints)
+    const fs = v?.friendship_status;
+    const follows_viewer       = (typeof v?.follows_viewer       === 'boolean') ? v.follows_viewer       : !!fs?.following;
+    const followed_by_viewer   = (typeof v?.followed_by_viewer   === 'boolean') ? v.followed_by_viewer   : !!fs?.followed_by;
+
     return {
-      id: String(u?.id || u?.pk || u?.username || idx),
+      id: String(u?.id || u?.pk || u?.pk_id || u?.username || idx),
       username: u?.username || '',
-      full_name: u?.full_name || u?.fullname || '',
+      full_name: u?.full_name || u?.fullname || u?.name || '',
       profile_pic_url: pic,
-      is_verified: !!(u?.is_verified || u?.verified || u?.blue_verified),
-      followed_by_viewer: !!(u?.followed_by_viewer || u?.is_following),
-      follows_viewer: !!(u?.follows_viewer || u?.is_follower),
+      is_verified: !!(u?.is_verified || u?.blue_verified || u?.is_verified_badge || u?.verified),
+      follows_viewer,
+      followed_by_viewer,
       reaction: reaction || null,
       originalIndex: idx,
       viewedAt: v?.timestamp || v?.viewed_at || Date.now()
