@@ -382,6 +382,12 @@
   font-size: 16px;
   cursor: pointer;
   transition: all 0.2s;
+  user-select: none;
+  position: relative;
+}
+
+.storylister-tag * {
+  pointer-events: none; /* icons/text don't steal the click */
 }
 
 .storylister-tag:hover {
