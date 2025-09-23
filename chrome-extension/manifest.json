@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Storylister",
-  "version": "1.14.0",
+  "version": "1.15.0",
   "description": "Story viewer insights.",
   "permissions": ["storage", "scripting"],
   "host_permissions": ["https://www.instagram.com/*", "https://*.instagram.com/*"],
