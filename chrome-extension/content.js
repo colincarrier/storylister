@@ -302,40 +302,29 @@
     return `sl_${username}_`;
   }
   
-  // Helper to get owner from URL
-  function getOwnerFromURL() {
-    return location.pathname.match(/\/stories\/([^/]+)/)?.[1] || 'default';
-  }
-  
-  // Load tagged users from localStorage + chrome.storage (account-specific)
+  // Load tagged users from chrome.storage (account-specific)
   async function loadTaggedUsers() {
-    const key = `sl_tags_${getOwnerFromURL()}`;
     try {
-      const ls = localStorage.getItem(key);
-      if (ls) { 
-        taggedUsers = new Set(JSON.parse(ls)); 
-        return; 
-      }
-    } catch {}
-    
-    try {
-      const data = await new Promise(r => chrome.storage?.local?.get?.(key, r) || r({}));
-      taggedUsers = new Set(data?.[key] || []);
-    } catch {
+      const settings = await loadSettingsSync();
+      const TAGS_KEY = tagsKeyFromSettings(settings);
+      
+      return new Promise(resolve => {
+        chrome.storage.local.get([TAGS_KEY], (obj) => {
+          const tags = obj[TAGS_KEY] || [];
+          taggedUsers = new Set(tags);
+          resolve();
+        });
+      });
+    } catch (e) {
       taggedUsers = new Set();
     }
   }
   
-  // Save tagged users to localStorage + chrome.storage (account-specific)
+  // Save tagged users to chrome.storage (account-specific)
   async function saveTaggedUsers() {
-    const key = `sl_tags_${getOwnerFromURL()}`;
-    const arr = Array.from(taggedUsers);
-    try { 
-      localStorage.setItem(key, JSON.stringify(arr)); 
-    } catch {}
-    try { 
-      await new Promise(r => chrome.storage?.local?.set?.({ [key]: arr }, r) || r()); 
-    } catch {}
+    const settings = await loadSettingsSync();
+    const TAGS_KEY = tagsKeyFromSettings(settings);
+    chrome.storage.local.set({ [TAGS_KEY]: Array.from(taggedUsers) });
   }
   
   // Format time ago
@@ -579,14 +568,11 @@
         displayName: v.full_name || v.displayName || v.username || 'Anonymous',
         profilePic: v.profile_pic_url || v.profilePic || '',
         isVerified: !!v.is_verified,
-        // Followers / Following without hitting any APIs:
         isFollower: !!(v.follows_viewer ?? v.is_follower),
         youFollow:  !!(v.followed_by_viewer ?? v.is_following),
-        // ❤️ reactions
-        reaction: v.reaction || null,
-        reacted: !!v.reaction,
         viewedAt: v.viewedAt || v.timestamp || Date.now(),
         originalIndex: Number.isFinite(v.originalIndex) ? v.originalIndex : i,
+        reaction: v.reaction || null,
         isTagged: taggedUsers.has(v.username || v.id)
       });
     });
@@ -1850,7 +1836,9 @@
     // Load data from cache if available
     const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
     const data = store[key];
-    // Fixed: removed handleBundledData call that was causing runtime error
+    if (data?.viewers) {
+      handleBundledData(data.viewers);
+    }
   });
   
   // Hook the backend's broadcast
@@ -1903,12 +1891,13 @@
   if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
     chrome.runtime.onMessage.addListener((req, _sender, sendResponse) => {
       try {
-        if (req?.cmd === 'sl:toggle' || req?.type === 'STORYLISTER_TOGGLE') {
-          const panel = document.getElementById('storylister-right-rail');
-          const show = !(panel && panel.classList.contains('active'));
-          window.dispatchEvent(new CustomEvent(show ? 'storylister:show_panel' : 'storylister:hide_panel'));
-          sendResponse({ ok: true, visible: show });
-          return true; // important: tell Chrome we'll send response async
+        if (req?.cmd === 'sl:toggle') {
+          const rail = document.getElementById('storylister-right-rail');
+          if (rail) {
+            rail.classList.toggle('active');
+            sendResponse({ ok: true, visible: rail.classList.contains('active') });
+            return; // we already responded (no async work)
+          }
         }
         if (req?.cmd === 'sl:show') {
           showRightRail?.(); 
@@ -1922,8 +1911,8 @@
         }
       } catch (e) {
         sendResponse({ ok: false, error: String(e) });
-        return true; // important: tell Chrome we sent response
       }
+      // don't return true here; we already sent a response
     });
   }
 
