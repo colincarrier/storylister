@@ -115,7 +115,7 @@
 
   async function isOnOwnStory() {
     if (!location.pathname.startsWith('/stories/')) return false;
-    // Do NOT require the "Seen by" UI here; it often appears late on the first story.
+    if (!hasSeenByUI()) return false;  // Only run on stories with "Seen by" (your own)
     const owner = getStoryOwnerFromURL();
     if (!owner) return false;
     return await canRunForOwner(owner);
@@ -286,39 +286,30 @@
   }
 
   // ==== [J] MAIN OBSERVER — first story, inject, pause only when dialog open ====
-  const onDOMChange = (() => {
-    let lastKey = null;
-    return async () => {
-      // gate: only on your own story (Seen by must eventually exist)
-      const onStories = location.pathname.startsWith('/stories/');
-      if (!onStories) {
-        window.dispatchEvent(new CustomEvent('storylister:hide_panel'));
-        resumeAnyPausedVideos();
-        return;
-      }
+  const onDOMChange = throttle(async () => {
+    // gate: only on your own story (must have "Seen by")
+    if (!await isOnOwnStory()) {
+      window.dispatchEvent(new CustomEvent('storylister:hide_panel'));
+      resumeAnyPausedVideos();
+      return;
+    }
+    
+    window.dispatchEvent(new CustomEvent('storylister:show_panel'));
+    ensureInjected();
+    pauseVideosWhileViewerOpen();
 
-      window.dispatchEvent(new CustomEvent('storylister:show_panel'));
-      
-      // Try to inject the script
-      ensureInjected();
+    const key = getStorageKey();
+    if (key !== state.currentKey) {
+      state.currentKey = key;
+      if (state.stopPagination) state.stopPagination();
+      autoOpenViewersOnceFor(key);
+    }
+  }, 200);
 
-      const key = getStorageKey();
-      if (key !== lastKey) {
-        // story changed
-        lastKey = key;
-        onStoryChanged(key);
-      }
-
-      // pause only while viewers dialog is open
-      pauseVideosWhileViewerOpen();
-    };
-  })();
-
-  // Throttle the MutationObserver callback
-  const onNav = throttle(onDOMChange, 250);
-  const mo = new MutationObserver(onNav);
+  // Set up MutationObserver
+  const mo = new MutationObserver(onDOMChange);
   mo.observe(document.documentElement || document.body, { childList: true, subtree: true });
-  onNav(); // initial pass
+  onDOMChange(); // initial pass
 
   // Initialize settings
   (async function init() {
