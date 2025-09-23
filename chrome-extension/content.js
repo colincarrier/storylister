@@ -568,11 +568,14 @@
         displayName: v.full_name || v.displayName || v.username || 'Anonymous',
         profilePic: v.profile_pic_url || v.profilePic || '',
         isVerified: !!v.is_verified,
+        // Followers / Following without hitting any APIs:
         isFollower: !!(v.follows_viewer ?? v.is_follower),
         youFollow:  !!(v.followed_by_viewer ?? v.is_following),
+        // ❤️ reactions
+        reaction: v.reaction || null,
+        reacted: !!v.reaction,
         viewedAt: v.viewedAt || v.timestamp || Date.now(),
         originalIndex: Number.isFinite(v.originalIndex) ? v.originalIndex : i,
-        reaction: v.reaction || null,
         isTagged: taggedUsers.has(v.username || v.id)
       });
     });
