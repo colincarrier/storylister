@@ -44,21 +44,13 @@ $('sl-erase').addEventListener('click', () => {
   setTimeout(loadSettings, 200);
 });
 
-// Add toggle button handler
-$('sl-toggle').addEventListener('click', () => {
-  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-    const tabId = tabs[0]?.id;
-    if (!tabId) return;
-    
-    // Send message to content script to toggle the panel
-    chrome.tabs.sendMessage(tabId, { cmd: 'sl:toggle' }, (response) => {
-      if (chrome.runtime.lastError) {
-        console.error('Toggle failed:', chrome.runtime.lastError);
-      } else {
-        console.log('Panel toggled:', response);
-      }
-    });
-  });
+// Add toggle button handler  
+document.addEventListener('click', async (e) => {
+  if (e.target.matches('#sl-toggle, [data-action="toggle"]')) {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    chrome.tabs.sendMessage(tab.id, { type: 'STORYLISTER_TOGGLE_PANEL' });
+    window.close();
+  }
 });
 
 document.addEventListener('DOMContentLoaded', loadSettings);

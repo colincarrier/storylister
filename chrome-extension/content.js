@@ -1910,33 +1910,13 @@
   }, true);
   
   // Chrome runtime message handler for popup
-  if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
-    chrome.runtime.onMessage.addListener((req, _sender, sendResponse) => {
-      try {
-        if (req?.cmd === 'sl:toggle') {
-          const rail = document.getElementById('storylister-right-rail');
-          if (rail) {
-            rail.classList.toggle('active');
-            sendResponse({ ok: true, visible: rail.classList.contains('active') });
-            return; // we already responded (no async work)
-          }
-        }
-        if (req?.cmd === 'sl:show') {
-          showRightRail?.(); 
-          sendResponse({ ok: true }); 
-          return;
-        }
-        if (req?.cmd === 'sl:hide') {
-          hideRightRail?.(); 
-          sendResponse({ ok: true }); 
-          return;
-        }
-      } catch (e) {
-        sendResponse({ ok: false, error: String(e) });
-      }
-      // don't return true here; we already sent a response
-    });
-  }
+  chrome.runtime?.onMessage?.addListener((msg) => {
+    if (msg?.type === 'STORYLISTER_TOGGLE_PANEL') {
+      const ev = document.body.dataset.slVisible === '1' ? 'storylister:hide_panel' : 'storylister:show_panel';
+      window.dispatchEvent(new CustomEvent(ev));
+      document.body.dataset.slVisible = ev.endsWith('show_panel') ? '1' : '0';
+    }
+  });
 
   // Start initialization
   if (document.readyState === 'loading') {
