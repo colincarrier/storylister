@@ -502,11 +502,13 @@
     }
   };
   
-  // Load viewers from storage (backwards compatibility wrapper)
+  // Load viewers from localStorage under the pathname key
   function loadViewersFromStorage() {
-    const key = slStoreKey(); // Use same key as backend
+    const currentKey = slStoreKey(); // Always use pathname
+    if (!currentKey) return;
+    
     const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
-    const data = store[key];
+    const data = store[currentKey];
     if (!data?.viewers) return;
 
     viewers.clear();
@@ -1764,15 +1766,11 @@
     }
   });
   
-  // Listen for data updates from backend
-  window.addEventListener('storylister:data_updated', (evt) => {
-    // If the update is for the current story key, refresh the list
-    const key = evt.detail?.storyId;
-    if (!key || key === slStoreKey()) {
-      if (typeof loadViewersFromStorage === 'function') {
-        loadViewersFromStorage();
-      }
-    }
+  // Hook the backend's broadcast
+  window.addEventListener('storylister:data_updated', (e) => {
+    const key = e.detail?.storyId;
+    if (key !== slStoreKey()) return;   // only refresh when this story updated
+    loadViewersFromStorage();
   });
   
   // Helper to get story ID from URL (same as backend)
