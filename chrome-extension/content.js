@@ -398,6 +398,9 @@
 
     // Apply type filter
     switch (currentFilters.type) {
+      case 'reacts':
+        filteredViewers = filteredViewers.filter(v => !!v.reaction);
+        break;
       case 'followers':
         filteredViewers = filteredViewers.filter(v => v.followed_by_viewer || v.isFollower);
         break;
@@ -415,11 +418,6 @@
     // Apply tag filter
     if (currentFilters.showTagged) {
       filteredViewers = filteredViewers.filter(v => v.isTagged);
-    }
-
-    // Apply reactions filter
-    if (currentFilters.showReacts) {
-      filteredViewers = filteredViewers.filter(v => !!v.reaction);
     }
 
     // Apply sorting
@@ -815,6 +813,7 @@
               </button>
             </div>
             <div class="filter-buttons-secondary">
+              <button class="filter-btn-small" data-filter-type="reacts">❤️ Reacts</button>
               <button class="filter-btn-small" data-filter-type="following">Following</button>
               <button class="filter-btn-small" data-filter-type="followers">Followers</button>
               <button class="filter-btn-small" data-filter-type="non-followers">Non-followers</button>
