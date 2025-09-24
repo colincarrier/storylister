@@ -554,3 +554,24 @@
   overflow-y: auto;
   min-height: 0;
 }
+
+/* Make the whole tag button clickable; children don't steal clicks */
+.storylister-tag { user-select: none; position: relative; }
+.storylister-tag * { pointer-events: none; }
+
+/* Ensure panel stays visible but does not block IG dialog controls */
+#storylister-right-rail { z-index: 2147483646 !important; }
+[role="dialog"] { z-index: 2147483647 !important; }  /* IG above us where needed */
+
+/* Make clickable links in viewer list more visible */
+.sl-username {
+  text-decoration: none;
+  color: inherit;
+}
+.sl-username:hover {
+  text-decoration: underline;
+}
+.storylister-viewer-avatar {
+  text-decoration: none;
+  display: inline-block;
+}
