@@ -418,16 +418,18 @@
     // Apply type filter
     switch (currentFilters.type) {
       case 'reacts':
-        filteredViewers = filteredViewers.filter(v => v.reacted || !!v.reaction);
+        filteredViewers = filteredViewers.filter(v => v.reacted || v.reaction);
         break;
-      case 'followers':
+      case 'following':        // you follow them
+        filteredViewers = filteredViewers.filter(v => v.youFollow === true);
+        break;
+      case 'followers':        // they follow you
         filteredViewers = filteredViewers.filter(v => v.isFollower === true);
         break;
-      case 'non-followers':
-        filteredViewers = filteredViewers.filter(v => !v.isFollower);
-        break;
-      case 'following':
-        filteredViewers = filteredViewers.filter(v => v.youFollow === true);     // you follow them
+      case 'nonfollowers':     // neither follows the other
+        filteredViewers = filteredViewers.filter(v =>
+          v.youFollow === false && v.isFollower === false
+        );
         break;
       case 'verified':
         filteredViewers = filteredViewers.filter(v => v.isVerified);
@@ -585,11 +587,12 @@
         displayName: v.full_name || v.displayName || v.username || 'Anonymous',
         profilePic: v.profile_pic_url || v.profilePic || '',
         isVerified: !!v.is_verified,
-        isFollower: !!(v.follows_viewer ?? v.is_follower),
-        youFollow:  !!(v.followed_by_viewer ?? v.is_following),
+        isFollower: !!(v.follows_viewer ?? v.is_follower),     // they follow you
+        youFollow:  !!(v.followed_by_viewer ?? v.is_following),// you follow them
+        reaction: v.reaction || null,                           // keep raw
+        reacted: !!v.reaction,                                  // boolean for filter
         viewedAt: v.viewedAt || v.timestamp || Date.now(),
         originalIndex: Number.isFinite(v.originalIndex) ? v.originalIndex : i,
-        reaction: v.reaction || null,
         isTagged: taggedUsers.has(v.username || v.id)
       });
     });
@@ -712,12 +715,12 @@
       }
       
       viewerEl.innerHTML = `
-        <div class="storylister-viewer-avatar" data-username="${slSafe(viewer.username)}">
+        <a href="https://www.instagram.com/${viewer.username}/" target="_blank" rel="noopener noreferrer" class="storylister-viewer-avatar" data-username="${slSafe(viewer.username)}">
           ${slAvatarHTML(viewer.profilePic, viewer.username)}
-        </div>
+        </a>
         <div class="storylister-viewer-info">
           <div class="storylister-viewer-username" data-username="${viewer.username}">
-            ${viewer.username}
+            <a href="https://www.instagram.com/${viewer.username}/" target="_blank" rel="noopener noreferrer" class="sl-username">${viewer.username}</a>
             ${viewer.isVerified ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="#1877F2" style="display: inline; vertical-align: middle; margin-left: 4px;"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>' : ''}
             ${reactionHtml}
             ${newBadge}
