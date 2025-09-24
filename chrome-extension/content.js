@@ -120,8 +120,10 @@
 
   // Load cache map for current story
   function loadCacheMapForCurrent() {
+    const key = location.pathname;
     try {
-      const raw = readStoreForCurrent();
+      const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+      const raw = store[key];
       if (!raw || !Array.isArray(raw.viewers)) return new Map();
       return new Map(raw.viewers); // Map<viewerKey, viewer>
     } catch { return new Map(); }
@@ -564,9 +566,13 @@
     }
   };
   
-  // Load viewers from localStorage under the composite key or alias
+  // Load viewers from localStorage under the pathname key
   function loadViewersFromStorage() {
-    const data = readStoreForCurrent();
+    const currentKey = slStoreKey(); // Always use pathname
+    if (!currentKey) return;
+    
+    const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+    const data = store[currentKey];
     if (!data?.viewers) return;
 
     viewers.clear();
@@ -581,10 +587,9 @@
         isVerified: !!v.is_verified,
         isFollower: !!(v.follows_viewer ?? v.is_follower),
         youFollow:  !!(v.followed_by_viewer ?? v.is_following),
-        reaction: v.reaction || null,
-        reacted: !!v.reaction,
         viewedAt: v.viewedAt || v.timestamp || Date.now(),
         originalIndex: Number.isFinite(v.originalIndex) ? v.originalIndex : i,
+        reaction: v.reaction || null,
         isTagged: taggedUsers.has(v.username || v.id)
       });
     });
@@ -1876,25 +1881,9 @@
     return m ? m[1] : null;
   }
   
-  function readStoreForCurrent() {
-    const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
-    const idFromURL = location.pathname.match(/\/stories\/[^/]+\/(\d+)/)?.[1] || null;
-    const composite = `${location.pathname}#${idFromURL || 'first'}`;
-
-    if (store[composite]) return store[composite];
-
-    // If resolver found an id, try alias mapping
-    const aliases = store.__aliases || {};
-    if (idFromURL && aliases[idFromURL] && store[aliases[idFromURL]]) {
-      return store[aliases[idFromURL]];
-    }
-    return null;
-  }
-
   function slStoreKey() {
-    // Must match content-backend.js composite key
-    const idFromURL = location.pathname.match(/\/stories\/[^/]+\/(\d+)/)?.[1] || null;
-    return `${location.pathname}#${idFromURL || 'first'}`;
+    // Must match content-backend.js
+    return location.pathname;
   }
   
   // Ensure button handlers work (delegation for dynamic elements)

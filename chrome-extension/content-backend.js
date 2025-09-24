@@ -55,46 +55,8 @@
     }
   };
 
-  // ---- StoryIdResolver: pull a stable numeric id even when URL has none
-  const StoryIdResolver = (() => {
-    let last = null;
-
-    function fromURL() {
-      const m = location.pathname.match(/\/stories\/[^/]+\/(\d+)/);
-      return m ? m[1] : null;
-    }
-
-    function fromAlternateLink() {
-      const link = [...document.querySelectorAll('link[rel="alternate"]')]
-        .find(l => /\/stories\/[^/]+\/\d+/.test(l.href));
-      if (!link) return null;
-      const m = link.href.match(/\/stories\/[^/]+\/(\d+)/);
-      return m ? m[1] : null;
-    }
-
-    function fromLdJson() {
-      const blobs = [...document.querySelectorAll('script[type="application/ld+json"],script[data-scope]')]
-        .map(n => n.textContent || '')
-        .join('\n');
-      const m =
-        blobs.match(/"media_id"\s*:\s*"(\d{10,})"/) ||
-        blobs.match(/"id"\s*:\s*"(\d{10,})"/);
-      return m ? m[1] : null;
-    }
-
-    function resolve() {
-      return fromURL() || fromAlternateLink() || fromLdJson() || last;
-    }
-    function remember(id) { if (id) last = id; }
-    return { resolve, remember, last: () => last };
-  })();
-
   // ==== [B] UTILITIES ====
-  function storyKey() {
-    const id = StoryIdResolver.resolve();
-    // Distinguish slides even when the URL lacks the numeric id
-    return `${location.pathname}#${id || 'first'}`;
-  }
+  function getStorageKey() { return location.pathname; }  // first-story safe
 
   function findSeenByButton() {
     return document.querySelector('a[href*="/seen_by/"]') ||
@@ -103,12 +65,9 @@
   }
 
   async function waitForSeenByButton(timeout = 5000, interval = 150) {
-    const t0 = Date.now();
-    while (Date.now() - t0 < timeout) {
-      const a = document.querySelector('a[href*="/seen_by/"]');
-      if (a) return a;
-      const btn = [...document.querySelectorAll('[role="button"],button')]
-        .find(el => /^Seen by(\s+[0-9,]+)?$/i.test((el.textContent || '').trim()));
+    const start = Date.now();
+    while (Date.now() - start < timeout) {
+      const btn = findSeenByButton();
       if (btn) return btn;
       await new Promise(r => setTimeout(r, interval));
     }
@@ -163,12 +122,14 @@
   }
 
   // ==== [C] NATURAL PAUSE — pause only while the IG viewers dialog is open ====
-  function pauseWhileViewerDialogOpen() {
+  function pauseVideosWhileViewerOpen() {
     if (!Settings.cache.pauseVideos) return;
-    const dlgOpen = !!document.querySelector('[role="dialog"][aria-modal="true"]');
-    if (!dlgOpen) return; // no dialog, no pause
+    const key = getStorageKey();
+    if (state.userOverrodePauseByKey.has(key)) return; // respect user action
 
-    // Human-like delay; and respect manual play
+    const dlgOpen = !!document.querySelector('[role="dialog"][aria-modal="true"]');
+    if (!dlgOpen) return;
+
     setTimeout(() => {
       document.querySelectorAll('video').forEach(v => {
         if (v.dataset.userPlayed === '1') return;
@@ -179,10 +140,6 @@
     }, 1200);
   }
 
-  document.addEventListener('play', (e) => {
-    if (e.target?.tagName === 'VIDEO') e.target.dataset.userPlayed = '1';
-  }, true);
-
   function resumeAnyPausedVideos() {
     document.querySelectorAll('video[data-sl-paused="1"]').forEach(v => {
       try { v.play(); } catch {}
@@ -190,52 +147,73 @@
     });
   }
 
+  document.addEventListener('play', (e) => {
+    const el = e.target;
+    if (el && el.tagName === 'VIDEO') {
+      el.dataset.userPlayed = '1';
+      state.userOverrodePauseByKey.add(getStorageKey());
+    }
+  }, true);
+
   // ==== [D] PAGINATION — simple + bounded ====
   function startPagination(scroller, maxMs = 6000) {
     const t0 = Date.now();
-    let stop = false;
+    let stopped = false;
     const tick = () => {
-      if (stop || !document.contains(scroller)) return;
+      if (stopped || !document.contains(scroller)) return;
       if (Date.now() - t0 > maxMs) return;
 
-      // Stop when we've loaded (SeenBy - 1) or more (IG off-by-1 is common)
       const target = getSeenByCount();
-      const map = state.viewerStore.get(storyKey());
-      const loaded = map ? map.size : 0;
-      if (target && loaded >= target - 1) return;
+      const currentMap = state.viewerStore.get(getStorageKey());
+      const loaded = currentMap ? currentMap.size : 0;
+      if (target && loaded >= target - 1) return; // allow ±1
 
       scroller.scrollTop = scroller.scrollHeight;
-      const nearBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 12;
+      const nearBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 10;
       setTimeout(tick, nearBottom ? 450 : 250);
     };
     tick();
-    return () => { stop = true; };
+    return () => { stopped = true; };
   }
 
   // ==== [E] AUTO-OPEN — actually works for the first story ====
   async function autoOpenViewersOnceFor(key) {
-    if (!Settings.cache.autoOpen) return;
-    if (state.openedForKey.has(key)) return;
+    if (!Settings.cache.autoOpen || state.openedForKey.has(key)) return;
     const btn = await waitForSeenByButton(5000);
     if (!btn) return;
     state.openedForKey.add(key);
     try { btn.click(); } catch {}
+
     setTimeout(() => {
-      const dlg = document.querySelector('[role="dialog"][aria-modal="true"]');
-      const scroller = dlg && (
-        dlg.querySelector('[style*="overflow-y"]') ||
-        dlg.querySelector('[style*="overflow: hidden auto"]') ||
-        [...dlg.querySelectorAll('div')].find(el => el.scrollHeight > el.clientHeight + 40) ||
-        dlg
-      );
-      if (scroller) {
-        if (state.stopPagination) state.stopPagination();
-        state.stopPagination = startPagination(scroller);
-      }
+      const scroller = findScrollableInDialog();
+      if (!scroller) return;
+
+      // bounded, stall-aware scrolling
+      let lastH = -1, stable = 0, stop = false;
+      state.stopPagination = () => { stop = true; };
+
+      (function tick() {
+        if (stop || !document.contains(scroller)) return;
+
+        const target = getSeenByCount();
+        const loaded = state.viewerStore.get(getStorageKey())?.size || 0;
+        if (target && loaded >= target - 1) return;  // ±1 tolerance
+
+        const h = scroller.scrollHeight;
+        if (h === lastH) {
+          if (++stable >= 8) return;                 // ~8 * 150ms ≈ 1.2s stall -> stop
+        } else {
+          stable = 0;
+          lastH = h;
+        }
+
+        scroller.scrollTop = scroller.scrollHeight;
+        setTimeout(tick, 150);
+      })();
     }, 350);
   }
 
-  // ==== [F] MIRROR TO CACHE — key = composite; write debounced ====
+  // ==== [F] MIRROR TO CACHE — key = pathname; write debounced ====
   function mirrorToLocalStorageDebounced(key) {
     if (state.mirrorTimer) return;
     state.mirrorTimer = setTimeout(() => {
@@ -244,16 +222,15 @@
       if (!map || map.size === 0) return;
 
       const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
-      store[key] = { viewers: [...map.entries()], fetchedAt: Date.now() };
+      store[key] = { viewers: Array.from(map.entries()), fetchedAt: Date.now() };
 
-      // Also alias by every mediaId that maps to this key
-      const aliases = {};
-      for (const [mid, k] of state.idToKey.entries()) if (k === key) aliases[mid] = key;
-      store.__aliases = Object.assign(store.__aliases || {}, aliases);
+      // also remember mediaId aliasing to survive refresh
+      store.__aliases = store.__aliases || {};
+      for (const [mid, k] of state.idToKey.entries()) if (k === key) store.__aliases[mid] = k;
 
       localStorage.setItem('panel_story_store', JSON.stringify(store));
       window.dispatchEvent(new CustomEvent('storylister:data_updated', { detail: { storyId: key } }));
-    }, 250);
+    }, 300);
   }
 
   // ==== [G] MESSAGE BRIDGE — correct routing + dedupe ====
@@ -265,24 +242,21 @@
     const { mediaId, viewers } = msg.data || {};
     if (!mediaId || !Array.isArray(viewers)) return;
 
-    const active = storyKey();
+    const activeKey = state.currentKey || getStorageKey();
+    if (!state.idToKey.has(mediaId)) state.idToKey.set(mediaId, activeKey);
+    const key = state.idToKey.get(mediaId);
 
-    // First time we see this mediaId, bind it to the active key
-    if (!state.idToKey.has(mediaId)) state.idToKey.set(mediaId, active);
-    StoryIdResolver.remember(mediaId);
-
-    const key = state.idToKey.get(mediaId) || active;
     if (!state.viewerStore.has(key)) state.viewerStore.set(key, new Map());
     const map = state.viewerStore.get(key);
 
     viewers.forEach((v, i) => {
-      // dedupe by username (case-insens) or id
       const k = (v.username ? String(v.username).toLowerCase() : null) || String(v.id || i);
       const prev = map.get(k) || {};
-      map.set(k, { ...prev, ...v });
+      map.set(k, { ...prev, ...v });                        // merge to avoid losing flags
     });
 
     mirrorToLocalStorageDebounced(key);
+    window.dispatchEvent(new CustomEvent('storylister:active_media', { detail: { storyId: key } }));
   });
 
 
@@ -312,34 +286,30 @@
   }
 
   // ==== [J] MAIN OBSERVER — first story, inject, pause only when dialog open ====
-  const onDOMChange = (() => {
-    let lastKey = null;
-    return async () => {
-      if (!location.pathname.startsWith('/stories/')) {
-        window.dispatchEvent(new CustomEvent('storylister:hide_panel'));
-        return;
-      }
+  const onDOMChange = throttle(async () => {
+    // gate: only on your own story (must have "Seen by")
+    if (!await isOnOwnStory()) {
+      window.dispatchEvent(new CustomEvent('storylister:hide_panel'));
+      resumeAnyPausedVideos();
+      return;
+    }
+    
+    window.dispatchEvent(new CustomEvent('storylister:show_panel'));
+    ensureInjected();
+    pauseVideosWhileViewerOpen();
 
-      window.dispatchEvent(new CustomEvent('storylister:show_panel'));
-      ensureInjected();
+    const key = getStorageKey();
+    if (key !== state.currentKey) {
+      state.currentKey = key;
+      if (state.stopPagination) state.stopPagination();
+      autoOpenViewersOnceFor(key);
+    }
+  }, 200);
 
-      // Compute a fresh composite key and auto-open once per slide
-      const key = storyKey();
-      if (key !== lastKey) {
-        if (state.stopPagination) state.stopPagination();
-        lastKey = state.currentKey = key;
-        state.openedForKey.add(key); // prevent thrash if IG re-renders quickly
-        state.openedForKey.delete(key); // allow one open per new key
-        autoOpenViewersOnceFor(key);
-      }
-
-      // Only pause while the dialog is open
-      pauseWhileViewerDialogOpen();
-    };
-  })();
-  new MutationObserver(() => onDOMChange())
-    .observe(document.documentElement || document.body, { childList: true, subtree: true });
-  onDOMChange();
+  // Set up MutationObserver
+  const mo = new MutationObserver(onDOMChange);
+  mo.observe(document.documentElement || document.body, { childList: true, subtree: true });
+  onDOMChange(); // initial pass
 
   // Initialize settings
   (async function init() {
