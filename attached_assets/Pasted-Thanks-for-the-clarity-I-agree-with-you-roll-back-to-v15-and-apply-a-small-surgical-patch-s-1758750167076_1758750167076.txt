@@ -1,0 +1,662 @@
+Thanks for the clarity. I agree with you: **roll back to v15** and apply a **small, surgical patch set** instead of diffing off v16 (which introduced the new breakages: inline injection blocked by CSP, heavier pausing, and navigation hangs).
+
+Below is a **precise, drop‑in patch plan for v15** that fixes the issues you listed **without** introducing the v16 problems. I also call out the specific things **not** to do (the ones that caused the regressions).
+
+> ⚠️ Heads‑up: some of the earlier files you shared have expired on my side. I’m working against the v15 package you just re‑uploaded. If you want me to verify any earlier variant line‑by‑line, please re‑upload those files and I’ll include them too.
+
+---
+
+## What we will fix (v15 → v15.3)
+
+1. **First story not loading viewers** (no numeric ID in URL).
+   – Use `location.pathname` as the **stable story key** and map incoming `mediaId → pathname` so chunks never get misrouted.
+
+2. **Over/under counts / stale cache**.
+   – Route each chunk to the correct story via `idToKey`, dedupe by username (lc), and mirror to `localStorage` debounced.
+
+3. **Auto‑pause** loops / cannot unpause.
+   – **Remove** our programmatic pause. IG already pauses when the “Seen by” dialog opens. We only watch the dialog to avoid re‑pausing.
+
+4. **Wait for “Seen by”** reliably on first story.
+   – Poll up to 5s before clicking; don’t depend on “Seen by” being in the DOM immediately.
+
+5. **Reactions (“❤️ reacts”)**.
+   – Extract from existing responses only (no new API), propagate into UI, add filter key.
+
+6. **Followers / Following / Non‑followers** without API.
+   – Use fields present in the viewer payloads (`friendship_status`, `is_following`/`is_follower`) when present; otherwise treat as “unknown” (excluded from those filters).
+
+7. **Clickable usernames / avatars** → open profile in a new tab.
+
+8. **Tag button hit‑box** → full button is clickable, not just the icon.
+
+9. **CSP “inline script refused”**.
+   – Revert **inline injection** and go back to **`chrome.runtime.getURL('injected.js')`** with guards for “extension context invalidated”.
+
+---
+
+## Do **NOT** do these (this is what broke v16)
+
+* ❌ **No inline page injection.** (CSP blocks it: “unsafe‑inline” not allowed.)
+* ❌ **No global event capture / stopPropagation** outside the panel.
+* ❌ **No global keyboard listeners** that block IG’s own UI.
+* ❌ **No programmatic video pausing** except the IG viewer dialog’s natural behavior (we’ll remove ours).
+
+---
+
+## Patch set (drop‑in code changes)
+
+> Apply these changes to the **v15** files you uploaded.
+
+### 1) `manifest.json` (confirm, not new)
+
+Make sure **load order** is `content-backend.js` → `content.js` and `injected.js` is web‑accessible:
+
+```json
+{
+  "manifest_version": 3,
+  "name": "Storylister",
+  "version": "15.3",
+  "description": "Instagram Story Viewer Insights",
+  "permissions": ["storage"],
+  "host_permissions": ["https://www.instagram.com/*", "https://*.instagram.com/*"],
+  "content_scripts": [
+    {
+      "matches": ["https://www.instagram.com/*"],
+      "js": ["content-backend.js", "content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["injected.js"],
+      "matches": ["https://www.instagram.com/*"]
+    }
+  ],
+  "action": { "default_popup": "popup.html" }
+}
+```
+
+---
+
+### 2) `content-backend.js` — **core fixes, small + safe**
+
+**A.** Top of file: state + settings (keep your structure; add these / replace where applicable)
+
+```js
+const DEBUG = false;
+
+const state = {
+  injected: false,
+  currentKey: null,              // stable: location.pathname
+  openedForKey: new Set(),       // auto-open once per key
+  stopPagination: null,          // cancel paginator
+  viewerStore: new Map(),        // Map<storyKey, Map<viewerKey, viewer>>
+  mirrorTimer: null,
+  idToKey: new Map()             // Map<mediaId -> storyKey> (prevents misrouting)
+};
+
+const Settings = {
+  cache: { pro: false, autoOpen: true, pauseVideos: false, accountHandle: null },
+
+  async load() {
+    try {
+      const data = await new Promise(r => chrome?.storage?.sync?.get?.(null, r));
+      if (data) Object.assign(this.cache, data);
+    } catch (e) {
+      try {
+        const raw = localStorage.getItem('sl_settings');
+        if (raw) Object.assign(this.cache, JSON.parse(raw));
+      } catch {}
+    }
+  },
+
+  async save(patch) {
+    Object.assign(this.cache, patch);
+    try {
+      await new Promise(r => chrome?.storage?.sync?.set?.(patch, r));
+    } catch (e) {
+      try { localStorage.setItem('sl_settings', JSON.stringify(this.cache)); } catch {}
+    }
+  }
+};
+```
+
+**B.** Stable key + “Seen by” utilities
+
+```js
+function getStorageKey() { return location.pathname; }   // works with and without numeric id
+
+function findSeenByButton() {
+  return document.querySelector('a[href*="/seen_by/"]') ||
+    Array.from(document.querySelectorAll('[role="button"],button'))
+      .find(el => /^Seen by(\s+[\d,]+)?$/i.test((el.textContent || '').trim())) || null;
+}
+
+async function waitForSeenByButton(timeout = 5000, interval = 150) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    const btn = findSeenByButton();
+    if (btn) return btn;
+    await new Promise(r => setTimeout(r, interval));
+  }
+  return null;
+}
+
+function getSeenByCount() {
+  const a = document.querySelector('a[href*="/seen_by/"]');
+  const txt = (a?.textContent || '').trim();
+  const m = txt.match(/(\d[\d,]*)/);
+  return m ? parseInt(m[1].replace(/,/g, ''), 10) : null;
+}
+```
+
+**C.** **Injection** (no inline, guard runtime)
+
+```js
+function ensureInjected() {
+  if (state.injected) return;
+  if (!chrome?.runtime?.id) return; // extension reloaded; skip until tab reload
+  try {
+    const s = document.createElement('script');
+    s.src = chrome.runtime.getURL('injected.js');
+    s.dataset.storylisterInjected = '1';
+    s.onload = () => s.remove();
+    (document.head || document.documentElement).appendChild(s);
+    state.injected = true;
+  } catch (e) {
+    if (DEBUG) console.warn('[Storylister] inject failed', e);
+  }
+}
+```
+
+**D.** **No programmatic pausing** (delete your previous pause code).
+We only keep this tiny helper to respect user playback and avoid re-pausing:
+
+```js
+// remove any global pausing; IG pauses when dialog opens.
+// keep this to mark manual play (so we never pause it)
+document.addEventListener('play', (e) => {
+  if (e.target?.tagName === 'VIDEO') e.target.dataset.userPlayed = '1';
+}, true);
+```
+
+**E.** Pagination (simple, bounded, stop when we’ve met target)
+
+```js
+function findScrollableInDialog() {
+  const dlg = document.querySelector('[role="dialog"][aria-modal="true"]');
+  if (!dlg) return null;
+  return dlg.querySelector('[style*="overflow-y"]') ||
+         dlg.querySelector('[style*="overflow: hidden auto"]') ||
+         Array.from(dlg.querySelectorAll('div')).find(el => el.scrollHeight > el.clientHeight + 40) ||
+         dlg;
+}
+
+function startPagination(scroller, maxMs = 6000) {
+  const t0 = Date.now();
+  let stopped = false;
+  const tick = () => {
+    if (stopped || !document.contains(scroller)) return;
+    if (Date.now() - t0 > maxMs) return;
+
+    const target = getSeenByCount();
+    const map = state.viewerStore.get(getStorageKey());
+    const loaded = map ? map.size : 0;
+    if (target && loaded >= target - 1) return; // allow ±1
+
+    scroller.scrollTop = scroller.scrollHeight;
+    const nearBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 10;
+    setTimeout(tick, nearBottom ? 450 : 250);
+  };
+  tick();
+  return () => { stopped = true; };
+}
+```
+
+**F.** Auto‑open viewers — **first story safe**
+
+```js
+async function autoOpenViewersOnceFor(key) {
+  if (!Settings.cache.autoOpen) return;
+  if (state.openedForKey.has(key)) return;
+
+  const btn = await waitForSeenByButton(5000);
+  if (!btn) return;
+
+  state.openedForKey.add(key);
+  try { btn.click(); } catch {}
+  setTimeout(() => {
+    const scroller = findScrollableInDialog();
+    if (scroller) {
+      if (state.stopPagination) state.stopPagination();
+      state.stopPagination = startPagination(scroller);
+    }
+  }, 350);
+}
+```
+
+**G.** Mirror (debounced), per **pathname** + mediaId aliases
+
+```js
+function mirrorToLocalStorageDebounced(key) {
+  if (state.mirrorTimer) return;
+  state.mirrorTimer = setTimeout(() => {
+    state.mirrorTimer = null;
+    const map = state.viewerStore.get(key);
+    if (!map || map.size === 0) return;
+
+    const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+    store[key] = { viewers: Array.from(map.entries()), fetchedAt: Date.now() };
+
+    // Alias mediaIds to our key (prevents misrouting after refresh)
+    const aliases = {};
+    for (const [mid, k] of state.idToKey.entries()) if (k === key) aliases[mid] = k;
+    store.__aliases = Object.assign(store.__aliases || {}, aliases);
+
+    localStorage.setItem('panel_story_store', JSON.stringify(store));
+    window.dispatchEvent(new CustomEvent('storylister:data_updated', { detail: { storyId: key } }));
+  }, 250);
+}
+```
+
+**H.** Message bridge (route chunks correctly; dedupe; **no** async spam)
+
+```js
+window.addEventListener('message', (evt) => {
+  if (evt.source !== window || evt.origin !== location.origin) return;
+  const msg = evt.data;
+  if (!msg || msg.type !== 'STORYLISTER_VIEWERS_CHUNK') return;
+
+  const { mediaId, viewers } = msg.data || {};
+  if (!mediaId || !Array.isArray(viewers)) return;
+
+  const activeKey = state.currentKey || getStorageKey();
+  if (!state.idToKey.has(mediaId)) state.idToKey.set(mediaId, activeKey);
+  const key = state.idToKey.get(mediaId);
+
+  if (!state.viewerStore.has(key)) state.viewerStore.set(key, new Map());
+  const map = state.viewerStore.get(key);
+
+  viewers.forEach((v, idx) => {
+    const k = (v.username ? String(v.username).toLowerCase() : null) || String(v.id || idx);
+    const prev = map.get(k) || {};
+    map.set(k, { ...prev, ...v });
+  });
+
+  mirrorToLocalStorageDebounced(key);
+});
+```
+
+**I.** DOM observer (throttled), **no auto-pause**, first‑story auto-open
+
+```js
+const onDOMChange = (() => {
+  let lastKey = null;
+  return () => {
+    if (!location.pathname.startsWith('/stories/')) {
+      window.dispatchEvent(new CustomEvent('storylister:hide_panel'));
+      return;
+    }
+
+    window.dispatchEvent(new CustomEvent('storylister:show_panel'));
+    ensureInjected();
+
+    const key = getStorageKey();
+    if (key !== lastKey) {
+      if (state.stopPagination) state.stopPagination();
+      lastKey = state.currentKey = key;
+      autoOpenViewersOnceFor(key);
+    }
+  };
+})();
+
+const throttled = (() => {
+  let t = 0, h;
+  return () => {
+    const now = Date.now();
+    clearTimeout(h);
+    if (now - t > 200) {
+      t = now;
+      onDOMChange();
+    } else {
+      h = setTimeout(() => { t = Date.now(); onDOMChange(); }, 200 - (now - t));
+    }
+  };
+})();
+
+new MutationObserver(throttled).observe(document.documentElement || document.body, { childList: true, subtree: true });
+onDOMChange();
+```
+
+---
+
+### 3) `injected.js` — reactions, safe JSON only, friend status mapping
+
+Replace your normalization & wrappers with this **lean** form:
+
+```js
+(() => {
+  'use strict';
+  if (window.__storylisterInjected__) return;
+  window.__storylisterInjected__ = true;
+
+  const origFetch = window.fetch;
+  window.fetch = async function(...args) {
+    const res = await origFetch.apply(this, args);
+    try {
+      const ct = res.headers?.get('content-type') || '';
+      if (!/json/i.test(ct)) return res;
+
+      const url = String(args?.[0] || '');
+      const relevant = url.includes('/api/') || url.includes('/graphql') || /viewer|viewers|story|reel|seen/i.test(url);
+      if (!relevant) return res;
+
+      res.clone().json().then(data => {
+        if (!data) return;
+
+        let viewers = null;
+        if (Array.isArray(data.users)) viewers = data.users;
+        else if (Array.isArray(data.viewers)) viewers = data.viewers;
+        else if (data?.data?.xdt_api__v1__media__story_viewers?.viewers) viewers = data.data.xdt_api__v1__media__story_viewers.viewers;
+        else if (data?.data?.media?.story_viewers?.edges) viewers = data.data.media.story_viewers.edges.map(e => e.node || e.user || e);
+        else if (data?.data?.xdt_api__v1__stories__viewers__connection__edge?.edges) viewers = data.data.xdt_api__v1__stories__viewers__connection__edge.edges.map(e => e.node || e);
+
+        if (!viewers || viewers.length === 0) return;
+
+        const pathId = location.pathname.match(/\/stories\/[^/]+\/(\d+)/)?.[1];
+        const graphId = data?.media_id || data?.data?.media?.id || data?.data?.reel?.id;
+        const mediaId = String(graphId || pathId || Date.now());
+
+        const normalized = viewers.map((v, idx) => {
+          const u = v?.user || v?.node?.user || v?.node || v;
+          // profile pic: absolute only
+          let pic = u?.profile_pic_url || u?.profile_pic_url_hd || u?.profile_picture_url || '';
+          if (typeof pic !== 'string' || !/^https?:\/\//i.test(pic)) pic = '';
+
+          // friendship / follows
+          const fs = v?.friendship_status || u?.friendship_status;
+          const follows_viewer = (fs?.following ?? u?.is_follower ?? v?.is_follower) || false;
+          const followed_by_viewer = (fs?.followed_by ?? u?.is_following ?? v?.is_following) || false;
+
+          // reactions from existing fields (no API)
+          const reaction =
+            v?.reaction?.emoji ||
+            v?.story_reaction?.emoji ||
+            v?.latest_reaction?.emoji ||
+            (v?.has_liked ? '❤️' : null);
+
+          return {
+            id: String(u?.id || u?.pk || u?.pk_id || u?.username || idx),
+            username: u?.username || '',
+            full_name: u?.full_name || u?.fullname || u?.name || '',
+            profile_pic_url: pic,
+            is_verified: !!(u?.is_verified || u?.verified || u?.blue_verified),
+            follows_viewer,
+            followed_by_viewer,
+            reaction: reaction || null,
+            originalIndex: idx,
+            viewedAt: v?.timestamp || v?.viewed_at || Date.now()
+          };
+        });
+
+        window.postMessage({
+          type: 'STORYLISTER_VIEWERS_CHUNK',
+          data: {
+            mediaId,
+            viewers: normalized,
+            totalCount: data.user_count || data.total_viewer_count || normalized.length
+          }
+        }, '*');
+      }).catch(() => {});
+    } catch {}
+    return res;
+  };
+
+  // XHR backup (optional)
+  const XHR = window.XMLHttpRequest;
+  if (XHR) {
+    const P = XHR.prototype, _open = P.open, _send = P.send;
+    P.open = function(method, url, ...rest) { this.__slUrl = url; return _open.call(this, method, url, ...rest); };
+    P.send = function(...args) {
+      const url = this.__slUrl || '';
+      if (/story_viewers|list_reel_media_viewer|api\/v1\//.test(url)) {
+        this.addEventListener('load', function() {
+          try {
+            const data = JSON.parse(this.responseText);
+            const users = Array.isArray(data?.users) ? data.users : (Array.isArray(data?.viewers) ? data.viewers : null);
+            if (!users) return;
+
+            const pathId = location.pathname.match(/\/stories\/[^/]+\/(\d+)/)?.[1];
+            const mediaId = String(data.media_id || pathId || Date.now());
+
+            const normalized = users.map((v, idx) => {
+              const u = v?.user || v;
+              const fs = v?.friendship_status || u?.friendship_status;
+              const follows_viewer = (fs?.following ?? u?.is_follower ?? v?.is_follower) || false;
+              const followed_by_viewer = (fs?.followed_by ?? u?.is_following ?? v?.is_following) || false;
+
+              const reaction =
+                v?.reaction?.emoji ||
+                v?.story_reaction?.emoji ||
+                v?.latest_reaction?.emoji ||
+                (v?.has_liked ? '❤️' : null);
+
+              let pic = u?.profile_pic_url || u?.profile_pic_url_hd || u?.profile_picture_url || '';
+              if (typeof pic !== 'string' || !/^https?:\/\//i.test(pic)) pic = '';
+
+              return {
+                id: String(u?.id || u?.pk || u?.pk_id || u?.username || idx),
+                username: u?.username || '',
+                full_name: u?.full_name || u?.fullname || u?.name || '',
+                profile_pic_url: pic,
+                is_verified: !!(u?.is_verified || u?.verified || u?.blue_verified),
+                follows_viewer,
+                followed_by_viewer,
+                reaction: reaction || null,
+                originalIndex: idx,
+                viewedAt: v?.timestamp || v?.viewed_at || Date.now()
+              };
+            });
+
+            window.postMessage({
+              type: 'STORYLISTER_VIEWERS_CHUNK',
+              data: { mediaId, viewers: normalized, totalCount: data.user_count || normalized.length }
+            }, '*');
+          } catch {}
+        });
+      }
+      return _send.apply(this, args);
+    };
+  }
+})();
+```
+
+---
+
+### 4) `content.js` — reactions + filters + clickable users + tag persistence
+
+**A.** When reading from cache, map fields consistently (replace your viewer mapping block):
+
+```js
+// inside loadViewersFromStorage()
+viewers.set(viewerKey, {
+  id: v.id || v.pk || v.username,
+  username: v.username || '',
+  displayName: v.full_name || v.displayName || v.username || 'Anonymous',
+  profilePic: v.profile_pic_url || v.profilePic || '',
+  isVerified: !!v.is_verified,
+  isFollower: !!(v.follows_viewer ?? v.is_follower),     // they follow you
+  youFollow:  !!(v.followed_by_viewer ?? v.is_following),// you follow them
+  reaction: v.reaction || null,                           // keep raw
+  reacted: !!v.reaction,                                  // boolean for filter
+  viewedAt: v.viewedAt || v.timestamp || Date.now(),
+  originalIndex: Number.isFinite(v.originalIndex) ? v.originalIndex : i,
+  isTagged: taggedUsers.has(v.username || v.id)
+});
+```
+
+**B.** Reaction filter (add to your filter switch):
+
+```js
+case 'reacts':
+  filteredViewers = filteredViewers.filter(v => v.reacted || v.reaction);
+  break;
+```
+
+**C.** Following / Followers / Non‑followers filters (no extra API):
+
+```js
+case 'following':        // you follow them
+  filteredViewers = filteredViewers.filter(v => v.youFollow === true);
+  break;
+case 'followers':        // they follow you
+  filteredViewers = filteredViewers.filter(v => v.isFollower === true);
+  break;
+case 'nonfollowers':     // neither follows the other
+  filteredViewers = filteredViewers.filter(v =>
+    v.youFollow === false && v.isFollower === false
+  );
+  break;
+```
+
+> If a viewer has **unknown** follow flags (no fields present in payloads), they will naturally be omitted from these three filters — exactly as desired (no extra calls).
+
+**D.** Clickable usernames / avatars (in your row template):
+
+```js
+// username element:
+`<a class="sl-username" href="https://www.instagram.com/${v.username}/" target="_blank" rel="noopener noreferrer">${v.username}</a>`
+
+// avatar:
+`<a href="https://www.instagram.com/${v.username}/" target="_blank" rel="noopener noreferrer">
+   <img class="sl-avatar" src="${v.profilePic || fallback}" loading="lazy" alt="${v.username}"/>
+ </a>`
+```
+
+**E.** Remove undefined call if present (Claude’s catch):
+
+```js
+// DELETE if present:
+if (data?.viewers) {
+  handleBundledData(data.viewers); // <- remove, not defined
+}
+```
+
+**F.** Tag persistence per owner (fast localStorage + backup chrome.storage)
+
+```js
+async function loadTaggedUsers() {
+  const owner = (location.pathname.match(/\/stories\/([^/]+)/) || [])[1] || 'default';
+  const key = `sl_tags_${owner}`;
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw) { taggedUsers = new Set(JSON.parse(raw)); return; }
+  } catch {}
+  try {
+    const data = await new Promise(r => chrome?.storage?.local?.get?.(key, r) || r({}));
+    taggedUsers = new Set(data[key] || []);
+  } catch { taggedUsers = new Set(); }
+}
+
+async function saveTaggedUsers() {
+  const owner = (location.pathname.match(/\/stories\/([^/]+)/) || [])[1] || 'default';
+  const key = `sl_tags_${owner}`;
+  const arr = Array.from(taggedUsers);
+  try { localStorage.setItem(key, JSON.stringify(arr)); } catch {}
+  try { await new Promise(r => chrome?.storage?.local?.set?.({[key]: arr}, r) || r()); } catch {}
+}
+```
+
+**G.** Make the whole tag button clickable (template + CSS below):
+
+Ensure the button element (e.g., `.storylister-tag`) has the click listener, not just the icon. If you were attaching to the icon, move the listener to the **button** and keep `e.currentTarget` usage.
+
+---
+
+### 5) `content.css` — height + hit-box + panel layering
+
+Append:
+
+```css
+/* Constrain panel height and make results scroll */
+.storylister-panel {
+  max-height: calc(100vh - 24px) !important;
+  display: flex;
+  flex-direction: column;
+}
+.storylister-results {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+/* Make the whole tag button clickable; children don't steal clicks */
+.storylister-tag { user-select: none; position: relative; }
+.storylister-tag * { pointer-events: none; }
+
+/* Ensure panel stays visible but does not block IG dialog controls */
+#storylister-right-rail { z-index: 2147483646 !important; }
+[role="dialog"] { z-index: 2147483647 !important; }  /* IG above us where needed */
+```
+
+---
+
+## Why this solves your current list
+
+* **First story**: We don’t require the numeric ID; we key by `pathname` and click “Seen by” after waiting up to 5s.
+* **Counts drift / misroutes**: `idToKey` maps **each** `mediaId` to the **current pathname key** at arrival time; dedupe by lowercased username.
+* **Video play/pause**: No more programmatic pause. IG pauses when the dialog opens; when you close it, playback continues normally.
+* **Reacts**: Extracted from responses you already receive and available in the UI + filter.
+* **Following/Followers/Non‑followers**: Populated from friendship fields only if present; otherwise excluded (no extra API).
+* **Clickable users**: Anchors open profiles in new tabs.
+* **Tag button hit‑box**: Full button area is interactive.
+* **CSP error**: We reverted inline injection entirely.
+* **“Settings save failed: extension context invalidated”**: We guard `chrome.storage` and fall back to `localStorage` so it doesn’t throw during extension reloads.
+
+---
+
+## “Rules for Replit” (copy/paste)
+
+1. **Base everything on v15** (the package I just uploaded).
+2. **Apply only** the code blocks above. Do **not** introduce:
+
+   * Inline page script injection
+   * Global keydown handlers or `stopPropagation()` outside the Storylister panel
+   * Any new network/API calls
+3. Keep **autoOpen = true** default.
+4. Use **`location.pathname`** as the only persistent story key; also map `mediaId → pathname`.
+5. Dedupe viewers by **lowercased username** (fallback id).
+6. **No programmatic pausing** of videos; rely on IG’s dialog pause.
+7. Reactions must be parsed from existing responses only (as shown).
+8. Followers / Following flags must use available payload fields; otherwise exclude from those filters.
+9. Make usernames / avatars **anchors** to IG profiles in new tabs.
+10. Panel must be constrained to viewport height; results must scroll.
+
+---
+
+## Quick validation steps (after patch)
+
+In DevTools Console on **your first story**:
+
+```js
+// 1) Did we inject? (should be true once)
+window.__storylisterInjected__
+
+// 2) Does auto-open wait then click?
+// (you should see the viewers dialog appear; no console spam from us)
+
+// 3) Did we store under pathname?
+Object.keys(JSON.parse(localStorage.getItem('panel_story_store')||'{}'))
+
+// 4) Are chunks routed to the correct key?
+JSON.parse(localStorage.getItem('panel_story_store')).__aliases
+
+// 5) Do reactions appear in rendered rows?
+// Use your "❤️ reacts" filter – it should show only reacted viewers.
+```
+
+---
+
+If you want me to diff v15 vs v16 to pinpoint exactly which lines caused the hang (CSP + inline injection is the main culprit), re‑upload that v16 bundle and I’ll annotate every delta. Otherwise, the patch above will give you back the working behavior from v15 with the critical fixes you asked for.
