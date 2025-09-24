@@ -57,57 +57,6 @@
 
   // ==== [B] UTILITIES ====
   function getStorageKey() { return location.pathname; }  // first-story safe
-  
-  function pathIdFromURL() {
-    return location.pathname.match(/\/stories\/[^/]+\/(\d+)/)?.[1] || null;
-  }
-
-  // Scan <link rel="alternate"> and <a href> for /stories/<owner>/<id>
-  function findMediaIdInDOM(owner) {
-    if (!owner) return null;
-    const re = new RegExp(`/stories/${owner}/(\\d{10,})`);
-    const candidates = new Set();
-
-    document.querySelectorAll('link[rel="alternate"][href*="/stories/"], a[href*="/stories/"]').forEach(el => {
-      const href = el.getAttribute('href') || el.href || '';
-      const m = href.match(re);
-      if (m) candidates.add(m[1]);
-    });
-    
-    // Add fallback: extract from "Seen by" button URL
-    const seenByLink = document.querySelector('a[href*="/seen_by/"]');
-    if (seenByLink) {
-      const href = seenByLink.getAttribute('href') || '';
-      const mediaId = href.match(/\/(\d{15,20})\/seen_by/)?.[1];
-      if (mediaId) candidates.add(mediaId);
-    }
-
-    // Pick a deterministic id (first unseen id, else first)
-    const ids = Array.from(candidates);
-    if (!ids.length) return null;
-    for (const id of ids) if (!state.idToKey?.has(id)) return id;
-    return ids[0];
-  }
-
-  // Always safe: pathname is our canonical key
-  function pathKey() { return location.pathname; }
-
-  // Return {pathKey, mediaKey?}
-  function currentKeys() {
-    const owner = getStoryOwnerFromURL();
-    const urlId = pathIdFromURL();
-    const domId = urlId || findMediaIdInDOM(owner);
-    return { path: pathKey(), media: domId ? `/stories/${owner}/${domId}/` : null };
-  }
-
-  // Route incoming chunks to the correct story key
-  function routeMediaId(mediaId) {
-    const { path, media } = currentKeys();
-    const key = media || path; // prefer numeric, else pathname
-    if (!state.idToKey) state.idToKey = new Map();
-    if (!state.idToKey.has(mediaId)) state.idToKey.set(mediaId, key);
-    return state.idToKey.get(mediaId);
-  }
 
   function findSeenByButton() {
     return document.querySelector('a[href*="/seen_by/"]') ||
@@ -115,13 +64,10 @@
              .find(el => /^Seen by(\s+[0-9,]+)?$/i.test((el.textContent||'').trim())) || null;
   }
 
-  async function waitForSeenByButton(timeout = 6000, interval = 120) {
-    const t0 = Date.now();
-    while (Date.now() - t0 < timeout) {
-      const a = document.querySelector('a[href*="/seen_by/"]');
-      if (a) return a;
-      const btn = Array.from(document.querySelectorAll('[role="button"],button'))
-        .find(el => /^Seen by(\s+[0-9,]+)?$/i.test((el.textContent || '').trim()));
+  async function waitForSeenByButton(timeout = 5000, interval = 150) {
+    const start = Date.now();
+    while (Date.now() - start < timeout) {
+      const btn = findSeenByButton();
       if (btn) return btn;
       await new Promise(r => setTimeout(r, interval));
     }
@@ -178,21 +124,35 @@
   // ==== [C] NATURAL PAUSE — pause only while the IG viewers dialog is open ====
   function pauseVideosWhileViewerOpen() {
     if (!Settings.cache.pauseVideos) return;
+    const key = getStorageKey();
+    if (state.userOverrodePauseByKey.has(key)) return; // respect user action
+
     const dlgOpen = !!document.querySelector('[role="dialog"][aria-modal="true"]');
     if (!dlgOpen) return;
+
     setTimeout(() => {
       document.querySelectorAll('video').forEach(v => {
-        if (v.dataset.userPlayed === '1') return; // respect manual play
+        if (v.dataset.userPlayed === '1') return;
         if (!v.paused && !v.dataset.slPaused) {
           try { v.pause(); v.dataset.slPaused = '1'; } catch {}
         }
       });
-    }, 1000); // human-ish delay
+    }, 1200);
   }
 
-  // if the user plays a video, never auto-pause that element again
+  function resumeAnyPausedVideos() {
+    document.querySelectorAll('video[data-sl-paused="1"]').forEach(v => {
+      try { v.play(); } catch {}
+      delete v.dataset.slPaused;
+    });
+  }
+
   document.addEventListener('play', (e) => {
-    if (e.target?.tagName === 'VIDEO') e.target.dataset.userPlayed = '1';
+    const el = e.target;
+    if (el && el.tagName === 'VIDEO') {
+      el.dataset.userPlayed = '1';
+      state.userOverrodePauseByKey.add(getStorageKey());
+    }
   }, true);
 
   // ==== [D] PAGINATION — simple + bounded ====
@@ -264,15 +224,13 @@
       const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
       store[key] = { viewers: Array.from(map.entries()), fetchedAt: Date.now() };
 
-      // also persist mediaId → key aliases (so reload routes correctly)
+      // also remember mediaId aliasing to survive refresh
       store.__aliases = store.__aliases || {};
-      for (const [mid, k] of (state.idToKey || new Map()).entries()) {
-        if (k === key) store.__aliases[mid] = key;
-      }
+      for (const [mid, k] of state.idToKey.entries()) if (k === key) store.__aliases[mid] = k;
 
       localStorage.setItem('panel_story_store', JSON.stringify(store));
       window.dispatchEvent(new CustomEvent('storylister:data_updated', { detail: { storyId: key } }));
-    }, 250);
+    }, 300);
   }
 
   // ==== [G] MESSAGE BRIDGE — correct routing + dedupe ====
@@ -284,22 +242,17 @@
     const { mediaId, viewers } = msg.data || {};
     if (!mediaId || !Array.isArray(viewers)) return;
 
-    // Route to the correct key even if you navigated mid-request
-    const key = routeMediaId(mediaId);
+    const activeKey = state.currentKey || getStorageKey();
+    if (!state.idToKey.has(mediaId)) state.idToKey.set(mediaId, activeKey);
+    const key = state.idToKey.get(mediaId);
 
     if (!state.viewerStore.has(key)) state.viewerStore.set(key, new Map());
     const map = state.viewerStore.get(key);
 
-    // Dedup by username (lowercased) or id, merge reactions and timestamps
     viewers.forEach((v, i) => {
       const k = (v.username ? String(v.username).toLowerCase() : null) || String(v.id || i);
       const prev = map.get(k) || {};
-      map.set(k, {
-        ...prev,
-        ...v,
-        reaction: v.reaction || prev.reaction || null,
-        viewedAt: v.viewedAt || prev.viewedAt || Date.now()
-      });
+      map.set(k, { ...prev, ...v });                        // merge to avoid losing flags
     });
 
     mirrorToLocalStorageDebounced(key);
@@ -307,23 +260,19 @@
   });
 
 
-  // ==== [H] INJECT EXTERNAL SCRIPT (CSP-SAFE) ====
+  // ==== [H] INJECT EXTERNAL SCRIPT ====
   function ensureInjected() {
     if (state.injected) return;
     try {
-      if (document.querySelector('script[data-sl-injected="1"]')) {
-        state.injected = true;
-        return;
-      }
+      const src = chrome?.runtime?.getURL?.('injected.js');
+      if (!src) return;                // happens only while reloading the unpacked extension
       const s = document.createElement('script');
-      s.src = chrome.runtime.getURL('injected.js'); // external URL is allowed by IG CSP
-      s.async = false;
-      s.dataset.slInjected = '1';
-      s.onload = () => s.remove();
+      s.src = src;
+      s.dataset.storylisterInjected = '1';
+      s.onload = () => { s.remove(); state.injected = true; };
       (document.head || document.documentElement).appendChild(s);
-      state.injected = true;
     } catch (e) {
-      console.warn('[Storylister] injection failed', e);
+      console.warn('[Storylister] inject failed', e);
     }
   }
 
@@ -336,40 +285,30 @@
     window.dispatchEvent(new CustomEvent('storylister:active_media', { detail: { storyId: newKey } }));
   }
 
-  // ==== [J] MAIN OBSERVER — throttled with RAF, first story safe ====
-  const onDOMChange = (() => {
-    let raf = 0, lastKey = null;
-    return () => {
-      if (raf) cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(async () => {
-        const onStories = location.pathname.startsWith('/stories/');
-        const seenByPresent = !!document.querySelector('a[href*="/seen_by/"]') ||
-                              Array.from(document.querySelectorAll('[role="button"],button'))
-                                .some(el => /^Seen by(\s+[0-9,]+)?$/i.test((el.textContent || '').trim()));
+  // ==== [J] MAIN OBSERVER — first story, inject, pause only when dialog open ====
+  const onDOMChange = throttle(async () => {
+    // gate: only on your own story (must have "Seen by")
+    if (!await isOnOwnStory()) {
+      window.dispatchEvent(new CustomEvent('storylister:hide_panel'));
+      resumeAnyPausedVideos();
+      return;
+    }
+    
+    window.dispatchEvent(new CustomEvent('storylister:show_panel'));
+    ensureInjected();
+    pauseVideosWhileViewerOpen();
 
-        if (!onStories || !seenByPresent) {
-          window.dispatchEvent(new CustomEvent('storylister:hide_panel'));
-          return;
-        }
-
-        window.dispatchEvent(new CustomEvent('storylister:show_panel'));
-        ensureInjected();               // CSP-safe
-        pauseVideosWhileViewerOpen();   // only while dialog is open
-
-        const keyNow = pathKey();
-        if (keyNow !== lastKey) {
-          if (state.stopPagination) state.stopPagination();
-          lastKey = state.currentKey = keyNow;
-          autoOpenViewersOnceFor(keyNow);
-        }
-      });
-    };
-  })();
+    const key = getStorageKey();
+    if (key !== state.currentKey) {
+      state.currentKey = key;
+      if (state.stopPagination) state.stopPagination();
+      autoOpenViewersOnceFor(key);
+    }
+  }, 200);
 
   // Set up MutationObserver
-  new MutationObserver(onDOMChange)
-    .observe(document.documentElement || document.body, { childList: true, subtree: true });
-  
+  const mo = new MutationObserver(onDOMChange);
+  mo.observe(document.documentElement || document.body, { childList: true, subtree: true });
   onDOMChange(); // initial pass
 
   // Initialize settings

@@ -38,8 +38,9 @@
 
     try {
       const url = String(args?.[0] || '');
+      // Only JSON
       const ct = res.headers?.get('content-type') || '';
-      if (!/json/i.test(ct)) return res; // ignore CSS/HTML/images
+      if (!/json/i.test(ct)) return res;
 
       const relevant = url.includes('/api/') || url.includes('/graphql') || /viewer|viewers|story|reel|seen/i.test(url);
       if (!relevant) return res;
@@ -56,11 +57,11 @@
         else if (data?.data?.media?.story_viewers?.edges) viewers = data.data.media.story_viewers.edges.map(e => e.node || e.user || e);
         else if (data?.data?.xdt_api__v1__stories__viewers__connection__edge?.edges) viewers = data.data.xdt_api__v1__stories__viewers__connection__edge.edges.map(e => e.node || e);
 
-        if (!viewers || !viewers.length) return;
+        if (!viewers || viewers.length === 0) return;
 
         // Media id: prefer payload, then URL id
         const pathId = location.pathname.match(/\/stories\/[^/]+\/(\d+)/)?.[1];
-        const graphId = data.media_id || data?.data?.media?.id || data?.data?.reel?.id;
+        const graphId = data?.media_id || data?.data?.media?.id || data?.data?.reel?.id;
         const mediaId = String(graphId || pathId || Date.now());
 
         const normalized = viewers.map((v, idx) => normalizeViewer(v, idx));
