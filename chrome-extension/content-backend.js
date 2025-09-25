@@ -1,5 +1,20 @@
+// --- Storylister: early inject to catch first story viewers request ---
+(() => {
+  try {
+    if (location.pathname.startsWith('/stories/') &&
+        !document.querySelector('script[data-sl-injected="1"]') &&
+        chrome?.runtime?.getURL) {
+      const s = document.createElement('script');
+      s.src = chrome.runtime.getURL('injected.js');
+      s.dataset.slInjected = '1';
+      s.onload = () => s.remove();
+      (document.head || document.documentElement).appendChild(s);
+    }
+  } catch {}
+})();
+
 // content-backend.js
-// v15.3 - Surgical patches applied for stability
+// v15.5 - Complete surgical patches from ChatGPT
 (() => {
   'use strict';
   
@@ -51,6 +66,39 @@
   // Stable key + "Seen by" utilities
   function getStorageKey() { return location.pathname; }   // works with and without numeric id
 
+  // A2 - Robust mediaId resolution
+  function getMediaIdFromPath() {
+    return location.pathname.match(/\/stories\/[^/]+\/(\d{8,})/)?.[1] || null;
+  }
+
+  // Scrape mediaId from DOM when the URL lacks it (first story, share links, etc.)
+  function getMediaIdFromDOM() {
+    // 1) Seen-by link (most reliable if present)
+    const seen = document.querySelector('a[href*="/seen_by/"]');
+    if (seen) {
+      const m = seen.href.match(/\/stories\/[^/]+\/(\d{8,})/);
+      if (m) return m[1];
+    }
+    // 2) link rel="alternate" (IG sprinkles these)
+    for (const el of document.querySelectorAll('link[rel="alternate"][href*="/stories/"]')) {
+      const href = el.getAttribute('href') || '';
+      const m = href.match(/\/stories\/[^/]+\/(\d{8,})/);
+      if (m) return m[1];
+    }
+    // 3) data-media-id (appears on some builds)
+    const d = document.querySelector('[data-media-id]');
+    if (d?.dataset?.mediaId) return d.dataset.mediaId;
+
+    // 4) Path fallback
+    return getMediaIdFromPath();
+  }
+
+  // Canonical per‑story key (prefer mediaId for stable caching)
+  function canonicalKey() {
+    const mid = getMediaIdFromDOM();
+    return mid ? `story_${mid}` : location.pathname;
+  }
+
   function findSeenByButton() {
     return document.querySelector('a[href*="/seen_by/"]') ||
       Array.from(document.querySelectorAll('[role="button"],button'))
@@ -96,38 +144,29 @@
     if (e.target?.tagName === 'VIDEO') e.target.dataset.userPlayed = '1';
   }, true);
 
-  // DOM-based reaction detection fallback
-  function mergeReactsFromDialogIntoMap(key) {
+  // A4 - DOM fallback for reacts (hearts) when API omits it
+  function mergeReactsFromDialogIntoMap(map) {
     const dlg = document.querySelector('[role="dialog"][aria-modal="true"]');
     if (!dlg) return;
-    const map = state.viewerStore.get(key);
-    if (!map || map.size === 0) return;
 
-    // Find usernames that have a visible heart in their row
-    const heartIcons = Array.from(dlg.querySelectorAll('[aria-label="Like"]'));
-    const reactedUsernames = new Set();
-    heartIcons.forEach(icon => {
-      // Walk up to find the row container
-      let row = icon;
-      for (let i = 0; i < 6 && row && row !== dlg; i++) row = row.parentElement;
-      if (!row) return;
-      const a = row.querySelector('a[href^="/"][href$="/"]');
-      if (!a) return;
-      const href = a.getAttribute('href') || '';
-      const username = (href.split('/')[1] || '').toLowerCase();
-      if (username) reactedUsernames.add(username);
+    // Each row typically contains a profile link; detect a heart in the row.
+    const rows = Array.from(dlg.querySelectorAll('div[role="button"], li, div[role="listitem"]'));
+    rows.forEach(row => {
+      const a = row.querySelector('a[href^="/"][href*="/"]');
+      const username = a?.getAttribute('href')?.split('/')?.filter(Boolean)?.[0];
+      if (!username) return;
+
+      // Heart detection – keep broad; IG's SVGs vary by rollout.
+      const hasHeart = !!row.querySelector(
+        'svg[aria-label*="Like"], svg[aria-label*="Unlike"], use[href*="heart"], path[d*="M34.6 3.1"]'
+      );
+
+      if (hasHeart) {
+        const key = username.toLowerCase();
+        const item = map.get(key);
+        if (item && !item.reaction) item.reaction = '❤️';
+      }
     });
-
-    // Mark those users as reacted
-    if (reactedUsernames.size) {
-      reactedUsernames.forEach(u => {
-        const v = map.get(u);
-        if (v) {
-          if (!v.reaction) v.reaction = '❤️';
-          v.reacted = true;
-        }
-      });
-    }
   }
 
   // Pagination (simple, bounded, stop when we've met target)
@@ -187,14 +226,11 @@
       const map = state.viewerStore.get(key);
       if (!map || map.size === 0) return;
 
-      // Find the current mediaId for this key
-      const currentMediaId = [...state.idToKey.entries()].find(([, k]) => k === key)?.[0];
-
       const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
-      store[key] = { 
-        mediaId: currentMediaId,  // Store mediaId to detect story changes on reload
-        viewers: Array.from(map.entries()), 
-        fetchedAt: Date.now() 
+      store[key] = {
+        mediaId: getMediaIdFromDOM() || null,    // <-- add this
+        viewers: Array.from(map.entries()),
+        fetchedAt: Date.now()
       };
 
       // Alias mediaIds to our key (prevents misrouting after refresh)
@@ -234,16 +270,29 @@
     if (!state.viewerStore.has(key)) state.viewerStore.set(key, new Map());
     const map = state.viewerStore.get(key);
 
-    // Dedupe by username (lowercase) then id
-    viewers.forEach((v, idx) => {
-      const uname = (v.username || '').toLowerCase();
-      const k = uname || String(v.id || idx);
-      const prev = map.get(k) || {};
-      map.set(k, { ...prev, ...v });
+    // A3 - Fix follower/following mapping and dedupe
+    viewers.forEach((raw, idx) => {
+      const v = { ...raw };
+
+      // Normalize follow flags for UI:
+      // IG: friendship_status.following => YOU follow THEM (youFollow)
+      //     friendship_status.followed_by => THEY follow YOU (isFollower)
+      // We accept either our normalized fields or IG-shaped fields.
+      const isFollower = (v.follows_viewer === true) || (v.follows_you === true) || (v.is_follower === true);
+      const youFollow  = (v.followed_by_viewer === true) || (v.you_follow === true) || (v.is_following === true);
+
+      v.isFollower = !!isFollower;  // they follow you
+      v.youFollow  = !!(youFollow); // you follow them
+
+      // Deduplicate by username (lc) or id
+      const viewerKey = (v.username ? String(v.username).toLowerCase() : null) || String(v.id || idx);
+
+      const prev = map.get(viewerKey) || {};
+      map.set(viewerKey, { ...prev, ...v });
     });
 
     // Apply DOM fallback for reactions
-    mergeReactsFromDialogIntoMap(key);
+    mergeReactsFromDialogIntoMap(map);
 
     mirrorToLocalStorageDebounced(key);
   });
@@ -261,10 +310,20 @@
       window.dispatchEvent(new CustomEvent('storylister:show_panel'));
       ensureInjected();
 
-      const key = getStorageKey();
+      const key = canonicalKey();
       if (key !== lastKey) {
         if (state.stopPagination) state.stopPagination();
         lastKey = state.currentKey = key;
+
+        // Clear stale cache if a different mediaId is now under the same path key
+        const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+        const currentMid = getMediaIdFromDOM();
+        const cachedMid = store[key]?.mediaId;
+        if (store[key] && cachedMid && currentMid && cachedMid !== currentMid) {
+          delete store[key];
+          localStorage.setItem('panel_story_store', JSON.stringify(store));
+        }
+
         autoOpenViewersOnceFor(key);
       }
     };

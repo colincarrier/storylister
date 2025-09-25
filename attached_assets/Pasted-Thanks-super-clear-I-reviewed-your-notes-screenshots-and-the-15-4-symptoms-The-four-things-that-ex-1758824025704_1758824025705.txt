@@ -1,0 +1,370 @@
+Thanks—super clear. I reviewed your notes/screenshots and the 15.4 symptoms. The four things that explain everything you’re seeing are:
+
+1. **First‑story miss** – `injected.js` is attaching after IG’s *first* viewer request when you land on your first story, so the first chunk is never captured.
+2. **Reacts not showing** – we’re checking old fields; on web the only reaction surfaced in the viewer list is a **heart/like** (`has_liked`) and, in newer payloads, `latest_reaction.reaction_emoji`.
+3. **Following / followers inverted** – IG’s `friendship_status.following` means **you follow them**, `followed_by` means **they follow you**.
+4. **Stale cache on navigation/refresh** – when a new `mediaId` loads for the same pathname, we keep old cached data/target; counts drift and pagination “thinks” it’s done too early.
+
+Below are **surgical patches** to your **v15.4** (keep your 200 ms throttling and do **not** change run order in the manifest).
+
+---
+
+## A. `content-backend.js` (4 small, safe edits)
+
+### A1) **Inject ASAP to catch the first request** (adds zero CSP risk; still loads `injected.js` from the extension URL)
+
+Place this **at the very top** of `content-backend.js`:
+
+```js
+// --- Storylister: early inject to catch first story viewers request ---
+(() => {
+  try {
+    if (location.pathname.startsWith('/stories/') &&
+        !document.querySelector('script[data-sl-injected="1"]') &&
+        chrome?.runtime?.getURL) {
+      const s = document.createElement('script');
+      s.src = chrome.runtime.getURL('injected.js');
+      s.dataset.slInjected = '1';
+      s.onload = () => s.remove();
+      (document.head || document.documentElement).appendChild(s);
+    }
+  } catch {}
+})();
+```
+
+*(Keep your existing `ensureInjected()`; this early snippet only ensures we don’t miss the very first fetch on the first story.)*
+
+---
+
+### A2) **Robust mediaId resolution + cache key & stale‑cache clearing**
+
+Add these helpers (or merge into your existing utils block):
+
+```js
+function getMediaIdFromPath() {
+  return location.pathname.match(/\/stories\/[^/]+\/(\d{8,})/)?.[1] || null;
+}
+
+// Scrape mediaId from DOM when the URL lacks it (first story, share links, etc.)
+function getMediaIdFromDOM() {
+  // 1) Seen-by link (most reliable if present)
+  const seen = document.querySelector('a[href*="/seen_by/"]');
+  if (seen) {
+    const m = seen.href.match(/\/stories\/[^/]+\/(\d{8,})/);
+    if (m) return m[1];
+  }
+  // 2) link rel="alternate" (IG sprinkles these)
+  for (const el of document.querySelectorAll('link[rel="alternate"][href*="/stories/"]')) {
+    const href = el.getAttribute('href') || '';
+    const m = href.match(/\/stories\/[^/]+\/(\d{8,})/);
+    if (m) return m[1];
+  }
+  // 3) data-media-id (appears on some builds)
+  const d = document.querySelector('[data-media-id]');
+  if (d?.dataset?.mediaId) return d.dataset.mediaId;
+
+  // 4) Path fallback
+  return getMediaIdFromPath();
+}
+
+// Canonical per‑story key (prefer mediaId for stable caching)
+function canonicalKey() {
+  const mid = getMediaIdFromDOM();
+  return mid ? `story_${mid}` : location.pathname;
+}
+```
+
+Then, inside your **DOM‑change** handler where you set `state.currentKey` (keep your 200 ms throttle), **replace the key assignment block** with:
+
+```js
+const key = canonicalKey();
+if (key !== lastKey) {
+  if (state.stopPagination) state.stopPagination();
+  lastKey = state.currentKey = key;
+
+  // Clear stale cache if a different mediaId is now under the same path key
+  const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+  const currentMid = getMediaIdFromDOM();
+  const cachedMid = store[key]?.mediaId;
+  if (store[key] && cachedMid && currentMid && cachedMid !== currentMid) {
+    delete store[key];
+    localStorage.setItem('panel_story_store', JSON.stringify(store));
+  }
+
+  autoOpenViewersOnceFor(key);
+}
+```
+
+And in your **mirror function** (where you write to `panel_story_store`), ensure you store the `mediaId`:
+
+```js
+function mirrorToLocalStorageDebounced(key) {
+  if (state.mirrorTimer) return;
+  state.mirrorTimer = setTimeout(() => {
+    state.mirrorTimer = null;
+    const map = state.viewerStore.get(key);
+    if (!map || map.size === 0) return;
+
+    const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+    store[key] = {
+      mediaId: getMediaIdFromDOM() || null,    // <-- add this
+      viewers: Array.from(map.entries()),
+      fetchedAt: Date.now()
+    };
+    localStorage.setItem('panel_story_store', JSON.stringify(store));
+    window.dispatchEvent(new CustomEvent('storylister:data_updated', { detail: { storyId: key } }));
+  }, 250);
+}
+```
+
+---
+
+### A3) **Fix follower/following mapping once, at the point we merge chunks**
+
+(We unify names here to keep the UI code simple.)
+
+Inside your message listener that merges viewer chunks, where you currently do `map.set(viewerKey, v)`, **normalize the follow flags**:
+
+```js
+viewers.forEach((raw, idx) => {
+  const v = { ...raw };
+
+  // Normalize follow flags for UI:
+  // IG: friendship_status.following => YOU follow THEM (youFollow)
+  //     friendship_status.followed_by => THEY follow YOU (isFollower)
+  // We accept either our normalized fields or IG-shaped fields.
+  const isFollower = (v.follows_viewer === true) || (v.follows_you === true) || (v.is_follower === true);
+  const youFollow  = (v.followed_by_viewer === true) || (v.you_follow === true) || (v.is_following === true);
+
+  v.isFollower = !!isFollower;  // they follow you
+  v.youFollow  = !!(youFollow); // you follow them
+
+  // Deduplicate by username (lc) or id
+  const viewerKey = (v.username ? String(v.username).toLowerCase() : null) || String(v.id || idx);
+
+  const prev = map.get(viewerKey) || {};
+  map.set(viewerKey, { ...prev, ...v });
+});
+```
+
+---
+
+### A4) **DOM fallback for reacts (hearts) when API omits it**
+
+Add this small helper and call it **after** each merge (before mirroring):
+
+```js
+function mergeReactsFromDialogIntoMap(map) {
+  const dlg = document.querySelector('[role="dialog"][aria-modal="true"]');
+  if (!dlg) return;
+
+  // Each row typically contains a profile link; detect a heart in the row.
+  const rows = Array.from(dlg.querySelectorAll('div[role="button"], li, div[role="listitem"]'));
+  rows.forEach(row => {
+    const a = row.querySelector('a[href^="/"][href*="/"]');
+    const username = a?.getAttribute('href')?.split('/')?.filter(Boolean)?.[0];
+    if (!username) return;
+
+    // Heart detection – keep broad; IG’s SVGs vary by rollout.
+    const hasHeart = !!row.querySelector(
+      'svg[aria-label*="Like"], svg[aria-label*="Unlike"], use[href*="heart"], path[d*="M34.6 3.1"]'
+    );
+
+    if (hasHeart) {
+      const key = username.toLowerCase();
+      const item = map.get(key);
+      if (item && !item.reaction) item.reaction = '❤️';
+    }
+  });
+}
+```
+
+And in your **message listener**, after you finish merging the chunk into `map`:
+
+```js
+mergeReactsFromDialogIntoMap(map);
+mirrorToLocalStorageDebounced(key);
+```
+
+> **Play/Pause:** remove any code that pauses videos. IG pauses automatically when the viewers dialog opens and resumes when you close it—our pausing was the cause of the “I press Play and it repauses” loop. If you still have any `pauseVideos*` calls, delete them.
+
+---
+
+## B. `injected.js` (normalize once, with the right fields)
+
+Replace your normalize function(s) (used by both the fetch and XHR branches) with this:
+
+```js
+function normalizeViewer(v, idx) {
+  const u = v?.user || v?.node?.user || v?.node || v;
+
+  // Profile pic: allow http(s) only
+  let pic = u?.profile_pic_url || u?.profile_pic_url_hd || u?.profile_picture_url || '';
+  if (typeof pic !== 'string' || !/^https?:\/\//i.test(pic)) pic = '';
+
+  // Follow flags (IG semantics)
+  const fs = v?.friendship_status || u?.friendship_status || {};
+  const youFollow  = !!(fs.following ?? u?.is_following ?? v?.is_following); // YOU -> THEM
+  const isFollower = !!(fs.followed_by ?? u?.is_follower  ?? v?.is_follower); // THEM -> YOU
+
+  // Reactions on web: heart/like; newer shapes also carry latest_reaction.reaction_emoji
+  const reaction =
+    v?.latest_reaction?.reaction_emoji ||
+    v?.latest_reaction?.emoji ||
+    v?.reaction?.emoji ||
+    v?.story_reaction?.emoji ||
+    (v?.has_liked ? '❤️' : null);
+
+  return {
+    id: String(u?.id || u?.pk || u?.pk_id || u?.username || idx),
+    username: u?.username || '',
+    full_name: u?.full_name || u?.fullname || u?.name || '',
+    profile_pic_url: pic,
+    is_verified: !!(u?.is_verified || u?.verified || u?.blue_verified),
+
+    // Keep both our UI-friendly flags and IG-like names for compatibility
+    youFollow,                   // you follow them
+    isFollower,                  // they follow you
+    followed_by_viewer: youFollow,
+    follows_viewer: isFollower,
+
+    reaction: reaction || null,
+    originalIndex: idx,
+    viewedAt: v?.timestamp || v?.viewed_at || Date.now()
+  };
+}
+```
+
+Make sure your **fetch** and **XHR** paths both call `normalizeViewer(...)` and that you still compute:
+
+```js
+const pathId = location.pathname.match(/\/stories\/[^/]+\/(\d{8,})/)?.[1];
+const graphId = data?.media_id || data?.data?.media?.id || data?.data?.reel?.id;
+const mediaId  = String(graphId || pathId || Date.now());
+```
+
+…and then post:
+
+```js
+window.postMessage({
+  type: 'STORYLISTER_VIEWERS_CHUNK',
+  data: { mediaId, viewers: normalized, totalCount: data.user_count || data.total_viewer_count || normalized.length }
+}, '*');
+```
+
+> **No referrerpolicy/crossorigin** attributes anywhere on avatars. IG’s CDN rejects those; you already fixed this earlier.
+
+---
+
+## C. `content.js` (small mapping & filters, plus links)
+
+Where you rebuild viewer objects from storage, map the fields like this (this also fixes the **Reacts** and follow filters):
+
+```js
+// inside loadViewersFromStorage() mapping loop
+viewers.set(viewerKey, {
+  id: v.id || v.pk || v.username,
+  username: v.username || '',
+  displayName: v.full_name || v.displayName || v.username || 'Anonymous',
+  profilePic: v.profile_pic_url || v.profilePic || '',
+  isVerified: !!v.is_verified,
+
+  // unified flags (see injected normalize)
+  isFollower: !!(v.isFollower ?? v.follows_viewer),   // they follow you
+  youFollow:  !!(v.youFollow  ?? v.followed_by_viewer), // you follow them
+
+  reaction: v.reaction || null,
+  reacted: !!v.reaction,
+
+  viewedAt: v.viewedAt || v.timestamp || Date.now(),
+  originalIndex: Number.isFinite(v.originalIndex) ? v.originalIndex : i,
+  isTagged: taggedUsers.has(v.username || v.id)
+});
+```
+
+Update your filters:
+
+```js
+case 'reacts':
+  filteredViewers = filteredViewers.filter(v => v.reacted || v.reaction);
+  break;
+case 'following':     // you follow them
+  filteredViewers = filteredViewers.filter(v => v.youFollow === true);
+  break;
+case 'followers':     // they follow you
+  filteredViewers = filteredViewers.filter(v => v.isFollower === true);
+  break;
+case 'nonfollowers':
+  filteredViewers = filteredViewers.filter(v => v.youFollow === false && v.isFollower === false);
+  break;
+```
+
+Make usernames/avatars clickable:
+
+```html
+<a class="sl-username" href="https://www.instagram.com/${v.username}/" target="_blank" rel="noopener noreferrer">
+  ${v.username}
+</a>
+
+<a href="https://www.instagram.com/${v.username}/" target="_blank" rel="noopener noreferrer">
+  <img class="sl-avatar" src="${v.profilePic || fallback}" loading="lazy" alt="${v.username}">
+</a>
+```
+
+*(Keep your “full‑button tag click” CSS you already added.)*
+
+---
+
+## D. “Own story” gating (simple & bulletproof)
+
+Keep it simple in your DOM observer:
+
+```js
+function isOwnStory() {
+  return !!document.querySelector('a[href*="/seen_by/"]');
+}
+
+// In your throttled onDOMChange:
+if (!isOwnStory()) {
+  window.dispatchEvent(new CustomEvent('storylister:hide_panel'));
+  return;
+}
+window.dispatchEvent(new CustomEvent('storylister:show_panel'));
+```
+
+This avoids the extension showing on other people’s stories and it handles share‑links too.
+
+---
+
+## Why these fix your list immediately
+
+* **First story count wrong** → early injection + mediaId cache‑key + stale‑cache clearing.
+* **Reacts not detected** → check `latest_reaction.reaction_emoji` + `has_liked` and DOM fallback.
+* **Following/followers wrong** → corrected mapping (youFollow vs isFollower).
+* **Refresh shows a lower number** → stale cache cleared when mediaId changes; chunk routing is keyed to `mediaId` → canonical key.
+* **Auto‑pause loop** → remove all programmatic pausing; let IG handle pause when the dialog is open.
+* **Panel sometimes disappears when moving between stories** → `isOwnStory()` gating + your existing throttling keeps the panel stable.
+
+---
+
+## “Do not do” (these caused recent regressions)
+
+* ❌ Do **not** inline inject code (CSP blocks it). Always use `chrome.runtime.getURL('injected.js')`.
+* ❌ Do **not** add global `stopPropagation`/capture listeners outside the panel.
+* ❌ Do **not** set `referrerpolicy`/`crossorigin` on avatars.
+* ❌ Do **not** programmatically pause videos.
+
+---
+
+## Quick QA checklist (60 seconds)
+
+1. Open your **first** story from home → verify counts climb to **Seen by N** (±1).
+2. Close the viewers dialog → press **Play** → video must keep playing.
+3. Navigate to next story and back → counts remain correct (no mixing).
+4. Click **❤️ Reacts** → only rows with hearts remain.
+5. **Following / Followers / Non‑followers** filters reflect correct users.
+6. Refresh on the second story → no drop in counts; if a new `mediaId` appears, the cache for that key is reset cleanly.
+
+---
+
+If you want me to **diff 15.3 ↔︎ 15.4** line‑by‑line as well, upload both sets again (a few earlier uploads have expired on my side) and I’ll annotate the exact deltas. Otherwise, applying the patches above to your current 15.4 is the fastest route to green.

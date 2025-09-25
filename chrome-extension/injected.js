@@ -3,6 +3,46 @@
   if (window.__storylisterInjected__) return;
   window.__storylisterInjected__ = true;
 
+  // B - Unified normalize function with correct fields
+  function normalizeViewer(v, idx) {
+    const u = v?.user || v?.node?.user || v?.node || v;
+
+    // Profile pic: allow http(s) only
+    let pic = u?.profile_pic_url || u?.profile_pic_url_hd || u?.profile_picture_url || '';
+    if (typeof pic !== 'string' || !/^https?:\/\//i.test(pic)) pic = '';
+
+    // Follow flags (IG semantics)
+    const fs = v?.friendship_status || u?.friendship_status || {};
+    const youFollow  = !!(fs.following ?? u?.is_following ?? v?.is_following); // YOU -> THEM
+    const isFollower = !!(fs.followed_by ?? u?.is_follower  ?? v?.is_follower); // THEM -> YOU
+
+    // Reactions on web: heart/like; newer shapes also carry latest_reaction.reaction_emoji
+    const reaction =
+      v?.latest_reaction?.reaction_emoji ||
+      v?.latest_reaction?.emoji ||
+      v?.reaction?.emoji ||
+      v?.story_reaction?.emoji ||
+      (v?.has_liked ? '❤️' : null);
+
+    return {
+      id: String(u?.id || u?.pk || u?.pk_id || u?.username || idx),
+      username: u?.username || '',
+      full_name: u?.full_name || u?.fullname || u?.name || '',
+      profile_pic_url: pic,
+      is_verified: !!(u?.is_verified || u?.verified || u?.blue_verified),
+
+      // Keep both our UI-friendly flags and IG-like names for compatibility
+      youFollow,                   // you follow them
+      isFollower,                  // they follow you
+      followed_by_viewer: youFollow,
+      follows_viewer: isFollower,
+
+      reaction: reaction || null,
+      originalIndex: idx,
+      viewedAt: v?.timestamp || v?.viewed_at || Date.now()
+    };
+  }
+
   const origFetch = window.fetch;
   window.fetch = async function(...args) {
     const res = await origFetch.apply(this, args);
@@ -30,37 +70,7 @@
         const graphId = data?.media_id || data?.data?.media?.id || data?.data?.reel?.id;
         const mediaId = String(graphId || pathId || Date.now());
 
-        const normalized = viewers.map((v, idx) => {
-          const u = v?.user || v?.node?.user || v?.node || v;
-          // profile pic: absolute only
-          let pic = u?.profile_pic_url || u?.profile_pic_url_hd || u?.profile_picture_url || '';
-          if (typeof pic !== 'string' || !/^https?:\/\//i.test(pic)) pic = '';
-
-          // friendship / follows
-          const fs = v?.friendship_status || u?.friendship_status;
-          const follows_viewer = (fs?.following ?? u?.is_follower ?? v?.is_follower) || false;
-          const followed_by_viewer = (fs?.followed_by ?? u?.is_following ?? v?.is_following) || false;
-
-          // reactions from existing fields (no API)
-          const reaction =
-            v?.reaction?.emoji ||
-            v?.story_reaction?.emoji ||
-            v?.latest_reaction?.emoji ||
-            (v?.has_liked ? '❤️' : null);
-
-          return {
-            id: String(u?.id || u?.pk || u?.pk_id || u?.username || idx),
-            username: u?.username || '',
-            full_name: u?.full_name || u?.fullname || u?.name || '',
-            profile_pic_url: pic,
-            is_verified: !!(u?.is_verified || u?.verified || u?.blue_verified),
-            follows_viewer,
-            followed_by_viewer,
-            reaction: reaction || null,
-            originalIndex: idx,
-            viewedAt: v?.timestamp || v?.viewed_at || Date.now()
-          };
-        });
+        const normalized = viewers.map(normalizeViewer);
 
         window.postMessage({
           type: 'STORYLISTER_VIEWERS_CHUNK',
@@ -92,34 +102,7 @@
             const pathId = location.pathname.match(/\/stories\/[^/]+\/(\d+)/)?.[1];
             const mediaId = String(data.media_id || pathId || Date.now());
 
-            const normalized = users.map((v, idx) => {
-              const u = v?.user || v;
-              const fs = v?.friendship_status || u?.friendship_status;
-              const follows_viewer = (fs?.following ?? u?.is_follower ?? v?.is_follower) || false;
-              const followed_by_viewer = (fs?.followed_by ?? u?.is_following ?? v?.is_following) || false;
-
-              const reaction =
-                v?.reaction?.emoji ||
-                v?.story_reaction?.emoji ||
-                v?.latest_reaction?.emoji ||
-                (v?.has_liked ? '❤️' : null);
-
-              let pic = u?.profile_pic_url || u?.profile_pic_url_hd || u?.profile_picture_url || '';
-              if (typeof pic !== 'string' || !/^https?:\/\//i.test(pic)) pic = '';
-
-              return {
-                id: String(u?.id || u?.pk || u?.pk_id || u?.username || idx),
-                username: u?.username || '',
-                full_name: u?.full_name || u?.fullname || u?.name || '',
-                profile_pic_url: pic,
-                is_verified: !!(u?.is_verified || u?.verified || u?.blue_verified),
-                follows_viewer,
-                followed_by_viewer,
-                reaction: reaction || null,
-                originalIndex: idx,
-                viewedAt: v?.timestamp || v?.viewed_at || Date.now()
-              };
-            });
+            const normalized = users.map(normalizeViewer);
 
             window.postMessage({
               type: 'STORYLISTER_VIEWERS_CHUNK',

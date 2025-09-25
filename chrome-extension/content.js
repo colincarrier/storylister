@@ -183,11 +183,15 @@
     const initial = (username || 'U').slice(0,1).toUpperCase();
     const fallback = `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'%3E%3Crect width='40' height='40' fill='%23e4e4e7'/%3E%3Ctext x='50%25' y='50%25' text-anchor='middle' dy='.35em' fill='%23666' font-size='20'%3E${initial}%3C/text%3E%3C/svg%3E`;
 
-    if (!url) return `<img class="sl-avatar" src="${fallback}" alt="${username||''}">`;
+    const img = url ? 
+      `<img class="sl-avatar" src="${url}" loading="lazy" onerror="this.onerror=null;this.src='${fallback}'" alt="${username||''}">` :
+      `<img class="sl-avatar" src="${fallback}" alt="${username||''}">`;
 
-    // IMPORTANT: no referrerpolicy / crossorigin here
-    return `<img class="sl-avatar" src="${url}" loading="lazy"
-            onerror="this.onerror=null;this.src='${fallback}'" alt="${username||''}">`;
+    // Wrap in link to Instagram profile
+    if (username) {
+      return `<a href="https://www.instagram.com/${username}/" target="_blank" rel="noopener noreferrer">${img}</a>`;
+    }
+    return img;
   }
   
   // Custom tags for Pro mode
@@ -587,10 +591,14 @@
         displayName: v.full_name || v.displayName || v.username || 'Anonymous',
         profilePic: v.profile_pic_url || v.profilePic || '',
         isVerified: !!v.is_verified,
-        isFollower: !!(v.follows_viewer ?? v.is_follower),     // they follow you
-        youFollow:  !!(v.followed_by_viewer ?? v.is_following),// you follow them
-        reaction: v.reaction || null,                           // keep raw
-        reacted: !!v.reaction,                                  // boolean for filter
+
+        // unified flags (see injected normalize)
+        isFollower: !!(v.isFollower ?? v.follows_viewer),   // they follow you
+        youFollow:  !!(v.youFollow  ?? v.followed_by_viewer), // you follow them
+
+        reaction: v.reaction || null,
+        reacted: !!v.reaction,
+
         viewedAt: v.viewedAt || v.timestamp || Date.now(),
         originalIndex: Number.isFinite(v.originalIndex) ? v.originalIndex : i,
         isTagged: taggedUsers.has(v.username || v.id)
