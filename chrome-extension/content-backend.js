@@ -40,6 +40,14 @@
     }
   };
 
+  // Own story detection - simple and bulletproof
+  function isOwnStory() {
+    // Your own story on web always has a "Seen by" control
+    return !!document.querySelector('a[href*="/seen_by/"]') ||
+           Array.from(document.querySelectorAll('button,span'))
+             .some(el => /^Seen by\s+\d[\d,]*$/i.test((el.textContent || '').trim()));
+  }
+
   // Stable key + "Seen by" utilities
   function getStorageKey() { return location.pathname; }   // works with and without numeric id
 
@@ -87,6 +95,40 @@
   document.addEventListener('play', (e) => {
     if (e.target?.tagName === 'VIDEO') e.target.dataset.userPlayed = '1';
   }, true);
+
+  // DOM-based reaction detection fallback
+  function mergeReactsFromDialogIntoMap(key) {
+    const dlg = document.querySelector('[role="dialog"][aria-modal="true"]');
+    if (!dlg) return;
+    const map = state.viewerStore.get(key);
+    if (!map || map.size === 0) return;
+
+    // Find usernames that have a visible heart in their row
+    const heartIcons = Array.from(dlg.querySelectorAll('[aria-label="Like"]'));
+    const reactedUsernames = new Set();
+    heartIcons.forEach(icon => {
+      // Walk up to find the row container
+      let row = icon;
+      for (let i = 0; i < 6 && row && row !== dlg; i++) row = row.parentElement;
+      if (!row) return;
+      const a = row.querySelector('a[href^="/"][href$="/"]');
+      if (!a) return;
+      const href = a.getAttribute('href') || '';
+      const username = (href.split('/')[1] || '').toLowerCase();
+      if (username) reactedUsernames.add(username);
+    });
+
+    // Mark those users as reacted
+    if (reactedUsernames.size) {
+      reactedUsernames.forEach(u => {
+        const v = map.get(u);
+        if (v) {
+          if (!v.reaction) v.reaction = '❤️';
+          v.reacted = true;
+        }
+      });
+    }
+  }
 
   // Pagination (simple, bounded, stop when we've met target)
   function findScrollableInDialog() {
@@ -145,8 +187,15 @@
       const map = state.viewerStore.get(key);
       if (!map || map.size === 0) return;
 
+      // Find the current mediaId for this key
+      const currentMediaId = [...state.idToKey.entries()].find(([, k]) => k === key)?.[0];
+
       const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
-      store[key] = { viewers: Array.from(map.entries()), fetchedAt: Date.now() };
+      store[key] = { 
+        mediaId: currentMediaId,  // Store mediaId to detect story changes on reload
+        viewers: Array.from(map.entries()), 
+        fetchedAt: Date.now() 
+      };
 
       // Alias mediaIds to our key (prevents misrouting after refresh)
       const aliases = {};
@@ -167,18 +216,34 @@
     const { mediaId, viewers } = msg.data || {};
     if (!mediaId || !Array.isArray(viewers)) return;
 
-    const activeKey = state.currentKey || getStorageKey();
-    if (!state.idToKey.has(mediaId)) state.idToKey.set(mediaId, activeKey);
-    const key = state.idToKey.get(mediaId);
+    const key = getStorageKey();
+
+    // Detect when a new story loads under the same pathname (back/forward navigation)
+    if (!state.idToKey.has(mediaId)) {
+      state.idToKey.set(mediaId, key);
+    }
+    const currentMediaForKey = [...state.idToKey.entries()].find(([, k]) => k === key)?.[0];
+    if (currentMediaForKey && currentMediaForKey !== mediaId) {
+      // New story under same pathname -> reset viewer map for this key
+      state.viewerStore.set(key, new Map());
+      // Remap this key to the new mediaId
+      state.idToKey.delete(currentMediaForKey);
+      state.idToKey.set(mediaId, key);
+    }
 
     if (!state.viewerStore.has(key)) state.viewerStore.set(key, new Map());
     const map = state.viewerStore.get(key);
 
+    // Dedupe by username (lowercase) then id
     viewers.forEach((v, idx) => {
-      const k = (v.username ? String(v.username).toLowerCase() : null) || String(v.id || idx);
+      const uname = (v.username || '').toLowerCase();
+      const k = uname || String(v.id || idx);
       const prev = map.get(k) || {};
       map.set(k, { ...prev, ...v });
     });
+
+    // Apply DOM fallback for reactions
+    mergeReactsFromDialogIntoMap(key);
 
     mirrorToLocalStorageDebounced(key);
   });
@@ -187,7 +252,8 @@
   const onDOMChange = (() => {
     let lastKey = null;
     return () => {
-      if (!location.pathname.startsWith('/stories/')) {
+      // Only show panel on YOUR stories (with "Seen by" control)
+      if (!location.pathname.startsWith('/stories/') || !isOwnStory()) {
         window.dispatchEvent(new CustomEvent('storylister:hide_panel'));
         return;
       }

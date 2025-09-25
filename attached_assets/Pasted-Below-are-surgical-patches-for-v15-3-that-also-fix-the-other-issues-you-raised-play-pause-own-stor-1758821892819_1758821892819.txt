@@ -1,0 +1,455 @@
+Below are surgical patches for v15.3 that also fix the other issues you raised (play/pause, own‑story detection, cache stability, wrong counts on back/forward, and clickable profiles). They are intentionally small and avoid the regressions that appeared in v16.
+
+What we’re changing (v15.3)
+
+Stop auto-pausing entirely
+Instagram already pauses when the “Seen by” dialog opens and resumes when it closes. We remove our pausing code so the video doesn’t re‑pause after you press Play.
+
+Show only on your stories
+Use a simple, bulletproof gate: show panel only when “Seen by …” is present. That’s the one thing web always shows on your own story and never on others.
+
+Always know which story we’re on
+Keep using the pathname as the story key, and map mediaId → pathname when chunks arrive (prevents misrouting during fast navigation). If a new mediaId shows up under the same pathname, we reset that map (new story, new data).
+
+Reacts (web)
+Unify reacts as '❤️' based on:
+
+reaction/has_liked fields from network (when present), or
+
+a heart icon in the viewers dialog row (DOM fallback).
+
+Followers / Following filters (no new API)
+Use only what IG already returns in the viewer payload (friendship_status, is_follower, is_following). If unknown, omit from those filters.
+
+Clickable usernames/avatars
+Each opens the IG profile in a new tab.
+
+Cache persists & stays correct
+Mirror the current viewer map to localStorage per story key (pathname), de‑duplicate by lower‑cased username, and record the current mediaId with the cache so we can clear cleanly when the key points to a different story later.
+
+Patches
+
+Apply these to your current v15.3 files (not v16).
+
+A) content-backend.js
+
+1. Gate on your own story (simple) & remove all pausing
+Add these helpers near the top (keep your state and Settings):
+
+function isOwnStory() {
+  // Your own story on web always has a "Seen by" control
+  return !!document.querySelector('a[href*="/seen_by/"]') ||
+         Array.from(document.querySelectorAll('button,span'))
+           .some(el => /^Seen by\s+\d[\d,]*$/i.test((el.textContent || '').trim()));
+}
+
+// No programmatic pausing. IG pauses/resumes itself with the dialog.
+document.addEventListener('play', (e) => {
+  if (e.target?.tagName === 'VIDEO') e.target.dataset.userPlayed = '1';
+}, true);
+
+
+2. Heart detection from the open dialog (DOM fallback)
+Add this function (used after we’ve rendered or received chunks):
+
+function mergeReactsFromDialogIntoMap(key) {
+  const dlg = document.querySelector('[role="dialog"][aria-modal="true"]');
+  if (!dlg) return;
+  const map = state.viewerStore.get(key);
+  if (!map || map.size === 0) return;
+
+  // Gather usernames that have a visible heart in their row
+  // Heuristic: find all "Like" icons, climb to a row that contains an anchor to /username/
+  const heartIcons = Array.from(dlg.querySelectorAll('[aria-label="Like"]'));
+  const reactedUsernames = new Set();
+  heartIcons.forEach(icon => {
+    // Walk up a few levels to find a container that includes an anchor to a profile
+    let row = icon;
+    for (let i = 0; i < 6 && row && row !== dlg; i++) row = row.parentElement;
+    if (!row) return;
+    const a = row.querySelector('a[href^="/"][href$="/"]');
+    if (!a) return;
+    const href = a.getAttribute('href') || '';
+    const username = (href.split('/')[1] || '').toLowerCase();
+    if (username) reactedUsernames.add(username);
+  });
+
+  // Mark those users as reacted = ❤️
+  if (reactedUsernames.size) {
+    reactedUsernames.forEach(u => {
+      const v = map.get(u);
+      if (v) {
+        if (!v.reaction) v.reaction = '❤️';
+        v.reacted = true;
+      }
+    });
+  }
+}
+
+
+3. Robust auto‑open and pagination (unchanged logic, but no pause)
+
+function findSeenByButton() {
+  return document.querySelector('a[href*="/seen_by/"]') ||
+         Array.from(document.querySelectorAll('[role="button"],button'))
+           .find(el => /^Seen by(\s+[\d,]+)?$/i.test((el.textContent || '').trim())) || null;
+}
+
+async function waitForSeenByButton(timeout = 5000, interval = 150) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    const btn = findSeenByButton();
+    if (btn) return btn;
+    await new Promise(r => setTimeout(r, interval));
+  }
+  return null;
+}
+
+function findScrollableInDialog() {
+  const dlg = document.querySelector('[role="dialog"][aria-modal="true"]');
+  if (!dlg) return null;
+  return dlg.querySelector('[style*="overflow-y"]') ||
+         dlg.querySelector('[style*="overflow: hidden auto"]') ||
+         Array.from(dlg.querySelectorAll('div')).find(el => el.scrollHeight > el.clientHeight + 40) ||
+         dlg;
+}
+
+function getStorageKey() { return location.pathname; }
+
+function startPagination(scroller, maxMs = 6000) {
+  const t0 = Date.now();
+  let stopped = false;
+  const tick = () => {
+    if (stopped || !document.contains(scroller)) return;
+    if (Date.now() - t0 > maxMs) return;
+
+    // Stop when we hit the "Seen by N" count (±1)
+    const a = document.querySelector('a[href*="/seen_by/"]');
+    let target = null;
+    if (a) {
+      const m = (a.textContent || '').match(/(\d[\d,]*)/);
+      if (m) target = parseInt(m[1].replace(/,/g, ''), 10);
+    }
+
+    const map = state.viewerStore.get(getStorageKey());
+    const loaded = map ? map.size : 0;
+    if (target && loaded >= target - 1) return;
+
+    scroller.scrollTop = scroller.scrollHeight;
+    const nearBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 10;
+    setTimeout(tick, nearBottom ? 450 : 250);
+  };
+  tick();
+  return () => { stopped = true; };
+}
+
+async function autoOpenViewersOnceFor(key) {
+  if (!Settings.cache.autoOpen) return;
+  if (state.openedForKey?.has?.(key)) return;
+
+  const btn = await waitForSeenByButton(5000);
+  if (!btn) return;
+
+  state.openedForKey.add(key);
+  try { btn.click(); } catch {}
+  setTimeout(() => {
+    const scroller = findScrollableInDialog();
+    if (scroller) {
+      if (state.stopPagination) state.stopPagination();
+      state.stopPagination = startPagination(scroller);
+    }
+  }, 350);
+}
+
+
+4. Message routing + cache mirror + mediaId change reset
+
+Replace your viewer‑chunk handler with this version:
+
+window.addEventListener('message', (evt) => {
+  if (evt.source !== window || evt.origin !== location.origin) return;
+  const msg = evt.data;
+  if (!msg || msg.type !== 'STORYLISTER_VIEWERS_CHUNK') return;
+
+  const { mediaId, viewers } = msg.data || {};
+  if (!mediaId || !Array.isArray(viewers)) return;
+
+  const key = getStorageKey();
+
+  // If this mediaId appears under a key that already had a different mediaId, reset that key.
+  if (!state.idToKey.has(mediaId)) state.idToKey.set(mediaId, key);
+  const currentMediaForKey = [...state.idToKey.entries()].find(([, k]) => k === key)?.[0];
+  if (currentMediaForKey && currentMediaForKey !== mediaId) {
+    // New story under same pathname -> reset viewer map for this key
+    state.viewerStore.set(key, new Map());
+    // remap this key to the new mediaId
+    state.idToKey.delete(currentMediaForKey);
+    state.idToKey.set(mediaId, key);
+  }
+
+  if (!state.viewerStore.has(key)) state.viewerStore.set(key, new Map());
+  const map = state.viewerStore.get(key);
+
+  // dedupe by username (lc) then id
+  viewers.forEach((v, idx) => {
+    const uname = (v.username || '').toLowerCase();
+    const k = uname || String(v.id || idx);
+    const prev = map.get(k) || {};
+    map.set(k, { ...prev, ...v });
+  });
+
+  // DOM fallback to mark ❤️
+  mergeReactsFromDialogIntoMap(key);
+
+  // mirror to localStorage (with mediaId so we can detect story change on reload)
+  if (state.mirrorTimer) clearTimeout(state.mirrorTimer);
+  state.mirrorTimer = setTimeout(() => {
+    const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+    store[key] = {
+      mediaId,
+      fetchedAt: Date.now(),
+      viewers: Array.from(map.entries())
+    };
+    // maintain aliases (mediaId -> key)
+    store.__aliases = store.__aliases || {};
+    store.__aliases[mediaId] = key;
+    localStorage.setItem('panel_story_store', JSON.stringify(store));
+
+    window.dispatchEvent(new CustomEvent('storylister:data_updated', { detail: { storyId: key } }));
+  }, 250);
+});
+
+
+5. Observer (show only on your story, inject, open)
+
+function ensureInjected() {
+  if (state.injected) return;
+  if (!chrome?.runtime?.id) return; // extension context might be reloading
+  try {
+    const s = document.createElement('script');
+    s.src = chrome.runtime.getURL('injected.js');
+    s.dataset.storylisterInjected = '1';
+    s.onload = () => s.remove();
+    (document.head || document.documentElement).appendChild(s);
+    state.injected = true;
+  } catch {}
+}
+
+const onDOMChange = (() => {
+  let lastKey = null;
+  return () => {
+    // Only on your own story
+    if (!location.pathname.startsWith('/stories/') || !isOwnStory()) {
+      window.dispatchEvent(new CustomEvent('storylister:hide_panel'));
+      return;
+    }
+    window.dispatchEvent(new CustomEvent('storylister:show_panel'));
+    ensureInjected();
+
+    const key = getStorageKey();
+    if (key !== lastKey) {
+      if (state.stopPagination) state.stopPagination();
+      lastKey = state.currentKey = key;
+      autoOpenViewersOnceFor(key);
+    }
+  };
+})();
+
+const mo = new MutationObserver(() => onDOMChange());
+mo.observe(document.documentElement || document.body, { childList: true, subtree: true });
+onDOMChange();
+
+B) injected.js (keep lean; make sure we set reaction and follow flags)
+
+Ensure your normalization already covers this. If not, update as follows:
+
+(() => {
+  'use strict';
+  if (window.__storylisterInjected__) return;
+  window.__storylisterInjected__ = true;
+
+  const origFetch = window.fetch;
+  window.fetch = async function(...args) {
+    const res = await origFetch.apply(this, args);
+    try {
+      const ct = res.headers?.get('content-type') || '';
+      if (!/json/i.test(ct)) return res;
+
+      const url = String(args?.[0] || '');
+      const relevant = url.includes('/api/') || url.includes('/graphql') || /viewer|viewers|story|reel|seen|likers/i.test(url);
+      if (!relevant) return res;
+
+      res.clone().json().then(data => {
+        if (!data) return;
+
+        let viewers = null;
+        if (Array.isArray(data.users)) viewers = data.users;
+        else if (Array.isArray(data.viewers)) viewers = data.viewers;
+        else if (data?.data?.xdt_api__v1__media__story_viewers?.viewers) viewers = data.data.xdt_api__v1__media__story_viewers.viewers;
+        else if (data?.data?.media?.story_viewers?.edges) viewers = data.data.media.story_viewers.edges.map(e => e.node || e.user || e);
+        else if (data?.data?.xdt_api__v1__stories__viewers__connection__edge?.edges) viewers = data.data.xdt_api__v1__stories__viewers__connection__edge.edges.map(e => e.node || e);
+        if (!viewers || viewers.length === 0) return;
+
+        const urlId = location.pathname.match(/\/stories\/[^/]+\/(\d{10,20})/)?.[1];
+        const graphId = data?.media_id || data?.data?.media?.id || data?.data?.reel?.id;
+        const mediaId = String(graphId || urlId || Date.now());
+
+        const normalized = viewers.map((v, idx) => {
+          const u = v?.user || v?.node?.user || v?.node || v;
+          const fs = v?.friendship_status || u?.friendship_status || {};
+          let pic = u?.profile_pic_url || u?.profile_pic_url_hd || u?.profile_picture_url || '';
+          if (typeof pic !== 'string' || !/^https?:\/\//i.test(pic)) pic = '';
+
+          const reaction =
+            v?.reaction?.emoji ||
+            v?.story_reaction?.emoji ||
+            v?.latest_reaction?.emoji ||
+            (v?.has_liked ? '❤️' : null);
+
+          return {
+            id: String(u?.id || u?.pk || u?.pk_id || u?.username || idx),
+            username: u?.username || '',
+            full_name: u?.full_name || u?.fullname || u?.name || '',
+            profile_pic_url: pic,
+            is_verified: !!(u?.is_verified || u?.verified || u?.blue_verified),
+            follows_viewer: !!(fs.following ?? u?.is_follower ?? v?.is_follower),
+            followed_by_viewer: !!(fs.followed_by ?? u?.is_following ?? v?.is_following),
+            reaction: reaction || null,
+            reacted: !!reaction,
+            originalIndex: idx,
+            viewedAt: v?.timestamp || v?.viewed_at || Date.now()
+          };
+        });
+
+        window.postMessage({
+          type: 'STORYLISTER_VIEWERS_CHUNK',
+          data: {
+            mediaId,
+            viewers: normalized,
+            totalCount: data.user_count || data.total_viewer_count || normalized.length
+          }
+        }, '*');
+      }).catch(() => {});
+    } catch {}
+    return res;
+  };
+})();
+
+C) content.js (map fields, filter, clickable, tag hit‑box)
+
+1) When loading from cache, keep the same field shape
+
+// inside your "load from storage" mapping:
+viewers.set(viewerKey, {
+  id: v.id || v.pk || v.username,
+  username: v.username || '',
+  displayName: v.full_name || v.displayName || v.username || 'Anonymous',
+  profilePic: v.profile_pic_url || v.profilePic || '',
+  isVerified: !!v.is_verified,
+  isFollower: !!(v.follows_viewer ?? v.is_follower),      // they follow you
+  youFollow:  !!(v.followed_by_viewer ?? v.is_following), // you follow them
+  reaction: v.reaction || null,
+  reacted: !!(v.reaction),
+  viewedAt: v.viewedAt || v.timestamp || Date.now(),
+  originalIndex: Number.isFinite(v.originalIndex) ? v.originalIndex : i,
+  isTagged: taggedUsers.has(v.username || v.id)
+});
+
+
+2) Filters (add/ensure these cases):
+
+case 'reacts':
+  filteredViewers = filteredViewers.filter(v => v.reacted || v.reaction);
+  break;
+
+case 'following':      // you follow them
+  filteredViewers = filteredViewers.filter(v => v.youFollow === true);
+  break;
+
+case 'followers':      // they follow you
+  filteredViewers = filteredViewers.filter(v => v.isFollower === true);
+  break;
+
+case 'nonfollowers':
+  filteredViewers = filteredViewers.filter(v => v.youFollow === false && v.isFollower === false);
+  break;
+
+
+3) Clickable usernames & avatars:
+
+// username:
+`<a class="sl-username" href="https://www.instagram.com/${v.username}/" target="_blank" rel="noopener noreferrer">${v.username}</a>`
+
+// avatar:
+`<a href="https://www.instagram.com/${v.username}/" target="_blank" rel="noopener noreferrer">
+   <img class="sl-avatar" src="${v.profilePic || fallback}" loading="lazy" alt="${v.username}">
+ </a>`
+
+
+4) Remove stray/undefined code (Claude’s catch):
+
+// DELETE if it still exists anywhere:
+if (data?.viewers) {
+  handleBundledData(data.viewers); // <-- undefined
+}
+
+
+5) Tag persistence (if you don’t already have it):
+(Per-story owner key, localStorage + chrome.storage backup.)
+
+async function loadTaggedUsers() {
+  const owner = (location.pathname.match(/\/stories\/([^/]+)/) || [])[1] || 'default';
+  const key = `sl_tags_${owner}`;
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw) { taggedUsers = new Set(JSON.parse(raw)); return; }
+  } catch {}
+  try {
+    const data = await new Promise(r => chrome?.storage?.local?.get?.(key, r) || r({}));
+    taggedUsers = new Set(data[key] || []);
+  } catch { taggedUsers = new Set(); }
+}
+
+async function saveTaggedUsers() {
+  const owner = (location.pathname.match(/\/stories\/([^/]+)/) || [])[1] || 'default';
+  const key = `sl_tags_${owner}`;
+  const arr = Array.from(taggedUsers);
+  try { localStorage.setItem(key, JSON.stringify(arr)); } catch {}
+  try { await new Promise(r => chrome?.storage?.local?.set?.({[key]: arr}, r) || r()); } catch {}
+}
+
+D) content.css (full tag button hit‑box)
+.storylister-tag { user-select: none; position: relative; }
+.storylister-tag * { pointer-events: none; }
+
+Why this answers your specific questions
+
+Own‑story test: We don’t overcomplicate. If “Seen by …” exists, it’s your story; otherwise we hide. That also prevents the panel on share‑link pages for other people’s stories.
+
+Media ID vs. URL: We still map each incoming mediaId to the current pathname when chunks arrive. If the same pathname suddenly feeds a different mediaId (you navigated to a different story while the URL is still /stories/<you>/), we reset the map and start fresh—no stale merges, no double‑count, and correct caching.
+
+Reacts on web: IG web only exposes likes—usually an element with aria-label="Like". We now read that from the DOM as a fallback so the ❤️ Reacts filter works even when the network payload doesn’t include a reaction field.
+
+Play/pause: With our pause code gone, clicking Play after closing the dialog stays playing.
+
+Counts after back/forward: Chunk → key routing is stable; and when mediaId changes under the same pathname we clear the map first—this fixes the short counts you saw when navigating back.
+
+Sanity checks (how to validate fast)
+
+Open your first story (URL may be /stories/you/ without id):
+
+The panel should show automatically; the video will pause only because IG opens the dialog—not because we paused it.
+
+Close the dialog and click Play: it should keep playing.
+
+Re‑open the dialog and scroll: counts rise and stop near Seen by N.
+
+Reacts: users with a ♥ in the IG dialog should show under “❤️ Reacts”.
+
+Navigate forward then back: the count should match, and no stale viewers from the other story should remain.
+
+Visit someone else’s story (or a share link of theirs): the panel should not appear.
+
+If anything in your current code prevents these behaviors, apply the snippets above exactly as written. They’re purposely minimal and avoid the v16 regressions (no inline injection, no background pausing, no global event capture).
+
+If you want me to tailor the heart‑detection selector to a specific DOM pattern from your dump, I can—your uploaded HTML confirms the presence of many aria-label="Like" nodes, which is exactly what the fallback uses.
