@@ -1,0 +1,185 @@
+Short answer: **yes — I agree with Claude’s three fixes**. They’re the minimal, correct changes to get your first‑story capture, play/pause behavior, and first‑install reliability back to baseline **without** re‑introducing the v16 problems.
+
+Below are the **exact, surgical edits** to apply on top of your current v15.5 package. I’m also including two ultra‑low‑risk correctness fixes (follows/followers mapping + reaction field set) because they’re one‑liners and address issues you keep seeing.
+
+---
+
+## 1) `manifest.json` — split the content scripts + change run order (CRITICAL)
+
+**Why:** the backend (which injects the network hook) must load **before** Instagram fires the very first `/story_viewers` request on the **first story**. UI can continue to load at `document_idle`.
+
+Replace your manifest with this:
+
+```json
+{
+  "manifest_version": 3,
+  "name": "Storylister",
+  "version": "15.6",
+  "description": "Story viewer insights.",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://www.instagram.com/*",
+    "https://*.instagram.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["https://www.instagram.com/*"],
+      "js": ["content-backend.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://www.instagram.com/*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["injected.js"],
+      "matches": ["https://www.instagram.com/*"]
+    }
+  ],
+  "action": { "default_popup": "popup.html" }
+}
+```
+
+> Do **not** inline‑inject scripts. Keep `injected.js` as a web‑accessible file and let `content-backend.js` append it — that avoids CSP “unsafe‑inline” issues.
+
+---
+
+## 2) `content.js` — remove **all** video pause/resume code
+
+**Why:** IG already pauses when the “Seen by” dialog opens. Any extra pausing is what’s making videos auto‑pause after you hit Play.
+
+**Search & delete** (content‑based; line numbers may differ):
+
+* Function definitions:
+
+  * `function pauseVideos(...) { ... }`
+  * `function resumeVideos(...) { ... }`
+
+* Any **calls** to those functions, typically in handlers like:
+
+  * `window.addEventListener('storylister:panel_opened', ...)`
+  * `window.addEventListener('storylister:panel_closed', ...)`
+  * `window.addEventListener('storylister:hide_panel', ...)`
+
+> If those listeners **only** exist to pause/resume, remove the listeners entirely.
+> Leave the rest of the panel/UI logic untouched. This will also address “UI got messed up” caused by unintended side‑effects around those handlers.
+
+---
+
+## 3) `content-backend.js` — first‑install/first‑story reliability
+
+Keep your current throttled MutationObserver and own‑story detection based on **“Seen by”** (that’s correct and simple). Add just this **post‑load nudge** so first‑install doesn’t miss:
+
+```js
+// After your observer setup and initial onDOMChange() call:
+setTimeout(() => {
+  if (!window.__slRanOnce) {
+    window.__slRanOnce = true;
+    try { onDOMChange(); } catch {}
+  }
+}, 1000);
+```
+
+> This does **not** replace your observer; it simply gives one extra pass after the DOM stabilizes on a fresh install.
+
+---
+
+## 4) `injected.js` — two tiny correctness fixes
+
+These are optional but strongly recommended and safe:
+
+### A) Fix “followers / following” mapping (you’ve seen wrong filter results)
+
+Instagram’s fields mean:
+
+* `friendship_status.following`  ⇒ **you follow them**
+* `friendship_status.followed_by` ⇒ **they follow you**
+
+Make sure your normalization sets flags accordingly:
+
+```js
+const fs = v?.friendship_status || u?.friendship_status || {};
+const youFollow = !!(fs.following ?? u?.is_following ?? v?.is_following);
+const isFollower = !!(fs.followed_by ?? u?.is_follower ?? v?.is_follower);
+
+return {
+  // ...
+  youFollow,     // you follow them
+  isFollower,    // they follow you
+  // ...
+};
+```
+
+And in the UI filter code (already in v15), ensure:
+
+* **Following** uses `youFollow === true`
+* **Followers** uses `isFollower === true`
+* **Non‑followers** uses `youFollow === false && isFollower === false`
+
+### B) Reactions: include the new field Instagram is using on web
+
+Add the new candidate before your existing fallbacks:
+
+```js
+const reaction =
+  v?.latest_reaction?.reaction_emoji ||   // NEW: current web shape
+  v?.reaction?.emoji ||
+  v?.story_reaction?.emoji ||
+  (v?.has_liked ? '❤️' : null);
+```
+
+> This doesn’t add any network calls; it only reads fields that already arrive in the story viewer payloads.
+
+---
+
+## Why these three Claude fixes matter (and are enough)
+
+* **document_start for backend** ensures your fetch/XHR hooks catch the **very first** viewers payload on the first story. That’s the root cause of “first story under‑count / no data on first visit”.
+* **remove pause/resume** eliminates the auto‑pause loop when you press play.
+* **first‑install nudge** eliminates intermittent “didn’t trigger on the very first run” because the DOM wasn’t quite ready when the observer first fired.
+
+Everything else you’re seeing (bad “non followers”, no “reacts”) is explained by the two mapping tweaks above and will resolve with those one‑liners.
+
+---
+
+## Quick validation checklist (do this once after patch)
+
+1. **Install/Reload** the extension
+
+   * Go to `chrome://extensions`, reload the unpacked extension.
+
+2. **Open your story from Home** (first story view, URL without numeric ID)
+
+   * Panel appears automatically; IG viewer opens; **video will pause because IG does it**, not us.
+   * Close the IG viewer. **Press Play** — the video **stays playing**.
+
+3. **Counts**
+
+   * On the first story, the “Viewers” count matches the IG “Seen by N”.
+   * Navigate to the second story and back; counts remain correct.
+
+4. **Filters**
+
+   * **Followers** shows only people with `isFollower === true`.
+   * **Following** shows only `youFollow === true`.
+   * **Non‑followers** shows `youFollow === false && isFollower === false`.
+   * **❤️ Reacts** shows viewers with any reaction value (including likes via `has_liked`).
+
+If anything still looks off after those specific changes, the next thing I’d check is whether `injected.js` is definitely being appended at **document_start** (you can confirm by adding a one‑line `console.debug('[SL] injected at', performance.now())` in `injected.js` temporarily).
+
+---
+
+## Guardrails / things **not** to re‑introduce
+
+* ❌ No inline script injection (will trip CSP).
+* ❌ No global play/pause management.
+* ❌ No “current account” heuristics beyond the **“Seen by”** check for own story.
+* ❌ No extra API calls — all data (followers/following/reacts) is read from the payloads we already see.
+
+---
+
+If you want, paste me the three updated files (`manifest.json`, `content.js`, `content-backend.js`, and the small `injected.js` normalization block) after you apply these, and I’ll sanity‑check that nothing else moved.

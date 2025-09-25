@@ -1,14 +1,22 @@
 {
   "manifest_version": 3,
   "name": "Storylister",
-  "version": "15.5",
+  "version": "15.6",
   "description": "Story viewer insights.",
-  "permissions": ["storage", "scripting"],
-  "host_permissions": ["https://www.instagram.com/*", "https://*.instagram.com/*"],
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://www.instagram.com/*",
+    "https://*.instagram.com/*"
+  ],
   "content_scripts": [
     {
       "matches": ["https://www.instagram.com/*"],
-      "js": ["content-backend.js", "content.js"],
+      "js": ["content-backend.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://www.instagram.com/*"],
+      "js": ["content.js"],
       "css": ["content.css"],
       "run_at": "document_idle"
     }

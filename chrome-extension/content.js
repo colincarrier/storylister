@@ -170,7 +170,6 @@
   };
   let taggedUsers = new Set();
   let isProMode = false;
-  let pausedVideos = new Set();
   let currentUsername = null;
   let freeAccountUsername = null;
   
@@ -362,49 +361,6 @@
   }
   
   // Auto-pause videos
-  async function pauseVideos() {
-    const settings = await loadSettingsSync();
-    if (settings.pauseVideos === false) return;
-    
-    document.querySelectorAll('video').forEach(video => {
-      if (!video.paused) {
-        try {
-          video.pause();
-          pausedVideos.add(video);
-          video.dataset.storylisterPaused = 'true';
-        } catch (e) {
-          // ignore
-        }
-      }
-    });
-    
-    // Also pause story progress animations
-    const progressBars = document.querySelectorAll('[role="progressbar"]');
-    progressBars.forEach(bar => {
-      bar.style.animationPlayState = 'paused';
-    });
-  }
-  
-  // Resume videos
-  function resumeVideos() {
-    pausedVideos.forEach(video => {
-      if (video.dataset.storylisterPaused === 'true') {
-        try {
-          video.play();
-        } catch (e) {
-          // ignore
-        }
-        delete video.dataset.storylisterPaused;
-      }
-    });
-    pausedVideos.clear();
-    
-    // Resume progress animations
-    const progressBars = document.querySelectorAll('[role="progressbar"]');
-    progressBars.forEach(bar => {
-      bar.style.animationPlayState = 'running';
-    });
-  }
   
   // Get filtered viewers
   function getFilteredViewers() {
@@ -1233,16 +1189,6 @@
     rightRail.classList.add('active');
     isActive = true;
     
-    // Pause videos
-    pauseVideos();
-    
-    // Set up observer for new videos
-    const videoObserver = new MutationObserver(() => {
-      if (isActive) {
-        pauseVideos();
-      }
-    });
-    videoObserver.observe(document.body, { childList: true, subtree: true });
     
     // Notify backend that panel opened
     window.dispatchEvent(new CustomEvent('storylister:panel_opened'));
@@ -1262,8 +1208,6 @@
     // Notify backend that panel closed
     window.dispatchEvent(new CustomEvent('storylister:panel_closed'));
     
-    // Resume videos
-    resumeVideos();
   }
   
   // Show upgrade prompt
@@ -1303,11 +1247,6 @@
       chrome.storage.sync.set({ [SETTINGS_KEY]: settings });
     });
     
-    document.getElementById('sl-pause-videos')?.addEventListener('change', async (e) => {
-      const settings = await loadSettingsSync();
-      settings.pauseVideos = e.target.checked;
-      chrome.storage.sync.set({ [SETTINGS_KEY]: settings });
-    });
     
     // Pro toggle
     document.getElementById('sl-pro-toggle')?.addEventListener('click', (e) => {
