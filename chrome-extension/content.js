@@ -537,6 +537,9 @@
     const data = store[currentKey];
     if (!data?.viewers) return;
 
+    // Get the lastSeenAt timestamp for this story
+    const lastSeenAt = data?.lastSeenAt || 0;
+
     viewers.clear();
     // Each entry is [viewerKey, viewerObj] from backend's dedup
     data.viewers.forEach(([_, v], i) => {
@@ -557,7 +560,10 @@
 
         viewedAt: v.viewedAt || v.timestamp || Date.now(),
         originalIndex: Number.isFinite(v.originalIndex) ? v.originalIndex : i,
-        isTagged: taggedUsers.has(v.username || v.id)
+        isTagged: taggedUsers.has(v.username || v.id),
+        
+        // Mark as new if viewer appeared after last time we closed panel
+        isNew: (v.firstSeenAt || v.viewedAt || 0) > lastSeenAt
       });
     });
     
@@ -1202,6 +1208,14 @@
   function hideRightRail() {
     if (rightRail) {
       rightRail.classList.remove('active');
+      
+      // Mark this story as "seen" at current time
+      const key = slStoreKey();
+      const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+      if (store[key]) {
+        store[key].lastSeenAt = Date.now();
+        localStorage.setItem('panel_story_store', JSON.stringify(store));
+      }
     }
     isActive = false;
     
