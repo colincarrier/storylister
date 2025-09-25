@@ -347,4 +347,12 @@
   Settings.load();
   new MutationObserver(throttled).observe(document.documentElement || document.body, { childList: true, subtree: true });
   onDOMChange();
+
+  // Post-load nudge for first-install/first-story reliability
+  setTimeout(() => {
+    if (!window.__slRanOnce) {
+      window.__slRanOnce = true;
+      try { onDOMChange(); } catch {}
+    }
+  }, 1000);
 })();
