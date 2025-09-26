@@ -298,27 +298,29 @@
     if (state.mirrorTimer) return;
     state.mirrorTimer = setTimeout(() => {
       state.mirrorTimer = null;
+
       const map = state.viewerStore.get(key);
       if (!map || map.size === 0) return;
 
       const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
       const existing = store[key] || {};
-      const existingViewers = new Map(existing.viewers || []);
-      
-      // Preserve firstSeenAt
-      const merged = Array.from(map.entries()).map(([vk, v]) => {
-        const old = existingViewers.get(vk);
-        return [vk, {
-          ...v,
-          firstSeenAt: old?.firstSeenAt || v.firstSeenAt || Date.now()
-        }];
-      });
+      const existingMap = new Map(existing.viewers || []);
+
+      // preserve firstSeenAt; and keep the larger set (monotone)
+      const merged = new Map(existingMap);
+      for (const [vk, v] of map.entries()) {
+        const old = existingMap.get(vk);
+        merged.set(vk, { ...v, firstSeenAt: old?.firstSeenAt || v.firstSeenAt || Date.now() });
+      }
+
+      // monotone: only replace if not shrinking
+      const finalEntries = merged.size >= (existingMap.size || 0) ? merged : existingMap;
 
       store[key] = {
-        mediaId: getMediaIdFromDOM(),
-        viewers: merged,
+        mediaId: getMediaIdFromDOM() || existing.mediaId || null,
+        viewers: Array.from(finalEntries.entries()),
         fetchedAt: Date.now(),
-        lastSeenAt: existing.lastSeenAt || 0
+        ackAt: existing.ackAt || 0 // used for "NEW" badges
       };
 
       localStorage.setItem('panel_story_store', JSON.stringify(store));
@@ -396,31 +398,33 @@
     
     return () => {
       if (!location.pathname.startsWith('/stories/') || !isOwnStory()) {
-        window.dispatchEvent(new CustomEvent('storylister:hide_panel'));
         stopCountSentry();
+        window.dispatchEvent(new CustomEvent('storylister:hide_panel'));
         return;
       }
 
       window.dispatchEvent(new CustomEvent('storylister:show_panel'));
       ensureInjected();
 
-      const key = getStorageKey();
-      const mediaId = getMediaIdFromDOM();
-      
+      const key = location.pathname;           // canonical key
+      const mediaId = getMediaIdFromDOM();     // tighter story identity
+
       if (key !== lastKey || (mediaId && mediaId !== lastMediaId)) {
+        // story changed
         if (state.stopPagination) state.stopPagination();
-        
-        // Clear cache if mediaId changed under same pathname
+
+        // same key but new media ⇒ purge stale cache
         if (key === lastKey && mediaId && lastMediaId && mediaId !== lastMediaId) {
           state.viewerStore.set(key, new Map());
           const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
           delete store[key];
           localStorage.setItem('panel_story_store', JSON.stringify(store));
         }
-        
+
         lastKey = state.currentKey = key;
         lastMediaId = mediaId;
-        
+
+        // re-open on change
         state.openedForKey.delete(key);
         autoOpenViewersOnceFor(key);
       }
