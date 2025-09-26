@@ -268,6 +268,7 @@
       if (scroller) {
         if (state.stopPagination) state.stopPagination();
         state.stopPagination = startPagination(scroller);
+        startCountSentry(); // ADD THIS LINE
       }
       // Add DOM reaction fallback after dialog opens
       setTimeout(() => mergeReactsFromDialogIntoMap(state.viewerStore.get(key)), 1000);
@@ -284,18 +285,19 @@
 
       const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
       const existing = store[key] || {};
-      const existingMap = new Map(existing.viewers || []);
+      const existingViewers = new Map(existing.viewers || []);
       
+      // Preserve firstSeenAt
       const merged = Array.from(map.entries()).map(([vk, v]) => {
-        const old = existingMap.get(vk);
+        const old = existingViewers.get(vk);
         return [vk, {
           ...v,
           firstSeenAt: old?.firstSeenAt || v.firstSeenAt || Date.now()
         }];
       });
-      
+
       store[key] = {
-        mediaId: getMediaIdFromDOM() || existing.mediaId || null,
+        mediaId: getMediaIdFromDOM(),
         viewers: merged,
         fetchedAt: Date.now(),
         lastSeenAt: existing.lastSeenAt || 0
@@ -375,27 +377,23 @@
     let lastMediaId = null;
     
     return () => {
-      // Only show panel on YOUR stories (with "Seen by" control)
       if (!location.pathname.startsWith('/stories/') || !isOwnStory()) {
         window.dispatchEvent(new CustomEvent('storylister:hide_panel'));
+        stopCountSentry();
         return;
       }
 
       window.dispatchEvent(new CustomEvent('storylister:show_panel'));
       ensureInjected();
 
-      const key = location.pathname;            // stable key (works with/without id)
-      const mediaId = getMediaIdFromDOM();      // real story id when available
+      const key = getStorageKey();
+      const mediaId = getMediaIdFromDOM();
       
-      // Story changed if:
-      //  - path changed OR
-      //  - same path but mediaId changed (navigated within the carousel)
-      const changed = key !== lastKey || (mediaId && mediaId !== lastMediaId);
-      if (changed) {
+      if (key !== lastKey || (mediaId && mediaId !== lastMediaId)) {
         if (state.stopPagination) state.stopPagination();
         
-        if (key === lastKey && mediaId !== lastMediaId) {
-          // Same path but different media → clear viewer map & stale cache
+        // Clear cache if mediaId changed under same pathname
+        if (key === lastKey && mediaId && lastMediaId && mediaId !== lastMediaId) {
           state.viewerStore.set(key, new Map());
           const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
           delete store[key];
@@ -405,8 +403,7 @@
         lastKey = state.currentKey = key;
         lastMediaId = mediaId;
         
-        // allow auto-open again for this key
-        if (state.openedForKey instanceof Set) state.openedForKey.delete(key);
+        state.openedForKey.delete(key);
         autoOpenViewersOnceFor(key);
       }
     };
