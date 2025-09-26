@@ -68,32 +68,26 @@
     stopCountSentry();
     state.sentry.active = true;
     state.sentry.timer = setInterval(() => {
+      if (!state.sentry.active) return;
       const target = getSeenByCount();
       const map = state.viewerStore.get(getStorageKey());
       const loaded = map ? map.size : 0;
 
-      if (!target || loaded >= target) {
-        stopCountSentry();
-        // Mark as fully loaded
-        const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
-        const key = getStorageKey();
-        if (store[key]) {
-          store[key].lastSeenAt = Date.now();
-          localStorage.setItem('panel_story_store', JSON.stringify(store));
-        }
-        return;
+      // stop when we reached target (allow ±1)
+      if (target && loaded >= target - 1) { 
+        stopCountSentry(); 
+        return; 
       }
 
-      // Keep trying to load more
       const dlg = document.querySelector('[role="dialog"][aria-modal="true"]');
       if (!dlg) {
-        const btn = document.querySelector('a[href*="/seen_by/"]');
-        if (btn) btn.click();
-      } else {
-        const scroller = findScrollableInDialog();
-        if (scroller) scroller.scrollTop = scroller.scrollHeight;
+        const btn = findSeenByButton();
+        if (btn) try { btn.click(); } catch {}
+        return;
       }
-    }, 1500);
+      const scroller = findScrollableInDialog();
+      if (scroller) scroller.scrollTop = scroller.scrollHeight;
+    }, 1200);
   }
 
   // Own story detection - simple and bulletproof
@@ -176,8 +170,25 @@
     return m ? parseInt(m[1].replace(/,/g, ''), 10) : null;
   }
 
+  // Wait for injection to be ready before clicking
+  function waitForInjectedReady(timeout = 1500) {
+    return new Promise(resolve => {
+      let done = false;
+      const to = setTimeout(() => { if (!done) { done = true; resolve(false); } }, timeout);
+      function onReady() {
+        if (!done) {
+          done = true;
+          clearTimeout(to);
+          document.removeEventListener('storylister:injected_ready', onReady, true);
+          resolve(true);
+        }
+      }
+      document.addEventListener('storylister:injected_ready', onReady, true);
+    });
+  }
+
   // Injection (no inline, guard runtime)
-  function ensureInjected() {
+  async function ensureInjected() {
     if (state.injected) return;
     if (!chrome?.runtime?.id) return; // extension reloaded; skip until tab reload
     try {
@@ -199,28 +210,30 @@
   }, true);
 
   // A4 - DOM fallback for reacts (hearts) when API omits it
-  function mergeReactsFromDialogIntoMap(map) {
+  function mergeReactsFromDialogIntoMap(key) {
     const dlg = document.querySelector('[role="dialog"][aria-modal="true"]');
     if (!dlg) return;
+    const map = state.viewerStore.get(key);
+    if (!map) return;
 
-    // Each row typically contains a profile link; detect a heart in the row.
-    const rows = Array.from(dlg.querySelectorAll('div[role="button"], li, div[role="listitem"]'));
+    const rows = dlg.querySelectorAll('[role="button"], [role="link"]');
     rows.forEach(row => {
-      const a = row.querySelector('a[href^="/"][href*="/"]');
-      const username = a?.getAttribute('href')?.split('/')?.filter(Boolean)?.[0];
+      // look for a heart svg in the row
+      const hasHeart = !!row.querySelector('svg[aria-label*="Like"], svg[aria-label*="Unlike"], use[href*="heart"], path[d*="M34.6 3.1"]');
+      if (!hasHeart) return;
+
+      // find the username in that row (left column usually)
+      const uEl = row.querySelector('a[href^="/"][href*="/"] span, a[href^="/"] div, span a[href^="/"]');
+      const username = (uEl?.textContent || '').trim();
       if (!username) return;
 
-      // Heart detection – keep broad; IG's SVGs vary by rollout.
-      const hasHeart = !!row.querySelector(
-        'svg[aria-label*="Like"], svg[aria-label*="Unlike"], use[href*="heart"], path[d*="M34.6 3.1"]'
-      );
-
-      if (hasHeart) {
-        const key = username.toLowerCase();
-        const item = map.get(key);
-        if (item && !item.reaction) item.reaction = '❤️';
+      const k = username.toLowerCase();
+      const prev = map.get(k);
+      if (prev && !prev.reaction) {
+        map.set(k, { ...prev, reaction: '❤️' });
       }
     });
+    mirrorToLocalStorageDebounced(key);
   }
 
   // Pagination (simple, bounded, stop when we've met target)
@@ -258,21 +271,26 @@
     if (!Settings.cache.autoOpen) return;
     if (state.openedForKey.has(key)) return;
 
+    await ensureInjected();
+    await waitForInjectedReady();  // Critical: wait for hooks before clicking
+
     const btn = await waitForSeenByButton(5000);
     if (!btn) return;
 
     state.openedForKey.add(key);
     try { btn.click(); } catch {}
+    
     setTimeout(() => {
       const scroller = findScrollableInDialog();
       if (scroller) {
         if (state.stopPagination) state.stopPagination();
-        state.stopPagination = startPagination(scroller);
-        startCountSentry(); // ADD THIS LINE
+        state.stopPagination = startPagination(scroller, 15000); // longer on first story
+        startCountSentry(); // keep nudging until target reached
       }
       // Add DOM reaction fallback after dialog opens
-      setTimeout(() => mergeReactsFromDialogIntoMap(state.viewerStore.get(key)), 1000);
-    }, 350);
+      setTimeout(() => mergeReactsFromDialogIntoMap(state.viewerStore.get(key)), 600);
+      setTimeout(() => mergeReactsFromDialogIntoMap(state.viewerStore.get(key)), 2000);
+    }, 300);
   }
 
   // Mirror (debounced), per pathname + mediaId aliases

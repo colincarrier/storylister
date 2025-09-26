@@ -114,4 +114,6 @@
       return _send.apply(this, args);
     };
   }
+  // Dispatch ready signal so backend knows injection is complete
+  try { document.dispatchEvent(new CustomEvent('storylister:injected_ready')); } catch {}
 })();

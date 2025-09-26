@@ -1,0 +1,507 @@
+Thanks—that gist and your notes were exactly what I needed. Here’s a straight‑to‑the‑point diagnosis of why v15.9 still stumbles on the *first* story and why reacts/filters/caching keep drifting, followed by **surgical code patches** you can drop in to produce a reliable v16.0 without introducing new breakages.
+
+---
+
+## What’s still going wrong (root causes)
+
+1. **We still miss the very first “viewers” response on the first story.**
+   Even with `document_start`, there’s a race: we click **Seen by** before our fetch/XHR hooks are *definitely* installed. When that happens, we only see later chunks (25, 50, etc.), never the first one—hence undercounts and “fixes itself after refresh”.
+
+2. **Counts sometimes go down.**
+   Our mirror-to-cache occasionally overwrites a larger map with a smaller one (e.g., after a key flip or when a late, partial chunk arrives). That produces numbers that drop from 50 → 38, etc.
+
+3. **Navigation back/forward uses stale viewer maps.**
+   Same URL path can point to a *new mediaId*. We aren’t fully clearing the LS entry + in‑memory map when the mediaId under the same `pathname` changes.
+
+4. **Reacts aren’t wired end‑to‑end.**
+   We parse some shapes, but not the most common web ones (`latest_reaction.reaction_emoji`, `has_liked`). We also don’t have a rock‑solid DOM fallback when the API payload omits it.
+
+5. **Following / Followers flags are inverted in spots.**
+   IG semantics:
+
+   * `friendship_status.following`  ⇒ **YOU follow THEM**
+   * `friendship_status.followed_by`⇒ **THEY follow YOU**
+     Anywhere this is swapped will break “Followers / Following / Non‑followers”.
+
+6. **“NEW” badges aren’t persistent.**
+   We don’t preserve a per‑viewer `firstSeenAt` and compare to an `ackAt` (the last time the user “saw” the list). Going back/forth or refreshing loses the “seen” moment.
+
+7. **Rectangular avatars**
+   CSS drift removed rounded/size rules.
+
+8. **“Old tags” persist after reinstall**
+   That’s expected: tags (and `panel_story_store`) are stored in **page localStorage on instagram.com**, which survives extension uninstall/reinstall. (Chrome clears `chrome.storage` with uninstall, but not site `localStorage`.) That **isn’t a bug**, but I’m giving you a one‑liner to clear it when you want a clean slate.
+
+---
+
+## The minimal, safe patches (keep your UI as is)
+
+### 0) (Confirm) `manifest.json`
+
+Keep the split and ensure backend is early:
+
+```json
+{
+  "manifest_version": 3,
+  "name": "Storylister",
+  "version": "16.0",
+  "description": "Story viewer insights.",
+  "permissions": ["storage"],
+  "host_permissions": ["https://www.instagram.com/*", "https://*.instagram.com/*"],
+  "content_scripts": [
+    {
+      "matches": ["https://www.instagram.com/*"],
+      "js": ["content-backend.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://www.instagram.com/*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    { "resources": ["injected.js"], "matches": ["https://www.instagram.com/*"] }
+  ],
+  "action": { "default_popup": "popup.html" }
+}
+```
+
+> **Do not** add inline injection (CSP will block it). Keep `getURL('injected.js')`.
+
+---
+
+### 1) **injected.js** – add a READY signal + robust reacts + correct follow flags
+
+**Add a ready handshake at the very end** (so backend can *wait* before clicking):
+
+```js
+try { document.dispatchEvent(new CustomEvent('storylister:injected_ready')); } catch {}
+```
+
+**Normalize viewers** (fix reacts and follow semantics). In your normalizer, make sure you compute these:
+
+```js
+// inside your normalize(...) for each viewer payload:
+const u = v?.user || v?.node?.user || v?.node || v;
+
+// ---- reactions (web most common) ----
+const reaction =
+  v?.latest_reaction?.reaction_emoji ||     // modern web shape
+  v?.reaction?.emoji ||
+  v?.story_reaction?.emoji ||
+  (v?.has_liked ? '❤️' : null);
+
+// ---- follow flags (IG semantics) ----
+const fs = v?.friendship_status || u?.friendship_status || {};
+const youFollow  = !!(fs.following ?? u?.is_following ?? v?.is_following);   // YOU -> THEM
+const isFollower = !!(fs.followed_by ?? u?.is_follower ?? v?.is_follower);   // THEM -> YOU
+
+return {
+  id: String(u?.id || u?.pk || u?.pk_id || u?.username || idx),
+  username: u?.username || '',
+  full_name: u?.full_name || u?.fullname || u?.name || '',
+  profile_pic_url: /^https?:\/\//i.test(u?.profile_pic_url || u?.profile_pic_url_hd || u?.profile_picture_url || '') 
+                    ? (u?.profile_pic_url || u?.profile_pic_url_hd || u?.profile_picture_url) : '',
+  is_verified: !!(u?.is_verified || u?.verified || u?.blue_verified),
+  // canonical flags (kept for UI mapping):
+  youFollow,               // you follow them
+  isFollower,              // they follow you
+  followed_by_viewer: youFollow,   // compat
+  follows_viewer: isFollower,      // compat
+  reaction: reaction || null,
+  originalIndex: idx,
+  viewedAt:  v?.timestamp || v?.viewed_at || Date.now()
+};
+```
+
+> Keep your fetch/XHR wrappers as-is; just ensure **the ready event** is dispatched and **these fields** are present.
+
+---
+
+### 2) **content-backend.js** – guarantee hook is ready before clicking, fix first story, stop counts from dropping, and handle mediaId changes
+
+**A. Wait for injection before clicking** (solves “1st story misses first chunk”):
+
+```js
+function waitForInjectedReady(timeout = 1500) {
+  return new Promise(resolve => {
+    let done = false;
+    const to = setTimeout(() => { if (!done) { done = true; resolve(false); } }, timeout);
+    function onReady() {
+      if (!done) {
+        done = true;
+        clearTimeout(to);
+        document.removeEventListener('storylister:injected_ready', onReady, true);
+        resolve(true);
+      }
+    }
+    document.addEventListener('storylister:injected_ready', onReady, true);
+  });
+}
+```
+
+**B. Ensure we inject, *then* click**:
+
+```js
+async function ensureInjected() {
+  if (state.injected) return;
+  if (!chrome?.runtime?.id) return; // extension reloaded mid-session
+  try {
+    const s = document.createElement('script');
+    s.src = chrome.runtime.getURL('injected.js');
+    s.dataset.storylisterInjected = '1';
+    s.onload = () => s.remove();
+    (document.head || document.documentElement).appendChild(s);
+    // mark injected now; READY will follow via event
+    state.injected = true;
+  } catch {}
+}
+
+async function autoOpenViewersOnceFor(key) {
+  if (!Settings.cache.autoOpen) return;
+  if (state.openedForKey.has(key)) return;
+
+  await ensureInjected();
+  await waitForInjectedReady();                     // <<< critical line
+
+  const btn = await waitForSeenByButton(5000);
+  if (!btn) return;
+
+  state.openedForKey.add(key);
+  try { btn.click(); } catch {}
+
+  setTimeout(() => {
+    const scroller = findScrollableInDialog();
+    if (scroller) {
+      if (state.stopPagination) state.stopPagination();
+      state.stopPagination = startPagination(scroller, 15000); // longer on first story
+      startCountSentry(); // keep nudging until target reached
+    }
+  }, 300);
+}
+```
+
+**C. Count sentry** (keep scrolling/reopen until we meet “Seen by X”):
+
+```js
+state.sentry = { timer: null, active: false };
+
+function stopCountSentry() {
+  state.sentry.active = false;
+  clearInterval(state.sentry.timer);
+}
+
+function startCountSentry() {
+  stopCountSentry();
+  state.sentry.active = true;
+  state.sentry.timer = setInterval(() => {
+    if (!state.sentry.active) return;
+    const target = getSeenByCount();
+    const map = state.viewerStore.get(getStorageKey());
+    const loaded = map ? map.size : 0;
+
+    // stop when we reached target (allow ±1)
+    if (target && loaded >= target - 1) { stopCountSentry(); return; }
+
+    const dlg = document.querySelector('[role="dialog"][aria-modal="true"]');
+    if (!dlg) {
+      const btn = findSeenByButton();
+      if (btn) try { btn.click(); } catch {}
+      return;
+    }
+    const scroller = findScrollableInDialog();
+    if (scroller) scroller.scrollTop = scroller.scrollHeight;
+  }, 1200);
+}
+```
+
+**D. DOM fallback for reacts** (hearts on web):
+
+```js
+function mergeReactsFromDialogIntoMap(key) {
+  const dlg = document.querySelector('[role="dialog"][aria-modal="true"]');
+  if (!dlg) return;
+  const map = state.viewerStore.get(key);
+  if (!map) return;
+
+  const rows = dlg.querySelectorAll('[role="button"], [role="link"]');
+  rows.forEach(row => {
+    // look for a heart svg in the row
+    const hasHeart = !!row.querySelector('svg[aria-label*="Like"], svg[aria-label*="Unlike"], use[href*="heart"], path[d*="M34.6 3.1"]');
+    if (!hasHeart) return;
+
+    // find the username in that row (left column usually)
+    const uEl = row.querySelector('a[href^="/"][href*="/"] span, a[href^="/"] div, span a[href^="/"]');
+    const username = (uEl?.textContent || '').trim();
+    if (!username) return;
+
+    const k = username.toLowerCase();
+    const prev = map.get(k);
+    if (prev && !prev.reaction) {
+      map.set(k, { ...prev, reaction: '❤️' });
+    }
+  });
+  mirrorToLocalStorageDebounced(key);
+}
+```
+
+> Call `mergeReactsFromDialogIntoMap(key)` once after dialog opens (right after starting pagination), and once again ~2s later to catch late DOM paints:
+
+```js
+setTimeout(() => mergeReactsFromDialogIntoMap(key), 600);
+setTimeout(() => mergeReactsFromDialogIntoMap(key), 2000);
+```
+
+**E. Never let counts go down** (monotone cache update + preserve `firstSeenAt`):
+
+```js
+function mirrorToLocalStorageDebounced(key) {
+  if (state.mirrorTimer) return;
+  state.mirrorTimer = setTimeout(() => {
+    state.mirrorTimer = null;
+
+    const map = state.viewerStore.get(key);
+    if (!map || map.size === 0) return;
+
+    const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+    const existing = store[key] || {};
+    const existingMap = new Map(existing.viewers || []);
+
+    // preserve firstSeenAt; and keep the larger set (monotone)
+    const merged = new Map(existingMap);
+    for (const [vk, v] of map.entries()) {
+      const old = existingMap.get(vk);
+      merged.set(vk, { ...v, firstSeenAt: old?.firstSeenAt || v.firstSeenAt || Date.now() });
+    }
+
+    // monotone: only replace if not shrinking
+    const finalEntries = merged.size >= (existingMap.size || 0) ? merged : existingMap;
+
+    store[key] = {
+      mediaId: getMediaIdFromDOM() || existing.mediaId || null,
+      viewers: Array.from(finalEntries.entries()),
+      fetchedAt: Date.now(),
+      ackAt: existing.ackAt || 0 // used for "NEW" badges
+    };
+
+    localStorage.setItem('panel_story_store', JSON.stringify(store));
+    window.dispatchEvent(new CustomEvent('storylister:data_updated', { detail: { storyId: key } }));
+  }, 250);
+}
+```
+
+**F. Detect mediaId changes under same path and clear stale**:
+
+```js
+function getMediaIdFromPath() {
+  return location.pathname.match(/\/stories\/[^/]+\/(\d{15,})/)?.[1] || null;
+}
+function getMediaIdFromDOM() {
+  // 1) URL
+  const p = getMediaIdFromPath();
+  if (p) return p;
+  // 2) seen-by link
+  const seen = document.querySelector('a[href*="/seen_by/"]')?.href || '';
+  const s = seen.match(/\/stories\/[^/]+\/(\d{15,})/)?.[1];
+  if (s) return s;
+  // 3) <link rel="alternate">
+  for (const l of document.querySelectorAll('link[rel="alternate"]')) {
+    const m = l.href?.match(/\/stories\/[^/]+\/(\d{15,})/);
+    if (m) return m[1];
+  }
+  return null;
+}
+
+const onDOMChange = (() => {
+  let lastKey = null;
+  let lastMediaId = null;
+  return () => {
+    if (!location.pathname.startsWith('/stories/') || !isOwnStory()) {
+      stopCountSentry();
+      window.dispatchEvent(new CustomEvent('storylister:hide_panel'));
+      return;
+    }
+
+    window.dispatchEvent(new CustomEvent('storylister:show_panel'));
+    ensureInjected();
+
+    const key = location.pathname;           // canonical key
+    const mediaId = getMediaIdFromDOM();     // tighter story identity
+
+    if (key !== lastKey || (mediaId && mediaId !== lastMediaId)) {
+      // story changed
+      if (state.stopPagination) state.stopPagination();
+
+      // same key but new media ⇒ purge stale cache
+      if (key === lastKey && mediaId && lastMediaId && mediaId !== lastMediaId) {
+        state.viewerStore.set(key, new Map());
+        const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+        delete store[key];
+        localStorage.setItem('panel_story_store', JSON.stringify(store));
+      }
+
+      lastKey = state.currentKey = key;
+      lastMediaId = mediaId;
+
+      // re-open on change
+      state.openedForKey.delete(key);
+      autoOpenViewersOnceFor(key);
+    }
+  };
+})();
+```
+
+> Keep your existing throttled MutationObserver wrapper around `onDOMChange()` (200ms) for performance.
+
+**G. Message bridge: route by current key and merge (we keep your idToKey if present)**
+
+Make sure when viewer chunks arrive you always merge into `state.viewerStore.get(key)` under the **lower‑cased username** key, and then call `mirrorToLocalStorageDebounced(key)`.
+
+---
+
+### 3) **content.js** – correct mapping + reacts filter + “NEW” using `ackAt`
+
+**Map the flags correctly when you read from LS**:
+
+```js
+// inside your loadViewersFromStorage map step:
+isFollower: !!(v.isFollower ?? v.follows_viewer),     // THEY follow you
+youFollow:  !!(v.youFollow  ?? v.followed_by_viewer), // YOU follow them
+reaction:   v.reaction || null,
+reacted:    !!v.reaction
+```
+
+**Add/ensure the reacts filter:**
+
+```js
+case 'reacts':
+  filteredViewers = filteredViewers.filter(v => v.reacted || v.reaction);
+  break;
+```
+
+**“NEW” badge that clears after you’ve seen it once**
+Use `ackAt` stored per story:
+
+```js
+// when rendering, a viewer is "NEW" if firstSeenAt > ackAt
+const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+const entry = store[currentKey] || {};
+const ackAt  = entry.ackAt || 0;
+// v.isNew = (v.firstSeenAt || 0) > ackAt
+
+// when user closes the IG viewer dialog or you detect a story change,
+// acknowledge everything currently known:
+function acknowledgeCurrentStory() {
+  const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+  const entry = store[currentKey];
+  if (!entry) return;
+  entry.ackAt = Date.now();
+  localStorage.setItem('panel_story_store', JSON.stringify(store));
+  // trigger re-render
+  window.dispatchEvent(new CustomEvent('storylister:data_updated', { detail: { storyId: currentKey } }));
+}
+
+// call acknowledgeCurrentStory() on:
+//  - story change (before switching), AND/OR
+//  - when viewer dialog closes (listen for MutationObserver removal of dialog)
+```
+
+**Clickable usernames/avatars** (if you don’t already):
+
+```html
+<a class="sl-username" href="https://www.instagram.com/${v.username}/" target="_blank" rel="noopener noreferrer">${v.username}</a>
+<a href="https://www.instagram.com/${v.username}/" target="_blank" rel="noopener noreferrer">
+  <img class="sl-avatar" src="${v.profilePic || fallback}" loading="lazy" alt="${v.username}">
+</a>
+```
+
+---
+
+### 4) **content.css** – fix avatars to circles (no UI overhaul)
+
+```css
+/* Force circular avatars and consistent size */
+.storylister-viewer-avatar img,
+.sl-avatar {
+  width: 36px !important;
+  height: 36px !important;
+  border-radius: 50% !important;
+  object-fit: cover !important;
+  display: block !important;
+}
+```
+
+*(If your last good UI used a different size, swap 36px to whatever that was.)*
+
+---
+
+## Operational notes / answers to your questions
+
+* **Why do tags survive across reinstalls?**
+  Because we store them in **`localStorage` on instagram.com`**, which Chrome **does not** clear when you uninstall an extension. That’s expected. If you want a clean slate for a test session, run:
+
+  ```js
+  // in DevTools on an instagram.com tab:
+  localStorage.removeItem('panel_story_store');
+  Object.keys(localStorage).filter(k => k.startsWith('sl_tags_')).forEach(k => localStorage.removeItem(k));
+  ```
+
+  (Don’t do this in normal use; it wipes your tags.)
+
+* **Play/Pause**
+  All programmatic pause code is now removed. IG pauses when the Viewers dialog opens. When you close it, playback resumes naturally. (The only video code left is the small `dataset.userPlayed` marker so we never interfere.)
+
+* **First story still off sometimes?**
+  The two pieces that fix it are:
+
+  1. **wait for `storylister:injected_ready`** before clicking **Seen by**
+  2. **count sentry** to keep nudging until `loaded >= Seen by X`
+     Together those ensure we attach before the very first viewers response and keep scrolling/reopening until the count matches.
+
+* **Reacts still missing?**
+  The patches above read **`latest_reaction.reaction_emoji`** and also add a **DOM fallback** to identify heart likes in the viewer dialog if the payload omits reaction info.
+
+* **Followers / Following / Non‑followers**
+  The mapping is now canonical and consistent across injected + UI.
+
+---
+
+## Quick verification (DevTools, on your first story)
+
+1. **Ready handshake present**
+
+   ```js
+   // After you load the page, you should see this event fire
+   document.addEventListener('storylister:injected_ready', () => console.log('ready!'), {once:true});
+   ```
+
+2. **Sentry running until matched**
+   Open the console and watch the viewers dialog; the list should keep loading until its count >= “Seen by X”.
+
+3. **Counts never decrease**
+   While on the same story, the number should only stay the same or increase.
+
+4. **Reacts**
+   Manually like one of your stories from another account; when you refresh your own story, the “❤️ reacts” filter should include that user.
+
+5. **“NEW”**
+   New badges appear for entries with `firstSeenAt > ackAt`. Switch stories or close the dialog → they should clear (and only reappear for new arrivals).
+
+---
+
+### If you want a single “what changed” summary for Replit
+
+* **Don’t touch UI layout.** Only add the avatar CSS at the end.
+* **injected.js**: add `storylister:injected_ready` event; normalize **reactions** and **follow flags** correctly.
+* **content-backend.js**:
+
+  * `ensureInjected()` + **waitForInjectedReady()** before clicking the **Seen by** button.
+  * Add **startCountSentry/stopCountSentry** and run the sentry after auto‑open.
+  * On story change with **same pathname but new mediaId**, clear in‑memory and LS for that key.
+  * `mirrorToLocalStorageDebounced`: preserve `firstSeenAt`, **monotone** update (don’t shrink).
+  * Call `mergeReactsFromDialogIntoMap(key)` right after dialog opens (and once more ~2s later).
+* **content.js**: correct flag mapping, add `reacts` filter if missing, implement **ackAt** to clear “NEW”.
+
+These are all small deltas, but together they address **first‑story reliability**, **reacts**, **filters**, **caching/NEW**, and **avatar shape**—without introducing the CSP, pausing, or navigation lockups we saw in earlier attempts.
