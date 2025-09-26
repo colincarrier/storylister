@@ -1,0 +1,202 @@
+Both ChatGPT and I identified the same core issues. Here's the consolidated v15.9 fix set you should apply:
+
+## Critical Fixes for v15.9
+
+### 1. **State Addition** (content-backend.js line 16)
+Add to your state object:
+```javascript
+const state = {
+  // ... existing fields ...
+  sentry: { timer: null, active: false },
+  mediaForKey: new Map()  // tracks mediaId per pathname
+};
+```
+
+### 2. **Count Sentry Functions** (content-backend.js, add after state)
+```javascript
+function stopCountSentry() {
+  state.sentry.active = false;
+  clearInterval(state.sentry.timer);
+  state.sentry.timer = null;
+}
+
+function startCountSentry() {
+  stopCountSentry();
+  state.sentry.active = true;
+  state.sentry.timer = setInterval(() => {
+    const target = getSeenByCount();
+    const map = state.viewerStore.get(getStorageKey());
+    const loaded = map ? map.size : 0;
+
+    if (!target || loaded >= target) {
+      stopCountSentry();
+      // Mark as fully loaded
+      const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+      const key = getStorageKey();
+      if (store[key]) {
+        store[key].lastSeenAt = Date.now();
+        localStorage.setItem('panel_story_store', JSON.stringify(store));
+      }
+      return;
+    }
+
+    // Keep trying to load more
+    const dlg = document.querySelector('[role="dialog"][aria-modal="true"]');
+    if (!dlg) {
+      const btn = document.querySelector('a[href*="/seen_by/"]');
+      if (btn) btn.click();
+    } else {
+      const scroller = findScrollableInDialog();
+      if (scroller) scroller.scrollTop = scroller.scrollHeight;
+    }
+  }, 1500);
+}
+```
+
+### 3. **Fix startPagination** (content-backend.js line 161)
+Change timeout from 6000 to 15000:
+```javascript
+function startPagination(scroller, maxMs = 15000) {
+```
+
+### 4. **Fix autoOpenViewersOnceFor** (content-backend.js line 203)
+Add count sentry:
+```javascript
+setTimeout(() => {
+  const scroller = findScrollableInDialog();
+  if (scroller) {
+    if (state.stopPagination) state.stopPagination();
+    state.stopPagination = startPagination(scroller);
+    startCountSentry(); // ADD THIS LINE
+  }
+}, 350);
+```
+
+### 5. **Replace mirrorToLocalStorageDebounced** (content-backend.js line 216)
+```javascript
+function mirrorToLocalStorageDebounced(key) {
+  if (state.mirrorTimer) return;
+  state.mirrorTimer = setTimeout(() => {
+    state.mirrorTimer = null;
+    const map = state.viewerStore.get(key);
+    if (!map || map.size === 0) return;
+
+    const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+    const existing = store[key] || {};
+    const existingViewers = new Map(existing.viewers || []);
+    
+    // Preserve firstSeenAt
+    const merged = Array.from(map.entries()).map(([vk, v]) => {
+      const old = existingViewers.get(vk);
+      return [vk, {
+        ...v,
+        firstSeenAt: old?.firstSeenAt || v.firstSeenAt || Date.now()
+      }];
+    });
+
+    store[key] = {
+      mediaId: getMediaIdFromDOM(),
+      viewers: merged,
+      fetchedAt: Date.now(),
+      lastSeenAt: existing.lastSeenAt || 0
+    };
+
+    localStorage.setItem('panel_story_store', JSON.stringify(store));
+    window.dispatchEvent(new CustomEvent('storylister:data_updated', { detail: { storyId: key } }));
+  }, 250);
+}
+```
+
+### 6. **Replace onDOMChange** (content-backend.js line 338)
+```javascript
+const onDOMChange = (() => {
+  let lastKey = null;
+  let lastMediaId = null;
+  
+  return () => {
+    if (!location.pathname.startsWith('/stories/') || !isOwnStory()) {
+      window.dispatchEvent(new CustomEvent('storylister:hide_panel'));
+      stopCountSentry();
+      return;
+    }
+
+    window.dispatchEvent(new CustomEvent('storylister:show_panel'));
+    ensureInjected();
+
+    const key = canonicalKey();
+    const mediaId = getMediaIdFromDOM();
+    
+    if (key !== lastKey || (mediaId && mediaId !== lastMediaId)) {
+      if (state.stopPagination) state.stopPagination();
+      
+      // Clear cache if mediaId changed under same pathname
+      if (key === lastKey && mediaId && lastMediaId && mediaId !== lastMediaId) {
+        state.viewerStore.set(key, new Map());
+        const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+        delete store[key];
+        localStorage.setItem('panel_story_store', JSON.stringify(store));
+      }
+      
+      lastKey = state.currentKey = key;
+      lastMediaId = mediaId;
+      
+      state.openedForKey.delete(key);
+      autoOpenViewersOnceFor(key);
+    }
+  };
+})();
+```
+
+### 7. **Fix Follow Flags** (injected.js lines 20-32)
+```javascript
+// Follow flags (IG semantics - FIXED)
+const fs = v?.friendship_status || u?.friendship_status || {};
+const youFollow  = !!(fs.following ?? u?.is_following ?? v?.is_following);    // YOU -> THEM
+const isFollower = !!(fs.followed_by ?? u?.is_follower ?? v?.is_follower);    // THEM -> YOU
+
+// Reactions - include latest_reaction
+const reaction =
+  v?.latest_reaction?.reaction_emoji ||
+  v?.latest_reaction?.emoji ||
+  v?.reaction?.emoji ||
+  v?.story_reaction?.emoji ||
+  (v?.has_liked ? '❤️' : null);
+```
+
+### 8. **Fix Viewer Mapping** (content.js line 639)
+```javascript
+// In loadViewersFromStorage:
+const lastSeenAt = data?.lastSeenAt || 0;
+
+viewers.set(viewerKey, {
+  // ... existing fields ...
+  isFollower: !!(v.isFollower ?? v.follows_viewer),     // THEM -> YOU
+  youFollow:  !!(v.youFollow ?? v.followed_by_viewer),  // YOU -> THEM
+  isNew: (v.firstSeenAt || v.viewedAt || 0) > lastSeenAt,
+  // ... rest
+});
+```
+
+### 9. **Fix Filter Cases** (content.js line 442)
+```javascript
+case 'nonfollowers':
+  filteredViewers = filteredViewers.filter(v =>
+    v.youFollow === false && v.isFollower === false
+  );
+  break;
+```
+
+### 10. **Add CSS Fix** (content.css - append at end)
+```css
+/* Force circular avatars */
+.storylister-viewer-avatar img,
+.sl-avatar {
+  width: 36px !important;
+  height: 36px !important;
+  border-radius: 50% !important;
+  object-fit: cover !important;
+  display: block !important;
+}
+```
+
+Apply these changes to create v15.9. The count sentry is the key fix for your "first story only 25 users" issue.

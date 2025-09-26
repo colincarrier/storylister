@@ -27,7 +27,9 @@
     stopPagination: null,          // cancel paginator
     viewerStore: new Map(),        // Map<storyKey, Map<viewerKey, viewer>>
     mirrorTimer: null,
-    idToKey: new Map()             // Map<mediaId -> storyKey> (prevents misrouting)
+    idToKey: new Map(),            // Map<mediaId -> storyKey> (prevents misrouting)
+    sentry: { timer: null, active: false },
+    mediaForKey: new Map()         // tracks mediaId per pathname
   };
 
   const Settings = {
@@ -54,6 +56,45 @@
       }
     }
   };
+
+  // Count sentry functions for complete viewer loading
+  function stopCountSentry() {
+    state.sentry.active = false;
+    clearInterval(state.sentry.timer);
+    state.sentry.timer = null;
+  }
+
+  function startCountSentry() {
+    stopCountSentry();
+    state.sentry.active = true;
+    state.sentry.timer = setInterval(() => {
+      const target = getSeenByCount();
+      const map = state.viewerStore.get(getStorageKey());
+      const loaded = map ? map.size : 0;
+
+      if (!target || loaded >= target) {
+        stopCountSentry();
+        // Mark as fully loaded
+        const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+        const key = getStorageKey();
+        if (store[key]) {
+          store[key].lastSeenAt = Date.now();
+          localStorage.setItem('panel_story_store', JSON.stringify(store));
+        }
+        return;
+      }
+
+      // Keep trying to load more
+      const dlg = document.querySelector('[role="dialog"][aria-modal="true"]');
+      if (!dlg) {
+        const btn = document.querySelector('a[href*="/seen_by/"]');
+        if (btn) btn.click();
+      } else {
+        const scroller = findScrollableInDialog();
+        if (scroller) scroller.scrollTop = scroller.scrollHeight;
+      }
+    }, 1500);
+  }
 
   // Own story detection - simple and bulletproof
   function isOwnStory() {
