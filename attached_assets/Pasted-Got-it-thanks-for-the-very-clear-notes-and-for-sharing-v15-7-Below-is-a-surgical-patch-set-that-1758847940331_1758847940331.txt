@@ -1,0 +1,451 @@
+Got it—thanks for the very clear notes and for sharing v15.7.
+Below is a **surgical patch set** that fixes the exact issues you’re still seeing in 15.7:
+
+* first‑story sometimes only loads ~25 people
+* story switching mixes caches or shows a random small subset
+* “Reacts” not detected / not filterable
+* Following / Followers / Non‑followers inconsistent
+* NEW badge doesn’t clear once you’ve seen the list
+* panel occasionally hides while navigating
+* avatars showing up as rectangles
+
+I’m keeping this **as small as possible** and deliberately avoiding risky changes to your working pieces (e.g., we keep your throttled observer and don’t add any “smart scrolling” tricks). The only pagination change below is to give the existing routine **more time** so it can finish on the first story.
+
+> **Heads‑up about files**: a few older uploads you referenced have expired on my side. If you want me to diff against an earlier sub‑version exactly, re‑upload that bundle and I’ll include a line‑by‑line delta. For now I’m patching **15.7** you just uploaded.
+
+---
+
+## 0) `manifest.json` (confirm it’s correct)
+
+To reliably catch the **first** network responses, the backend has to load at `document_start`. The UI can stay at `document_idle`.
+
+```json
+{
+  "manifest_version": 3,
+  "name": "Storylister",
+  "version": "15.7",
+  "permissions": ["storage"],
+  "host_permissions": ["https://www.instagram.com/*", "https://*.instagram.com/*"],
+  "content_scripts": [
+    {
+      "matches": ["https://www.instagram.com/*"],
+      "js": ["content-backend.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://www.instagram.com/*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    { "resources": ["injected.js"], "matches": ["https://www.instagram.com/*"] }
+  ],
+  "action": { "default_popup": "popup.html" }
+}
+```
+
+This one change alone removes most “first story loads ~25 only” cases.
+
+---
+
+## 1) `content-backend.js` – **reliability, reactions fallback, NEW logic, and cache sanity**
+
+### 1A. Keep your throttled observer, but extend pagination window
+
+**Find** your pagination function and only change the duration:
+
+```js
+// BEFORE
+function startPagination(scroller, maxMs = 6000) {
+
+// AFTER (15 seconds so the first story has time to complete)
+function startPagination(scroller, maxMs = 15000) {
+```
+
+> This does not change the scrolling behavior—just lets your existing loop finish when the first batch was ~25 and IG keeps appending.
+
+---
+
+### 1B. Robust “own story” & “current media id” helpers (drop‑ins)
+
+Add these utilities (or keep yours if you already have equivalents; names are chosen to avoid collisions):
+
+```js
+function isOwnStory() {
+  // The “Seen by …” control only appears on *your* story
+  return !!document.querySelector('a[href*="/seen_by/"]') ||
+         Array.from(document.querySelectorAll('button,span'))
+           .some(el => /^Seen by\s+\d[\d,]*$/i.test((el.textContent || '').trim()));
+}
+
+function getMediaIdFromDOM() {
+  // 1) From the URL (share links & normal view)
+  const p = location.pathname.match(/\/stories\/[^/]+\/(\d{15,25})/);
+  if (p) return p[1];
+
+  // 2) From “Seen by …” link href when present
+  const seen = document.querySelector('a[href*="/seen_by/"]');
+  if (seen) {
+    const m = seen.href.match(/\/stories\/[^/]+\/(\d{15,25})\//);
+    if (m) return m[1];
+  }
+
+  // 3) From embedded JSON (cheap scan)
+  const scripts = document.querySelectorAll('script[type="application/json"], script:not([src])');
+  for (const s of scripts) {
+    const t = s.textContent;
+    if (!t || t.length > 250_000) continue; // avoid huge blobs
+    const m = t.match(/"media_id"\s*:\s*"(\d{15,25})"/);
+    if (m) return m[1];
+  }
+  return null;
+}
+```
+
+---
+
+### 1C. Keep one stable key, but reset safely when mediaId changes
+
+Replace your `onDOMChange` body with this version (it preserves your throttling, only the inner logic is swapped):
+
+```js
+const onDOMChange = (() => {
+  let lastKey = null;
+  let lastMediaId = null;
+
+  return () => {
+    // Only show for your own stories
+    if (!location.pathname.startsWith('/stories/') || !isOwnStory()) {
+      window.dispatchEvent(new CustomEvent('storylister:hide_panel'));
+      return;
+    }
+
+    window.dispatchEvent(new CustomEvent('storylister:show_panel'));
+    ensureInjected();
+
+    const key = location.pathname;            // stable key (works with/without id)
+    const mediaId = getMediaIdFromDOM();      // real story id when available
+
+    // Story changed if:
+    //  - path changed OR
+    //  - same path but mediaId changed (navigated within the carousel)
+    const changed = key !== lastKey || (mediaId && mediaId !== lastMediaId);
+    if (changed) {
+      if (state.stopPagination) state.stopPagination();
+
+      if (key === lastKey && mediaId !== lastMediaId) {
+        // Same path but different media → clear viewer map & stale cache
+        state.viewerStore.set(key, new Map());
+        const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+        delete store[key];
+        localStorage.setItem('panel_story_store', JSON.stringify(store));
+      }
+
+      lastKey = state.currentKey = key;
+      lastMediaId = mediaId;
+
+      // allow auto-open again for this key
+      if (state.openedForKey instanceof Set) state.openedForKey.delete(key);
+      autoOpenViewersOnceFor(key);
+    }
+  };
+})();
+```
+
+---
+
+### 1D. Preserve first‑seen timestamps and remember “last seen” to clear NEW
+
+Replace your **mirror** function with this version:
+
+```js
+function mirrorToLocalStorageDebounced(key) {
+  if (state.mirrorTimer) return;
+  state.mirrorTimer = setTimeout(() => {
+    state.mirrorTimer = null;
+
+    const map = state.viewerStore.get(key);
+    if (!map || map.size === 0) return;
+
+    const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+    const existing = store[key] || {};
+    const existingMap = new Map(existing.viewers || []);
+
+    const merged = Array.from(map.entries()).map(([vk, v]) => {
+      const old = existingMap.get(vk);
+      return [vk, {
+        ...v,
+        firstSeenAt: old?.firstSeenAt || v.firstSeenAt || Date.now()
+      }];
+    });
+
+    store[key] = {
+      mediaId: getMediaIdFromDOM() || existing.mediaId || null,
+      viewers: merged,
+      fetchedAt: Date.now(),
+      lastSeenAt: existing.lastSeenAt || 0
+    };
+
+    localStorage.setItem('panel_story_store', JSON.stringify(store));
+    window.dispatchEvent(new CustomEvent('storylister:data_updated', { detail: { storyId: key } }));
+  }, 250);
+}
+```
+
+Add a helper to **clear NEW** once you’ve looked:
+
+```js
+function markAllSeenForKey(key) {
+  const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+  if (!store[key]) return;
+  store[key].lastSeenAt = Date.now();
+  localStorage.setItem('panel_story_store', JSON.stringify(store));
+  window.dispatchEvent(new CustomEvent('storylister:data_updated', { detail: { storyId: key } }));
+}
+
+// When the panel opens, mark current as seen so NEW badges clear
+window.addEventListener('storylister:panel_opened', () => {
+  markAllSeenForKey(location.pathname);
+});
+```
+
+> With this, a viewer is **NEW** iff `viewer.firstSeenAt > store[key].lastSeenAt`.
+
+---
+
+### 1E. DOM fallback for ❤️ reacts (kept simple and safe)
+
+Add this function and call it once after opening the dialog (e.g., inside your `autoOpenViewersOnceFor` after you start pagination):
+
+```js
+function mergeReactsFromDialogIntoMap(key) {
+  const dlg = document.querySelector('[role="dialog"][aria-modal="true"]');
+  if (!dlg) return;
+  const map = state.viewerStore.get(key);
+  if (!map) return;
+
+  // IG uses a heart icon for likes on web; match a few common shapes
+  const rows = Array.from(dlg.querySelectorAll('[role="button"]')).filter(r =>
+    r.querySelector('a[href*="/"]') // contains a profile anchor
+  );
+
+  rows.forEach(row => {
+    const hasHeart =
+      row.querySelector('svg[aria-label*="Like" i]') ||
+      row.querySelector('svg[aria-label*="Unlike" i]') ||
+      row.querySelector('use[href*="heart" i]') ||
+      row.querySelector('path[d*="M34.6 3.1"]'); // common path for heart
+
+    if (!hasHeart) return;
+
+    // username is usually the first link text
+    const a = row.querySelector('a[href^="/"][href*="/"]');
+    const username = (a?.textContent || '').trim().toLowerCase();
+    if (!username) return;
+
+    const existing = map.get(username);
+    if (existing && !existing.reaction) {
+      existing.reaction = '❤️';
+      map.set(username, existing);
+    }
+  });
+
+  mirrorToLocalStorageDebounced(key);
+}
+```
+
+And inside your `autoOpenViewersOnceFor(key)` (after you start pagination), schedule one gentle merge:
+
+```js
+setTimeout(() => mergeReactsFromDialogIntoMap(key), 1000);
+```
+
+---
+
+## 2) `injected.js` – **correct follower mapping + modern reaction fields**
+
+Update your normalization so it **does not invert** the friendship flags and picks up new reaction shapes:
+
+```js
+function normalizeViewerShape(v, idx) {
+  const u = v?.user || v?.node?.user || v?.node || v || {};
+  const fs = v?.friendship_status || u?.friendship_status || {};
+
+  // Absolute URLs only
+  let pic = u.profile_pic_url || u.profile_pic_url_hd || u.profile_picture_url || '';
+  if (typeof pic !== 'string' || !/^https?:\/\//i.test(pic)) pic = '';
+
+  // Map correctly:
+  // fs.following     = YOU follow THEM
+  // fs.followed_by   = THEY follow YOU
+  const youFollow   = !!(fs.following);
+  const theyFollow  = !!(fs.followed_by);
+
+  // Modern reaction shapes seen in the responses
+  const reaction =
+    v?.latest_reaction?.reaction_emoji ||
+    v?.latest_reaction?.emoji ||
+    v?.reaction?.emoji ||
+    v?.story_reaction?.emoji ||
+    (v?.has_liked ? '❤️' : null);
+
+  return {
+    id: String(u.id || u.pk || u.pk_id || u.username || idx),
+    username: u.username || '',
+    full_name: u.full_name || u.fullname || u.name || '',
+    profile_pic_url: pic,
+    is_verified: !!(u.is_verified || u.verified || u.blue_verified),
+    // keep the field names your UI already expects:
+    followed_by_viewer: youFollow,  // you follow them
+    follows_viewer: theyFollow,     // they follow you
+    reaction: reaction || null,
+    originalIndex: idx,
+    viewedAt: v.timestamp || v.viewed_at || Date.now()
+  };
+}
+```
+
+Ensure both your `fetch` clone handler **and** XHR backup call `normalizeViewerShape` and post `STORYLISTER_VIEWERS_CHUNK` the way you already do.
+
+---
+
+## 3) `content.js` – **filters, NEW computation, clickables, and (re)remove pause**
+
+### 3A. **No pause code, at all.**
+
+If you still have `pauseVideos()` / `resumeVideos()` helpers or listeners, delete them and any calls. IG will pause while its dialog is open; when the dialog closes, it resumes.
+
+### 3B. When you map cached viewers for UI, compute flags consistently
+
+Where you rebuild viewer records from storage, map like this (keep names your UI already uses):
+
+```js
+const vMapped = {
+  id: v.id || v.pk || v.username,
+  username: v.username || '',
+  displayName: v.full_name || v.displayName || v.username || 'Anonymous',
+  profilePic: v.profile_pic_url || v.profilePic || '',
+  isVerified: !!v.is_verified,
+
+  // They follow you / You follow them (consistent with injected.js)
+  isFollower: !!(v.follows_viewer),         // THEY follow you
+  youFollow:  !!(v.followed_by_viewer),     // YOU follow them
+
+  reaction: v.reaction || null,
+  reacted: !!v.reaction,
+
+  viewedAt: v.viewedAt || v.timestamp || Date.now(),
+  originalIndex: Number.isFinite(v.originalIndex) ? v.originalIndex : i,
+
+  firstSeenAt: v.firstSeenAt || Date.now(),
+  isTagged: taggedUsers.has(v.username || v.id)
+};
+```
+
+### 3C. Filters (no API calls)
+
+```js
+case 'reacts':
+  list = list.filter(v => !!v.reaction);
+  break;
+
+case 'followers':   // they follow you
+  list = list.filter(v => v.isFollower === true);
+  break;
+
+case 'following':   // you follow them
+  list = list.filter(v => v.youFollow === true);
+  break;
+
+case 'nonfollowers': // neither follows the other
+  list = list.filter(v => v.isFollower === false && v.youFollow === false);
+  break;
+```
+
+### 3D. Compute **NEW** based on `store.lastSeenAt`
+
+When you build rows:
+
+```js
+const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+const keyStore = store[currentKey] || {};
+const lastSeenAt = keyStore.lastSeenAt || 0;
+
+vMapped.isNew = (vMapped.firstSeenAt || 0) > lastSeenAt;
+```
+
+> Because the backend now updates `lastSeenAt` when the panel opens, the “NEW” badge will clear the next render after you’ve looked.
+
+### 3E. Clickable username + avatar (open in a new tab)
+
+In your row template:
+
+```html
+<a class="sl-username" href="https://www.instagram.com/${v.username}/" target="_blank" rel="noopener noreferrer">${v.username}</a>
+
+<a href="https://www.instagram.com/${v.username}/" target="_blank" rel="noopener noreferrer">
+  <img class="sl-avatar" src="${v.profilePic || fallback}" alt="${v.username}" loading="lazy"/>
+</a>
+```
+
+---
+
+## 4) `content.css` – **fix avatar sizing (back to circles, not rectangles)**
+
+Append:
+
+```css
+/* Avatar size/shape */
+.storylister-viewer-avatar img,
+.sl-avatar {
+  width: 36px !important;
+  height: 36px !important;
+  border-radius: 50% !important;
+  object-fit: cover !important;
+}
+```
+
+(If your layout uses a different class for the list row avatar, include it here too.)
+
+---
+
+## Why this solves your list
+
+* **First story sometimes only 25** → backend at `document_start` + longer pagination window.
+* **Navigating between stories mixes or shows tiny subsets** → reset viewer map and cache when **mediaId changes under the same pathname**.
+* **Panel sometimes hides while navigating** → `isOwnStory()` checks only for the **“Seen by …”** control; we don’t rely on brittle username heuristics.
+* **Reacts** → parsed directly from responses (new fields) with a **DOM fallback** that marks ❤️ when IG shows it.
+* **Followers/Following/Non‑followers** → correct mapping of `friendship_status` (no API).
+* **NEW clears** → `lastSeenAt` updated when the panel opens; NEW is computed as `firstSeenAt > lastSeenAt`.
+* **Avatars rectangles** → explicit 36×36 circular styling.
+* **No video auto‑pause** → we removed it; IG’s dialog already pauses/resumes.
+
+---
+
+## Minimal “sanity” tests (takes <60 seconds)
+
+1. From the Instagram home page, click your profile bubble to open the **first story**.
+
+   * Panel should appear, IG viewer dialog should auto‑open.
+   * Count should climb well beyond 25 without needing a refresh.
+
+2. Click to **next story**, then back to the first.
+
+   * Counts and the list should remain correct; no mixing.
+   * If you close/open the panel, the “NEW” badges disappear on re‑render.
+
+3. In the dialog, like one viewer (tap the heart) and scroll a bit.
+
+   * “❤️ Reacts” filter should now surface them; a heart should appear in their row.
+
+4. Toggle **Followers / Following / Non‑followers**:
+
+   * Non‑followers should be those with both flags false.
+
+5. Click a username and an avatar—both should open a new tab to that profile.
+
+---
+
+If anything above still misbehaves in your environment, send me the updated bundle and I’ll tailor the exact line edits to that copy. If you also want the “first‑install guard” (force one extra check 1s after load in case the observer misses the very first mutation), I can include that as well—but with `document_start` and your throttled observer you shouldn’t need it.

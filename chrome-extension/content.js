@@ -180,7 +180,7 @@
   function slAvatarHTML(url, username) {
     // Inline SVG fallback with the user's initial
     const initial = (username || 'U').slice(0,1).toUpperCase();
-    const fallback = `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'%3E%3Crect width='40' height='40' fill='%23e4e4e7'/%3E%3Ctext x='50%25' y='50%25' text-anchor='middle' dy='.35em' fill='%23666' font-size='20'%3E${initial}%3C/text%3E%3C/svg%3E`;
+    const fallback = `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'%3E%3Ccircle cx='20' cy='20' r='20' fill='%23e4e4e7'/%3E%3Ctext x='50%25' y='50%25' text-anchor='middle' dy='.35em' fill='%23666' font-size='20'%3E${initial}%3C/text%3E%3C/svg%3E`;
 
     const img = url ? 
       `<img class="sl-avatar" src="${url}" loading="lazy" onerror="this.onerror=null;this.src='${fallback}'" alt="${username||''}">` :
@@ -378,7 +378,7 @@
     // Apply type filter
     switch (currentFilters.type) {
       case 'reacts':
-        filteredViewers = filteredViewers.filter(v => v.reacted || v.reaction);
+        filteredViewers = filteredViewers.filter(v => !!v.reaction);
         break;
       case 'following':        // you follow them
         filteredViewers = filteredViewers.filter(v => v.youFollow === true);
@@ -386,10 +386,8 @@
       case 'followers':        // they follow you
         filteredViewers = filteredViewers.filter(v => v.isFollower === true);
         break;
-      case 'nonfollowers':     // neither follows the other
-        filteredViewers = filteredViewers.filter(v =>
-          v.youFollow === false && v.isFollower === false
-        );
+      case 'non-followers':     // they don't follow you
+        filteredViewers = filteredViewers.filter(v => v.isFollower === false);
         break;
       case 'verified':
         filteredViewers = filteredViewers.filter(v => v.isVerified);
@@ -551,9 +549,9 @@
         profilePic: v.profile_pic_url || v.profilePic || '',
         isVerified: !!v.is_verified,
 
-        // unified flags (see injected normalize)
-        isFollower: !!(v.isFollower ?? v.follows_viewer),   // they follow you
-        youFollow:  !!(v.youFollow  ?? v.followed_by_viewer), // you follow them
+        // They follow you / You follow them (consistent with injected.js)
+        isFollower: !!(v.follows_viewer),         // THEY follow you
+        youFollow:  !!(v.followed_by_viewer),     // YOU follow them
 
         reaction: v.reaction || null,
         reacted: !!v.reaction,
@@ -561,9 +559,10 @@
         viewedAt: v.viewedAt || v.timestamp || Date.now(),
         originalIndex: Number.isFinite(v.originalIndex) ? v.originalIndex : i,
         isTagged: taggedUsers.has(v.username || v.id),
+        firstSeenAt: v.firstSeenAt || Date.now(),
         
-        // Mark as new if viewer appeared after last time we closed panel
-        isNew: (v.firstSeenAt || v.viewedAt || 0) > lastSeenAt
+        // Mark as new if viewer appeared after last time we opened panel
+        isNew: (v.firstSeenAt || 0) > lastSeenAt
       });
     });
     
@@ -1208,14 +1207,6 @@
   function hideRightRail() {
     if (rightRail) {
       rightRail.classList.remove('active');
-      
-      // Mark this story as "seen" at current time
-      const key = slStoreKey();
-      const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
-      if (store[key]) {
-        store[key].lastSeenAt = Date.now();
-        localStorage.setItem('panel_story_store', JSON.stringify(store));
-      }
     }
     isActive = false;
     

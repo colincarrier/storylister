@@ -73,24 +73,37 @@
 
   // Scrape mediaId from DOM when the URL lacks it (first story, share links, etc.)
   function getMediaIdFromDOM() {
-    // 1) Seen-by link (most reliable if present)
+    // 1) From the URL (share links & normal view)
+    const p = location.pathname.match(/\/stories\/[^/]+\/(\d{15,25})/);
+    if (p) return p[1];
+    
+    // 2) From "Seen by" link href when present
     const seen = document.querySelector('a[href*="/seen_by/"]');
     if (seen) {
-      const m = seen.href.match(/\/stories\/[^/]+\/(\d{8,})/);
+      const m = seen.href.match(/\/stories\/[^/]+\/(\d{15,25})/);
       if (m) return m[1];
     }
-    // 2) link rel="alternate" (IG sprinkles these)
-    for (const el of document.querySelectorAll('link[rel="alternate"][href*="/stories/"]')) {
+    
+    // 3) From <link rel="alternate" href="/stories/user/{id}/...">
+    const alts = Array.from(document.querySelectorAll('link[rel="alternate"][href*="/stories/"]'));
+    for (const el of alts) {
       const href = el.getAttribute('href') || '';
-      const m = href.match(/\/stories\/[^/]+\/(\d{8,})/);
+      const m = href.match(/\/stories\/[^/]+\/(\d{15,25})/);
       if (m) return m[1];
     }
-    // 3) data-media-id (appears on some builds)
-    const d = document.querySelector('[data-media-id]');
-    if (d?.dataset?.mediaId) return d.dataset.mediaId;
-
-    // 4) Path fallback
-    return getMediaIdFromPath();
+    
+    // 4) any anchor that already includes the id
+    const anyA = document.querySelector('a[href^="/stories/"][href*="/"]');
+    if (anyA) {
+      const m = anyA.getAttribute('href').match(/\/stories\/[^/]+\/(\d{15,25})/);
+      if (m) return m[1];
+    }
+    
+    // 5) data attribute (varies by rollout)
+    const el = document.querySelector('[data-media-id]');
+    if (el?.dataset?.mediaId) return el.dataset.mediaId;
+    
+    return null;
   }
 
   // Canonical per‑story key (prefer mediaId for stable caching)
@@ -179,7 +192,7 @@
            dlg;
   }
 
-  function startPagination(scroller, maxMs = 6000) {
+  function startPagination(scroller, maxMs = 15000) {
     const t0 = Date.now();
     let stopped = false;
     const tick = () => {
@@ -215,6 +228,8 @@
         if (state.stopPagination) state.stopPagination();
         state.stopPagination = startPagination(scroller);
       }
+      // Add DOM reaction fallback after dialog opens
+      setTimeout(() => mergeReactsFromDialogIntoMap(state.viewerStore.get(key)), 1000);
     }, 350);
   }
 
@@ -227,20 +242,36 @@
       if (!map || map.size === 0) return;
 
       const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+      const existing = store[key] || {};
+      const existingMap = new Map(existing.viewers || []);
+      
+      const merged = Array.from(map.entries()).map(([vk, v]) => {
+        const old = existingMap.get(vk);
+        return [vk, {
+          ...v,
+          firstSeenAt: old?.firstSeenAt || v.firstSeenAt || Date.now()
+        }];
+      });
+      
       store[key] = {
-        mediaId: getMediaIdFromDOM() || null,    // <-- add this
-        viewers: Array.from(map.entries()),
-        fetchedAt: Date.now()
+        mediaId: getMediaIdFromDOM() || existing.mediaId || null,
+        viewers: merged,
+        fetchedAt: Date.now(),
+        lastSeenAt: existing.lastSeenAt || 0
       };
-
-      // Alias mediaIds to our key (prevents misrouting after refresh)
-      const aliases = {};
-      for (const [mid, k] of state.idToKey.entries()) if (k === key) aliases[mid] = k;
-      store.__aliases = Object.assign(store.__aliases || {}, aliases);
 
       localStorage.setItem('panel_story_store', JSON.stringify(store));
       window.dispatchEvent(new CustomEvent('storylister:data_updated', { detail: { storyId: key } }));
     }, 250);
+  }
+  
+  // Mark all viewers as seen for a story
+  function markAllSeenForKey(key) {
+    const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+    if (!store[key]) return;
+    store[key].lastSeenAt = Date.now();
+    localStorage.setItem('panel_story_store', JSON.stringify(store));
+    window.dispatchEvent(new CustomEvent('storylister:data_updated', { detail: { storyId: key } }));
   }
 
   // Message bridge (route chunks correctly; dedupe; no async spam)
@@ -300,6 +331,8 @@
   // DOM observer (throttled), no auto-pause, first-story auto-open
   const onDOMChange = (() => {
     let lastKey = null;
+    let lastMediaId = null;
+    
     return () => {
       // Only show panel on YOUR stories (with "Seen by" control)
       if (!location.pathname.startsWith('/stories/') || !isOwnStory()) {
@@ -310,20 +343,29 @@
       window.dispatchEvent(new CustomEvent('storylister:show_panel'));
       ensureInjected();
 
-      const key = canonicalKey();
-      if (key !== lastKey) {
+      const key = location.pathname;            // stable key (works with/without id)
+      const mediaId = getMediaIdFromDOM();      // real story id when available
+      
+      // Story changed if:
+      //  - path changed OR
+      //  - same path but mediaId changed (navigated within the carousel)
+      const changed = key !== lastKey || (mediaId && mediaId !== lastMediaId);
+      if (changed) {
         if (state.stopPagination) state.stopPagination();
-        lastKey = state.currentKey = key;
-
-        // Clear stale cache if a different mediaId is now under the same path key
-        const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
-        const currentMid = getMediaIdFromDOM();
-        const cachedMid = store[key]?.mediaId;
-        if (store[key] && cachedMid && currentMid && cachedMid !== currentMid) {
+        
+        if (key === lastKey && mediaId !== lastMediaId) {
+          // Same path but different media → clear viewer map & stale cache
+          state.viewerStore.set(key, new Map());
+          const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
           delete store[key];
           localStorage.setItem('panel_story_store', JSON.stringify(store));
         }
-
+        
+        lastKey = state.currentKey = key;
+        lastMediaId = mediaId;
+        
+        // allow auto-open again for this key
+        if (state.openedForKey instanceof Set) state.openedForKey.delete(key);
         autoOpenViewersOnceFor(key);
       }
     };
@@ -342,6 +384,11 @@
       }
     };
   })();
+
+  // When the panel opens, mark current as seen so NEW badges clear
+  window.addEventListener('storylister:panel_opened', () => {
+    markAllSeenForKey(location.pathname);
+  });
 
   // Initialize
   Settings.load();
