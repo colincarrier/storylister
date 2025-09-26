@@ -387,7 +387,9 @@
         filteredViewers = filteredViewers.filter(v => v.isFollower === true);
         break;
       case 'non-followers':     // they don't follow you
-        filteredViewers = filteredViewers.filter(v => v.isFollower === false);
+        filteredViewers = filteredViewers.filter(v =>
+          v.youFollow === false && v.isFollower === false
+        );
         break;
       case 'verified':
         filteredViewers = filteredViewers.filter(v => v.isVerified);
@@ -550,8 +552,8 @@
         isVerified: !!v.is_verified,
 
         // They follow you / You follow them (consistent with injected.js)
-        isFollower: !!(v.follows_viewer),         // THEY follow you
-        youFollow:  !!(v.followed_by_viewer),     // YOU follow them
+        isFollower: !!(v.isFollower ?? v.follows_viewer),     // THEM -> YOU
+        youFollow:  !!(v.youFollow ?? v.followed_by_viewer),  // YOU -> THEM
 
         reaction: v.reaction || null,
         reacted: !!v.reaction,
@@ -562,7 +564,7 @@
         firstSeenAt: v.firstSeenAt || Date.now(),
         
         // Mark as new if viewer appeared after last time we opened panel
-        isNew: (v.firstSeenAt || 0) > lastSeenAt
+        isNew: (v.firstSeenAt || v.viewedAt || 0) > lastSeenAt
       });
     });
     

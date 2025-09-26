@@ -575,3 +575,13 @@
   text-decoration: none;
   display: inline-block;
 }
+
+/* Force circular avatars */
+.storylister-viewer-avatar img,
+.sl-avatar {
+  width: 36px !important;
+  height: 36px !important;
+  border-radius: 50% !important;
+  object-fit: cover !important;
+  display: block !important;
+}
