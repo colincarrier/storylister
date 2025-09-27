@@ -106,45 +106,104 @@
     return location.pathname.match(/\/stories\/[^/]+\/(\d{8,})/)?.[1] || null;
   }
 
-  // Scrape mediaId from DOM when the URL lacks it (first story, share links, etc.)
+  function getStoryOwnerFromURL() {
+    const m = location.pathname.match(/\/stories\/([^/]+)/);
+    return m ? m[1] : null;
+  }
+
+  function matchIdFromText(text, owner) {
+    if (!text) return null;
+
+    // Prefer matches scoped to the owner (if we know it)
+    if (owner) {
+      const scoped = text.match(new RegExp(`/stories/${owner}/(\\d{15,20})`));
+      if (scoped) return scoped[1];
+    }
+
+    // Generic ID in JSON
+    const generic = text.match(/"id"\s*:\s*"(\d{15,20})"/);
+    if (generic) return generic[1];
+
+    // Generic path form
+    const path = text.match(/\/stories\/[^/]+\/(\d{15,20})/);
+    return path ? path[1] : null;
+  }
+
+  // Comprehensive mediaId extraction from DOM
   function getMediaIdFromDOM() {
-    // 1) From the URL (share links & normal view)
-    const p = location.pathname.match(/\/stories\/[^/]+\/(\d{15,25})/);
-    if (p) return p[1];
-    
-    // 2) From "Seen by" link href when present
-    const seen = document.querySelector('a[href*="/seen_by/"]');
-    if (seen) {
-      const m = seen.href.match(/\/stories\/[^/]+\/(\d{15,25})/);
+    const owner = getStoryOwnerFromURL();
+
+    // 1) URL path (fastest)
+    {
+      const m = location.pathname.match(/\/stories\/[^/]+\/(\d{15,20})/);
       if (m) return m[1];
     }
-    
-    // 3) From <link rel="alternate" href="/stories/user/{id}/...">
-    const alts = Array.from(document.querySelectorAll('link[rel="alternate"][href*="/stories/"]'));
-    for (const el of alts) {
-      const href = el.getAttribute('href') || '';
-      const m = href.match(/\/stories\/[^/]+\/(\d{15,25})/);
-      if (m) return m[1];
+
+    // 2) "Seen by" link (your own stories)
+    {
+      const seen = document.querySelector('a[href*="/seen_by/"]');
+      if (seen?.href) {
+        const m = seen.href.match(/\/stories\/[^/]+\/(\d{15,20})/);
+        if (m) return m[1];
+      }
     }
-    
-    // 4) any anchor that already includes the id
-    const anyA = document.querySelector('a[href^="/stories/"][href*="/"]');
-    if (anyA) {
-      const m = anyA.getAttribute('href').match(/\/stories\/[^/]+\/(\d{15,25})/);
-      if (m) return m[1];
+
+    // 3) <link rel="alternate"> variants
+    {
+      const links = document.querySelectorAll('link[rel="alternate"][href*="/stories/"]');
+      for (const l of links) {
+        const href = l.getAttribute('href') || '';
+        if (owner && !href.includes(`/stories/${owner}/`)) continue;
+        const m = href.match(/\/stories\/[^/]+\/(\d{15,20})/);
+        if (m) return m[1];
+      }
     }
-    
-    // 5) data attribute (varies by rollout)
-    const el = document.querySelector('[data-media-id]');
-    if (el?.dataset?.mediaId) return el.dataset.mediaId;
-    
-    return null;
+
+    // 4) App deep links
+    {
+      const metas = document.querySelectorAll('meta[property^="al:"][content*="/stories/"]');
+      for (const meta of metas) {
+        const c = meta.getAttribute('content') || '';
+        const m = c.match(/\/stories\/[^/]+\/(\d{15,20})/);
+        if (m) return m[1];
+      }
+    }
+
+    // 5) Base64 bootstrap script (data: URL)
+    {
+      const scripts = document.querySelectorAll('script[src^="data:text/javascript;base64,"]');
+      for (const s of scripts) {
+        const src = s.getAttribute('src') || '';
+        const idx = src.indexOf(',');
+        if (idx === -1) continue;
+        try {
+          const txt = atob(src.slice(idx + 1));
+          const id = matchIdFromText(txt, owner);
+          if (id) return id;
+        } catch (_) {}
+      }
+    }
+
+    // 6) Any JSON script payloads (defensive)
+    {
+      const jsonScripts = document.querySelectorAll(
+        'script[type="application/json"],script[type="application/ld+json"]'
+      );
+      for (const s of jsonScripts) {
+        const txt = s.textContent || '';
+        const id = matchIdFromText(txt, owner);
+        if (id) return id;
+      }
+    }
+
+    return null; // unknown (we'll fall back to pathname as key)
   }
 
   // Canonical per‑story key (prefer mediaId for stable caching)
   function canonicalKey() {
+    const owner = getStoryOwnerFromURL() || 'unknown';
     const mid = getMediaIdFromDOM();
-    return mid ? `story_${mid}` : location.pathname;
+    return mid ? `/stories/${owner}/${mid}/` : location.pathname;
   }
 
   function findSeenByButton() {
@@ -406,25 +465,22 @@
       window.dispatchEvent(new CustomEvent('storylister:show_panel'));
       ensureInjected();
 
-      const key = location.pathname;           // canonical key
+      const key = canonicalKey();              // canonical key with mediaId
       const mediaId = getMediaIdFromDOM();     // tighter story identity
 
       if (key !== lastKey || (mediaId && mediaId !== lastMediaId)) {
         // story changed
         if (state.stopPagination) state.stopPagination();
 
-        // same key but new media ⇒ purge stale cache
-        if (key === lastKey && mediaId && lastMediaId && mediaId !== lastMediaId) {
+        // Clear viewer map when story changes
+        if (key !== lastKey) {
           state.viewerStore.set(key, new Map());
-          const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
-          delete store[key];
-          localStorage.setItem('panel_story_store', JSON.stringify(store));
         }
 
         lastKey = state.currentKey = key;
         lastMediaId = mediaId;
 
-        // re-open on change
+        // When story (mediaId) changes under the same path, allow re-open
         state.openedForKey.delete(key);
         autoOpenViewersOnceFor(key);
       }
