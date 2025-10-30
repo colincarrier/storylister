@@ -4,6 +4,35 @@
 (function() {
   // console.log('[Storylister] Initializing extension UI');
   
+  // 1) Inject MAIN-world interceptor as early as possible
+  try {
+    const s = document.createElement('script');
+    s.src = chrome.runtime.getURL('injected.js');
+    s.dataset.storylister = '1';
+    (document.head || document.documentElement).appendChild(s);
+    s.remove();
+  } catch(e) {}
+
+  // 2) Wait for READY handshake from injected.js
+  let interceptorReady = false;
+  window.addEventListener('message', (ev)=>{
+    if (!ev?.data || ev.data.source !== 'STORYLISTER') return;
+    if (ev.data.type === 'STORYLISTER_READY') {
+      interceptorReady = true;
+      // console.log('[Storylister] Interceptor ready');
+    }
+  });
+
+  // 3) Observe for the "Viewers" dialog and notify backend to mount the panel
+  const mo = new MutationObserver(()=>{
+    const dlg = document.querySelector('[role="dialog"][aria-modal="true"]');
+    if (dlg && interceptorReady) {
+      // Fire a custom event; content-backend.js should listen to this and mount the panel once per open.
+      window.dispatchEvent(new CustomEvent('storylister:dialog_open'));
+    }
+  });
+  mo.observe(document.documentElement, {subtree:true, childList:true});
+  
   // Hybrid storage manager - IndexedDB for bulk data, localStorage for speed
   class HybridStorage {
     constructor() {
