@@ -149,7 +149,7 @@
 
   // Load cache map for current story
   function loadCacheMapForCurrent() {
-    const key = location.pathname;
+    const key = ACTIVE_MEDIA_ID_FROM_BACKEND || location.pathname;
     try {
       const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
       const raw = store[key];
@@ -557,9 +557,9 @@
     }
   };
   
-  // Load viewers from localStorage under the pathname key
+  // Load viewers from localStorage under the active story key
   function loadViewersFromStorage() {
-    const currentKey = slStoreKey(); // Always use pathname
+    const currentKey = ACTIVE_MEDIA_ID_FROM_BACKEND || slStoreKey();
     if (!currentKey) return;
     
     const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
@@ -1420,6 +1420,7 @@
     // force a refresh now that we know the correct key
     if (typeof loadViewersFromStorage === 'function') {
       loadViewersFromStorage();
+      updateViewerList();
     }
   });
 
@@ -1838,8 +1839,9 @@
     updateViewerList();
     
     // Load data from cache if available
+    const activeKey = ACTIVE_MEDIA_ID_FROM_BACKEND || key;
     const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
-    const data = store[key];
+    const data = store[activeKey];
     if (data?.viewers) {
       // Rebuild viewers from cache
       data.viewers.forEach(([k, v]) => {
