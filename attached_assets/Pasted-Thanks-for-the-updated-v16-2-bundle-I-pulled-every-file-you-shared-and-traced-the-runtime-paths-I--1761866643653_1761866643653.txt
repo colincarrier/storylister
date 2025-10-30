@@ -1,0 +1,396 @@
+Thanks for the updated v16.2 bundle. I pulled every file you shared and traced the runtime paths. I can reproduce all four symptoms from the code alone (even without running it) and they stem from **one primary mismatch + three regressions**:
+
+---
+
+## What’s actually broken (root‑cause, mapped to your code)
+
+1. **Key mismatch = endless spinner + stale/overflow counts**
+
+   * The interceptor stores viewers in memory and in `localStorage` under a **unique key** (`stories:${owner}:${mediaId}`) … but Count Sentry and the UI still read using **`location.pathname`**.
+   * Specifically:
+
+     * `content-backend.js` writes to `state.viewerStore` and mirrors to `panel_story_store` under **`ukey = stories:${owner}:${mediaId}`**, then **Count Sentry** reads `state.viewerStore.get(getStorageKey())` where `getStorageKey()` returns `location.pathname`. This always reads an empty map → **Sentry never reaches parity**, keeps scrolling, IG spinner keeps spinning. 
+     * The UI (`content.js`) loads from `panel_story_store[location.pathname]`, but the backend saved to `panel_story_store[ukey]` → **UI shows stale or wrong story**, doesn’t update when you move to a new story, and may display *more* than IG due to carryover. 
+
+2. **Cross‑story carryover**
+
+   * `onDOMChange` clears/initializes viewer maps using **`canonicalKey()` / `location.pathname`**, while the interceptor and mirror are keyed by **`ukey`**. Cleaning the wrong map means the previous story’s viewers remain, and you see inflated counts when advancing stories. 
+
+3. **Reactions DOM merge is never called correctly**
+
+   * `mergeReactsFromDialogIntoMap` expects a **story key string**, but it’s invoked with a **Map** in two places. That call becomes a no‑op, so reactions can be inconsistent. 
+
+4. **Double injection attempts** (not fatal but noisy)
+
+   * Both `content.js` and the first IIFE in `content‑backend.js` inject `injected.js`. Your interceptor guards re‑patching, but this still adds work and timing churn on first load.
+
+---
+
+## The fix (surgical and safe)
+
+**Principle:** One canonical story key everywhere. The interceptor announces the active story key, the backend stores under that key, Count Sentry reads that key, and the UI listens for it and reads the same key from storage. No auto‑reopen, and strict overflow safety.
+
+Below are **precise diffs** to paste. They only touch the minimum necessary lines to fix: (a) key usage, (b) parity/overflow logic, (c) dialog close behavior, and (d) the reactions fallback call.
+
+---
+
+### 1) `chrome-extension/content-backend.js` — unify on `ukey`, fix sentry/parity, correct reacts call, dispatch active key, remove duplicate early injection
+
+```diff
+diff --git a/chrome-extension/content-backend.js b/chrome-extension/content-backend.js
+@@
+-// --- Storylister: early inject to catch first story viewers request ---
+-(() => {
+-  try {
+-    if (location.pathname.startsWith('/stories/') &&
+-        !document.querySelector('script[data-sl-injected="1"]') &&
+-        chrome?.runtime?.getURL) {
+-      const s = document.createElement('script');
+-      s.src = chrome.runtime.getURL('injected.js');
+-      s.dataset.slInjected = '1';
+-      s.onload = () => s.remove();
+-      (document.head || document.documentElement).appendChild(s);
+-    }
+-  } catch {}
+-})();
+-
+-// content-backend.js
+-// v15.5 - Complete surgical patches from ChatGPT
+-(() => {
++// content-backend.js
++// v16.2‑RC hardening
++(() => {
+@@
+-  const state = {
++  const state = {
+     injected: false,
+-    currentKey: null,              // stable: location.pathname
++    currentKey: null,              // last active unique key (stories:owner:mediaId)
+     openedForKey: new Set(),       // auto-open once per key
+     stopPagination: null,          // cancel paginator
+     viewerStore: new Map(),        // Map<storyKey, Map<viewerKey, viewer>>
+     mirrorTimer: null,
+     idToKey: new Map(),            // Map<mediaId -> storyKey> (prevents misrouting)
+     sentry: { timer: null, active: false, userClosed: false },
+-    mediaForKey: new Map(),        // tracks mediaId per pathname
+-    lastStoryKey: null             // track last unique story key
++    mediaForKey: new Map(),        // tracks mediaId per story
++    lastStoryKey: null             // track last unique story key
+   };
+@@
+-  function getStorageKey() { return location.pathname; }   // works with and without numeric id
++  // legacy pathname key (kept for back-compat reads only)
++  function getStorageKey() { return location.pathname; }
+@@
+   function startCountSentry() {
+     stopCountSentry();
+     state.sentry.active = true;
+     state.sentry.userClosed = false;  // Reset on new start
+     state.sentry.timer = setInterval(() => {
+       if (!state.sentry.active) return;
+       if (state.sentry.userClosed) {
+         stopCountSentry();
+         return;
+       }
+       
+-      const target = getSeenByCount();
+-      const map = state.viewerStore.get(getStorageKey());
++      const target = getSeenByCount();
++      const currentKey = state.lastStoryKey || state.currentKey;
++      const map = currentKey ? state.viewerStore.get(currentKey) : null;
+       const loaded = map ? map.size : 0;
+ 
+       // v16.2-RC: CRITICAL - Never allow loaded > target
+       if (target && loaded >= target) {
+         // If we somehow have MORE viewers than Instagram reports, clear and reload
+         if (loaded > target) {
+           console.error(`[Storylister] Count overflow detected: ${loaded} > ${target}, clearing...`);
+-          const key = getStorageKey();
+-          state.viewerStore.set(key, new Map());
++          if (currentKey) state.viewerStore.set(currentKey, new Map());
+           // Don't auto-reopen, just stop
+           stopCountSentry();
+           return;
+         }
+         stopCountSentry(); 
+         return; 
+       }
+@@
+-      const scroller = findScrollableInDialog();
++      const scroller = findScrollableInDialog();
+       if (scroller) scroller.scrollTop = scroller.scrollHeight;
+     }, 1200);
+   }
+@@
+-  function startPagination(scroller, maxMs = 15000) {
++  function startPagination(scroller, maxMs = 15000) {
+     const t0 = Date.now();
+     let stopped = false;
+     const tick = () => {
+       if (stopped || !document.contains(scroller)) return;
+       if (Date.now() - t0 > maxMs) return;
+ 
+-      const target = getSeenByCount();
+-      const map = state.viewerStore.get(getStorageKey());
++      const target = getSeenByCount();
++      const currentKey = state.lastStoryKey || state.currentKey;
++      const map = currentKey ? state.viewerStore.get(currentKey) : null;
+       const loaded = map ? map.size : 0;
+-      if (target && loaded >= target - 1) return; // allow ±1
++      if (target && loaded >= target) return;
+@@
+-  async function autoOpenViewersOnceFor(key) {
++  async function autoOpenViewersOnceFor(ukey) {
+     if (!Settings.cache.autoOpen) return;
+-    if (state.openedForKey.has(key)) return;
++    if (state.openedForKey.has(ukey)) return;
+@@
+-    state.openedForKey.add(key);
++    state.openedForKey.add(ukey);
+     try { btn.click(); } catch {}
+     
+     setTimeout(() => {
+       const scroller = findScrollableInDialog();
+       if (scroller) {
+         if (state.stopPagination) state.stopPagination();
+         state.stopPagination = startPagination(scroller, 15000); // longer on first story
+         startCountSentry(); // keep nudging until target reached
+       }
+       // Add DOM reaction fallback after dialog opens
+-      setTimeout(() => mergeReactsFromDialogIntoMap(state.viewerStore.get(key)), 600);
+-      setTimeout(() => mergeReactsFromDialogIntoMap(state.viewerStore.get(key)), 2000);
++      setTimeout(() => mergeReactsFromDialogIntoMap(ukey), 600);
++      setTimeout(() => mergeReactsFromDialogIntoMap(ukey), 2000);
+     }, 300);
+   }
+@@
+   window.addEventListener('message', (evt) => {
+@@
+-    const { mediaId, ownerUsername, viewers, totalCount, debug } = msg.data || {};
++    const { mediaId, ownerUsername, viewers, totalCount, debug } = msg.data || {};
+     if (!mediaId || !Array.isArray(viewers)) return;
+     
+     // v16.2-RC: Use unique story keys to prevent cross-story contamination
+     const ukey = storyKey(ownerUsername, mediaId);
+@@
+     if (!state.viewerStore.has(ukey)) state.viewerStore.set(ukey, new Map());
+     const map = state.viewerStore.get(ukey);
+     
+-    // v16.2-RC: Count overflow protection
+-    const loaded = map.size;
+-    if (typeof totalCount === 'number' && loaded > totalCount) {
++    // v16.2-RC: Count overflow protection (pre)
++    let loaded = map.size;
++    if (typeof totalCount === 'number' && loaded > totalCount) {
+       console.error(`[Storylister] Critical overflow: ${loaded} > ${totalCount}; resetting ${ukey}`);
+       map.clear();
+       stopCountSentry();
+       return;
+     }
+@@
+-    viewers.forEach((raw, idx) => {
++    viewers.forEach((raw, idx) => {
+       const v = { ...raw };
+@@
+       const prev = map.get(viewerKey) || {};
+       map.set(viewerKey, { ...prev, ...v });
+     });
+ 
+-    // Apply DOM fallback for reactions
+-    mergeReactsFromDialogIntoMap(map);
++    // Re-check overflow after insert
++    loaded = map.size;
++    if (typeof totalCount === 'number' && loaded > totalCount) {
++      console.error(`[Storylister] Critical overflow after insert: ${loaded} > ${totalCount}; resetting ${ukey}`);
++      map.clear();
++      stopCountSentry();
++      return;
++    }
++
++    // Apply DOM fallback for reactions (correct argument = story key)
++    mergeReactsFromDialogIntoMap(ukey);
+ 
+     mirrorToLocalStorageDebounced(ukey);
++
++    // Announce active story key to the UI so it reads the same store key
++    state.currentKey = state.lastStoryKey = ukey;
++    window.dispatchEvent(new CustomEvent('storylister:active_media', { detail: { storyId: ukey } }));
+   });
+@@
+-  window.addEventListener('storylister:panel_opened', () => {
+-    markAllSeenForKey(location.pathname);
+-  });
++  window.addEventListener('storylister:panel_opened', () => {
++    if (state.lastStoryKey) markAllSeenForKey(state.lastStoryKey);
++  });
+@@
+-  const onDOMChange = (() => {
++  const onDOMChange = (() => {
+     let lastKey = null;
+     let lastMediaId = null;
+     
+     return () => {
+       if (!location.pathname.startsWith('/stories/') || !isOwnStory()) {
+         stopCountSentry();
+         window.dispatchEvent(new CustomEvent('storylister:hide_panel'));
+         return;
+       }
+ 
+       window.dispatchEvent(new CustomEvent('storylister:show_panel'));
+       ensureInjected();
+ 
+-      const key = canonicalKey();              // canonical key with mediaId
+-      const mediaId = getMediaIdFromDOM();     // tighter story identity
++      const mediaId = getMediaIdFromDOM();              // media id if present
++      const owner = getStoryOwnerFromURL() || 'unknown';
++      const ukey = storyKey(owner, mediaId || 'unknown');
+ 
+-      if (key !== lastKey || (mediaId && mediaId !== lastMediaId)) {
++      if (ukey !== lastKey || (mediaId && mediaId !== lastMediaId)) {
+         // story changed
+         if (state.stopPagination) state.stopPagination();
+ 
+-        // Clear viewer map when story changes
+-        if (key !== lastKey) {
+-          state.viewerStore.set(key, new Map());
+-        }
++        // Clear viewer map for this unique story to avoid carryover
++        state.viewerStore.set(ukey, new Map());
+ 
+-        lastKey = state.currentKey = key;
++        lastKey = state.currentKey = state.lastStoryKey = ukey;
+         lastMediaId = mediaId;
+ 
+-        // When story (mediaId) changes under the same path, allow re-open
+-        state.openedForKey.delete(key);
+-        autoOpenViewersOnceFor(key);
++        // When story changes, allow re-open once
++        state.openedForKey.delete(ukey);
++        autoOpenViewersOnceFor(ukey);
++
++        // Announce active key so UI reads the correct bucket
++        window.dispatchEvent(new CustomEvent('storylister:active_media', { detail: { storyId: ukey } }));
+       }
+     };
+   })();
+```
+
+**Why these changes fix your symptoms**
+
+* Count Sentry, paginator, “mark seen”, and reactions fallback now **read/write the same story key** (`ukey`). No more infinite scroll or panel showing a different story than IG.
+* When you move to the next story, we **reset the exact map for that story** and broadcast the **active key** so the UI tracks it (no carryover).
+* The reactions DOM merge now actually runs against the right key.
+  These changes are minimal and do not alter your 6‑layer media ID detection. 
+
+---
+
+### 2) `chrome-extension/content.js` — read the same key the backend uses; fix cache reads
+
+```diff
+diff --git a/chrome-extension/content.js b/chrome-extension/content.js
+@@
+   // 1) Inject MAIN-world interceptor as early as possible
+@@
+   // 2) Wait for READY handshake from injected.js
+@@
+   // 3) Observe for the "Viewers" dialog and notify backend to mount the panel
+@@
+-  function slStoreKey() {
+-    // Always use the pathname
+-    return location.pathname;
+-  }
++  function slStoreKey() {
++    // Fallback only; the backend will announce the active unique story key
++    return location.pathname;
++  }
+@@
+-  function loadCacheMapForCurrent() {
+-    const key = location.pathname;
++  function loadCacheMapForCurrent() {
++    const key = ACTIVE_MEDIA_ID_FROM_BACKEND || location.pathname;
+     try {
+       const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+       const raw = store[key];
+       if (!raw || !Array.isArray(raw.viewers)) return new Map();
+       return new Map(raw.viewers); // Map<viewerKey, viewer>
+     } catch { return new Map(); }
+   }
+@@
+-  function loadViewersFromStorage() {
+-    const currentKey = slStoreKey(); // Always use pathname
++  function loadViewersFromStorage() {
++    const currentKey = ACTIVE_MEDIA_ID_FROM_BACKEND || slStoreKey();
+     if (!currentKey) return;
+     
+     const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+     const data = store[currentKey];
+     if (!data?.viewers) return;
+@@
+   // Listen for active media announcements from backend
+   window.addEventListener('storylister:active_media', (e) => {
+     ACTIVE_MEDIA_ID_FROM_BACKEND = e.detail?.storyId || null;
+     // force a refresh now that we know the correct key
+-    if (typeof loadViewersFromStorage === 'function') {
+-      loadViewersFromStorage();
+-    }
++    loadViewersFromStorage();
++    renderViewersFromCache();
+   });
+@@
+   // Listen for data updates
+   window.addEventListener('storylister:data_updated', (e) => {
+-    // console.log('[Storylister] Data updated:', e.detail);
+-    const currentKey = slStoreKey();
+-    if (e.detail?.storyId === currentKey) {
+-      renderViewersFromCache();
+-    }
++    const currentKey = ACTIVE_MEDIA_ID_FROM_BACKEND || slStoreKey();
++    if (e.detail?.storyId === currentKey) renderViewersFromCache();
+   });
+```
+
+This makes the UI consume **the same story bucket** the backend writes, so counts/rows always match, and changing stories produces fresh lists instantly. 
+
+---
+
+### 3) (`optional` but recommended) Stop double‑inject attempts
+
+You’re already injecting `injected.js` from `content.js`. The tiny “prelude” injector at the very top of `content-backend.js` is redundant (and used a different `data-*` attribute, so it wouldn’t be detected). We removed it in Patch #1 to eliminate work duplication during navigation.
+
+---
+
+## Post‑patch QA (10 steps, deterministic)
+
+1. **Open your own story** → click **Seen by**.
+2. In Chrome DevTools console, run:
+   `localStorage.getItem('panel_story_store')` and confirm the object contains **exactly one key** beginning with `stories:<your-username>:<mediaId>`.
+3. StoryLister panel appears; counts begin increasing.
+4. When IG’s dialog shows **N**, StoryLister never exceeds **N**; when **N** reached, the dialog **stops scrolling** (Count Sentry stops).
+5. Close the dialog ⇒ playback resumes; Sentry remains **stopped**.
+6. Swipe to the next story ⇒ panel shows **0** (until viewers arrive) and then populates; no entries from the prior story appear.
+7. Refresh the tab while on a story ⇒ counts remain correct; no duplicates.
+8. Click **Reacts** filter ⇒ only rows with a visible reaction emoji remain.
+9. Export (JSON) ⇒ lengths match what the panel shows for the current story.
+10. Navigate back to a prior story ⇒ panel switches buckets, no mismatch.
+
+---
+
+## Why this is “bulletproof”
+
+* **Single source of truth for identity**: `ukey = stories:${owner}:${mediaId}` flows from interceptor → backend store → UI, with explicit `active_media` announcements that eliminate timing/race ambiguity.
+* **Strict parity guarantees**: Count Sentry reads the **same** map it’s helping populate and stops at parity; any overflow clears that one map and stops, preventing corruption. 
+* **Correct reactions**: Both network normalization (already present) and DOM fallback now run and write to the **correct story map**.
+* **No auto‑reopen**: We never re‑click “Seen by”. User close is respected; playback continues (your earlier fix stays fixed). 
+
+---
+
+## Notes on your uploaded files (sanity)
+
+* `manifest.json` already runs both content scripts at `document_start` and exposes `injected.js` via WAR — **good**. No changes needed there. 
+* `injected.js` has the READY handshake and robust reaction extraction (including Replit’s fields) — **good**. 
+* `popup.html` / `popup.js` are independent (settings + toggle) — **no changes** for this bug.
+* `content.css` is fine (reaction bubble styles already present). 
+
+---
+
+If you want this packaged as four commits (backend key unification, UI key consumption, overflow guard after‑insert, remove redundant injector), say the word and I’ll format the commit messages exactly.
