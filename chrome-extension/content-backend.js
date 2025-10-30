@@ -28,9 +28,22 @@
     viewerStore: new Map(),        // Map<storyKey, Map<viewerKey, viewer>>
     mirrorTimer: null,
     idToKey: new Map(),            // Map<mediaId -> storyKey> (prevents misrouting)
-    sentry: { timer: null, active: false },
-    mediaForKey: new Map()         // tracks mediaId per pathname
+    sentry: { timer: null, active: false, userClosed: false },
+    mediaForKey: new Map(),        // tracks mediaId per pathname
+    lastStoryKey: null             // track last unique story key
   };
+
+  // v16.2-RC: Unique story key generation
+  function storyKey(ownerUsername, mediaId){
+    const owner = (ownerUsername || '').toLowerCase() || 'unknown';
+    const mid = String(mediaId || 'unknown');
+    return `stories:${owner}:${mid}`;
+  }
+  
+  function basePrefix(ownerUsername){
+    const owner = (ownerUsername || '').toLowerCase() || 'unknown';
+    return `stories:${owner}:`;
+  }
 
   const Settings = {
     cache: { pro: false, autoOpen: true, pauseVideos: false, accountHandle: null },
@@ -67,22 +80,40 @@
   function startCountSentry() {
     stopCountSentry();
     state.sentry.active = true;
+    state.sentry.userClosed = false;  // Reset on new start
     state.sentry.timer = setInterval(() => {
       if (!state.sentry.active) return;
+      if (state.sentry.userClosed) {
+        stopCountSentry();
+        return;
+      }
+      
       const target = getSeenByCount();
       const map = state.viewerStore.get(getStorageKey());
       const loaded = map ? map.size : 0;
 
-      // stop when we reached target (allow ±1)
-      if (target && loaded >= target - 1) { 
+      // v16.2-RC: CRITICAL - Never allow loaded > target
+      if (target && loaded >= target) {
+        // If we somehow have MORE viewers than Instagram reports, clear and reload
+        if (loaded > target) {
+          console.error(`[Storylister] Count overflow detected: ${loaded} > ${target}, clearing...`);
+          const key = getStorageKey();
+          state.viewerStore.set(key, new Map());
+          // Don't auto-reopen, just stop
+          stopCountSentry();
+          return;
+        }
         stopCountSentry(); 
         return; 
       }
 
       const dlg = document.querySelector('[role="dialog"][aria-modal="true"]');
       if (!dlg) {
-        const btn = findSeenByButton();
-        if (btn) try { btn.click(); } catch {}
+        // v16.2-RC: Don't reopen if we've loaded enough (>80% of target)
+        if (loaded > 0 && target && loaded >= target * 0.8) {
+          stopCountSentry();
+        }
+        // Don't auto-click to reopen - prevents auto-pause
         return;
       }
       const scroller = findScrollableInDialog();
@@ -400,28 +431,49 @@
   window.addEventListener('message', (evt) => {
     if (evt.source !== window || evt.origin !== location.origin) return;
     const msg = evt.data;
-    if (!msg || msg.type !== 'STORYLISTER_VIEWERS_CHUNK') return;
+    if (!msg || msg.source !== 'STORYLISTER' || msg.type !== 'STORYLISTER_VIEWERS_CHUNK') return;
 
-    const { mediaId, viewers } = msg.data || {};
+    const { mediaId, ownerUsername, viewers, totalCount, debug } = msg.data || {};
     if (!mediaId || !Array.isArray(viewers)) return;
-
-    const key = getStorageKey();
-
-    // Detect when a new story loads under the same pathname (back/forward navigation)
-    if (!state.idToKey.has(mediaId)) {
-      state.idToKey.set(mediaId, key);
+    
+    // v16.2-RC: Use unique story keys to prevent cross-story contamination
+    const ukey = storyKey(ownerUsername, mediaId);
+    
+    // On story change, clear any other keys with the same owner prefix
+    if (state.lastStoryKey && state.lastStoryKey !== ukey) {
+      const prefix = basePrefix(ownerUsername);
+      for (const k of [...state.viewerStore.keys()]) {
+        if (k.startsWith(prefix) && k !== ukey) {
+          state.viewerStore.delete(k);
+        }
+      }
     }
-    const currentMediaForKey = [...state.idToKey.entries()].find(([, k]) => k === key)?.[0];
-    if (currentMediaForKey && currentMediaForKey !== mediaId) {
-      // New story under same pathname -> reset viewer map for this key
-      state.viewerStore.set(key, new Map());
-      // Remap this key to the new mediaId
-      state.idToKey.delete(currentMediaForKey);
-      state.idToKey.set(mediaId, key);
+    state.lastStoryKey = ukey;
+    state.idToKey.set(mediaId, ukey);
+    
+    if (!state.viewerStore.has(ukey)) state.viewerStore.set(ukey, new Map());
+    const map = state.viewerStore.get(ukey);
+    
+    // v16.2-RC: Count overflow protection
+    const loaded = map.size;
+    if (typeof totalCount === 'number' && loaded > totalCount) {
+      console.error(`[Storylister] Critical overflow: ${loaded} > ${totalCount}; resetting ${ukey}`);
+      map.clear();
+      stopCountSentry();
+      return;
     }
-
-    if (!state.viewerStore.has(key)) state.viewerStore.set(key, new Map());
-    const map = state.viewerStore.get(key);
+    
+    // Debug logging if available
+    if (debug && DEBUG) {
+      console.log('[Storylister Debug]', {
+        mediaId,
+        ownerUsername,
+        viewersReceived: debug.rawCount,
+        totalCount,
+        currentStoryViewers: map.size,
+        uniqueKey: ukey
+      });
+    }
 
     // A3 - Fix follower/following mapping and dedupe
     viewers.forEach((raw, idx) => {
@@ -447,8 +499,27 @@
     // Apply DOM fallback for reactions
     mergeReactsFromDialogIntoMap(map);
 
-    mirrorToLocalStorageDebounced(key);
+    mirrorToLocalStorageDebounced(ukey);
   });
+
+  // v16.2-RC: Detect when user manually closes the viewer dialog
+  document.addEventListener('click', (e) => {
+    // Check if click is outside dialog (backdrop) or on close button
+    const dlg = document.querySelector('[role="dialog"][aria-modal="true"]');
+    if (!dlg) return;
+    
+    const isCloseBtn = e.target.closest('[aria-label*="Close"]');
+    const isBackdrop = e.target === dlg.parentElement;
+    const isOutside = !dlg.contains(e.target) && dlg.parentElement.contains(e.target);
+    
+    if (isCloseBtn || isBackdrop || isOutside) {
+      if (state.sentry.active) {
+        state.sentry.userClosed = true;
+        stopCountSentry();
+        if (DEBUG) console.log('[Storylister] User closed dialog, stopping auto-reopen');
+      }
+    }
+  }, true);
 
   // DOM observer (throttled), no auto-pause, first-story auto-open
   const onDOMChange = (() => {
