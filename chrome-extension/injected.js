@@ -3,6 +3,29 @@
   if (window.__storylisterInjected__) return;
   window.__storylisterInjected__ = true;
 
+  // Enhanced reaction extraction (v16.2-RC)
+  function extractReactionFromViewer(v){
+    // Consolidate different fields IG may use for story reactions.
+    const likeHeart =
+      v?.has_liked || v?.has_liked_reel || v?.viewer_has_liked ? "❤️" : null;
+    const emoji =
+      v?.emoji ||
+      v?.emoji_reaction ||
+      (v?.reaction && (v?.reaction.emoji || v?.reaction.text)) ||
+      v?.reaction_info?.emoji ||
+      (Array.isArray(v?.latest_reactions) && v?.latest_reactions[0] && (v?.latest_reactions[0].emoji || v?.latest_reactions[0].text)) ||
+      v?.latest_reaction?.reaction_emoji ||  // v16.1 field
+      v?.latest_reaction?.emoji ||            // v16.1 field
+      v?.reaction?.emoji ||                   // v16.1 field
+      v?.story_reaction?.emoji ||             // v16.1 field
+      likeHeart;
+    return {
+      reacted: !!emoji,
+      reactionEmoji: typeof emoji === 'string' ? emoji : null,
+      reaction: typeof emoji === 'string' ? emoji : null  // Keep backward compat
+    };
+  }
+
   // B - Unified normalize function with correct fields
   function normalizeViewer(v, idx) {
     const u = v?.user || v?.node?.user || v?.node || v;
@@ -15,14 +38,6 @@
     const fs = v?.friendship_status || u?.friendship_status || {};
     const youFollow  = !!(fs.following ?? u?.is_following ?? v?.is_following); // YOU -> THEM
     const isFollower = !!(fs.followed_by ?? u?.is_follower  ?? v?.is_follower); // THEM -> YOU
-
-    // Reactions on web: heart/like; newer shapes also carry latest_reaction.reaction_emoji
-    const reaction =
-      v?.latest_reaction?.reaction_emoji ||
-      v?.latest_reaction?.emoji ||
-      v?.reaction?.emoji ||
-      v?.story_reaction?.emoji ||
-      (v?.has_liked ? '❤️' : null);
 
     return {
       id: String(u?.id || u?.pk || u?.pk_id || u?.username || idx),
@@ -37,7 +52,7 @@
       followed_by_viewer: youFollow,
       follows_viewer: isFollower,
 
-      reaction: reaction || null,
+      ...extractReactionFromViewer(v),  // Add all reaction fields
       originalIndex: idx,
       viewedAt: v?.timestamp || v?.viewed_at || Date.now()
     };
@@ -69,15 +84,33 @@
         const pathId = location.pathname.match(/\/stories\/[^/]+\/(\d+)/)?.[1];
         const graphId = data?.media_id || data?.data?.media?.id || data?.data?.reel?.id;
         const mediaId = String(graphId || pathId || Date.now());
+        
+        // Extract owner username
+        const owner = 
+          data?.owner?.username || 
+          data?.reel_owner?.username || 
+          data?.user?.username ||
+          location.pathname.match(/\/stories\/([^/]+)/)?.[1] || 
+          null;
 
         const normalized = viewers.map(normalizeViewer);
+        const totalCount = data.user_count || data.total_viewer_count || data.count || normalized.length;
 
         window.postMessage({
+          source: 'STORYLISTER',
           type: 'STORYLISTER_VIEWERS_CHUNK',
           data: {
             mediaId,
+            ownerUsername: owner,
             viewers: normalized,
-            totalCount: data.user_count || data.total_viewer_count || normalized.length
+            totalCount,
+            debug: {
+              url: url,
+              rawCount: Array.isArray(viewers) ? viewers.length : 0,
+              normalizedCount: normalized.length,
+              totalReported: totalCount,
+              timestamp: Date.now()
+            }
           }
         }, '*');
       }).catch(() => {});
@@ -101,12 +134,34 @@
 
             const pathId = location.pathname.match(/\/stories\/[^/]+\/(\d+)/)?.[1];
             const mediaId = String(data.media_id || pathId || Date.now());
+            
+            // Extract owner username
+            const owner = 
+              data?.owner?.username || 
+              data?.reel_owner?.username || 
+              data?.user?.username ||
+              location.pathname.match(/\/stories\/([^/]+)/)?.[1] || 
+              null;
 
             const normalized = users.map(normalizeViewer);
+            const totalCount = data.user_count || data.total_viewer_count || data.count || normalized.length;
 
             window.postMessage({
+              source: 'STORYLISTER',
               type: 'STORYLISTER_VIEWERS_CHUNK',
-              data: { mediaId, viewers: normalized, totalCount: data.user_count || normalized.length }
+              data: { 
+                mediaId, 
+                ownerUsername: owner,
+                viewers: normalized, 
+                totalCount,
+                debug: {
+                  url: url,
+                  rawCount: Array.isArray(users) ? users.length : 0,
+                  normalizedCount: normalized.length,
+                  totalReported: totalCount,
+                  timestamp: Date.now()
+                }
+              }
             }, '*');
           } catch {}
         });
@@ -114,6 +169,9 @@
       return _send.apply(this, args);
     };
   }
-  // Dispatch ready signal so backend knows injection is complete
+  // Signal READY so content.js knows the interceptor is active.
+  window.postMessage({ source: "STORYLISTER", type: "STORYLISTER_READY" }, "*");
+  
+  // Also dispatch custom event for backward compat with content-backend.js
   try { document.dispatchEvent(new CustomEvent('storylister:injected_ready')); } catch {}
 })();
