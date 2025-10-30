@@ -1,0 +1,607 @@
+Got it—let’s treat v16.1 as a stability hardening release before any new features. Below is (1) a concise plan to make it bulletproof, (2) exact diffs you can review/approve, and (3) a tiny diagnostic you can run so I can verify reaction parsing against your account’s payloads.
+
+0) What’s broken (from your notes)
+
+
+Reacts not showing or filterable.
+Likely captured by the interceptor but never normalized, stored, or surfaced in the DOM/filter logic.
+
+
+Sometimes StoryLister didn’t appear after clicking your profile on first install.
+Root cause is timing/race: the interceptor wasn’t fully ready when Instagram loaded stories; we also shouldn’t “auto‑click” anything for compliance. We should mount when the viewer dialog opens and ensure the network hooks are ready before IG starts making requests.
+
+
+Counts higher than Instagram (critical).
+Two combined causes are common:
+
+
+Cross‑story contamination (same base key, different mediaId).
+
+
+Duplicate inserts of the same viewer in the same session.
+Count Sentry must never allow loaded > target. If it ever happens, we must hard‑reset the per‑story map and re-collect.
+
+
+
+
+Stories auto‑pause when you close the viewer list.
+Regression: Count Sentry was re‑opening the dialog after you closed it.
+
+
+
+1) Stability plan (what I’m doing in this patch)
+
+
+Reaction pipeline:
+
+
+Normalize reactions from all likely API shapes into viewer.reactionEmoji and viewer.reacted (boolean).
+
+
+Store as dataset attributes for filtering, render the emoji in the row.
+
+
+
+
+Robust per‑story scoping:
+
+
+Key storage by owner + mediaId (unique key), flush old keys that share the same base path on every story change so we never mix viewers.
+
+
+
+
+Strict Count Sentry (no auto‑reopen):
+
+
+Only scroll if the dialog is open.
+
+
+Stop immediately once loaded >= target.
+
+
+If ever loaded > target, clear that story map, log, and require a fresh capture (no stealth reopen).
+
+
+
+
+User-close aware:
+
+
+Detect user closing the dialog and stop Sentry so playback resumes. No auto-reopen.
+
+
+
+
+Ready‑handshake & early injection:
+
+
+Ensure injected.js is injected at document_start and signals READY before IG requests fire.
+
+
+Watch for the viewer dialog via a MutationObserver and mount the panel then. (We do not auto‑open stories.)
+
+
+
+
+Debug hooks:
+
+
+Lightweight structured logging from the interceptor to help confirm shapes (including a source, counts, timestamp).
+
+
+
+
+
+2) Exact diffs (minimal, additive, and reversible)
+
+Note: Line numbers will differ slightly; I’ve included surrounding context to make patching easy. These are self‑contained, safe changes. If you want, I can split them into separate PRs: “reactions”, “sentry+counts”, “ready+mount”, and “css”.
+
+A) chrome-extension/manifest.json — early injection + access
+diff --git a/chrome-extension/manifest.json b/chrome-extension/manifest.json
+@@
+ {
+   "manifest_version": 3,
+   "name": "Storylister",
+   "version": "16.2",
+@@
+   "host_permissions": [
+-    "https://www.instagram.com/*"
++    "https://www.instagram.com/*"
+   ],
+   "content_scripts": [
+     {
+       "matches": ["https://www.instagram.com/*"],
+-      "js": ["content.js"],
+-      "run_at": "document_idle"
++      "js": ["content.js"],
++      "run_at": "document_start"
+     }
+   ],
+   "web_accessible_resources": [
+     {
+-      "resources": ["injected.js"],
++      "resources": ["injected.js"],
+       "matches": ["https://www.instagram.com/*"]
+     }
+   ]
+ }
+
+
+B) chrome-extension/content.css — show reaction emoji unobtrusively
+diff --git a/chrome-extension/content.css b/chrome-extension/content.css
+@@
+ .storylister-viewer{position:relative;display:flex;align-items:center;padding:8px 12px;}
+ .storylister-username{font-weight:600;}
+ .storylister-fullname{opacity:.7;font-size:12px;}
++
++/* Reaction bubble shown at the right edge of each viewer row */
++.storylister-reaction{
++  position:absolute;
++  right:12px;
++  top:50%;
++  transform:translateY(-50%);
++  font-size:18px;
++  line-height:1;
++  pointer-events:none;
++}
+
+
+C) chrome-extension/injected.js — normalize reactions + debug envelope
+diff --git a/chrome-extension/injected.js b/chrome-extension/injected.js
+@@
+ (function(){
+   if (window.__storylister_injected) return;
+   window.__storylister_injected = true;
++  const DEBUG = !!window.STORYLISTER_DEBUG;
+
++  function extractReactionFromViewer(v){
++    // Normalize the many ways IG may encode a story reaction.
++    // We map to a single emoji char where possible, and a boolean reacted flag.
++    const likeHeart = v.has_liked || v.has_liked_reel || v.viewer_has_liked ? "❤️" : null;
++    const emoji =
++      v.emoji ||
++      v.emoji_reaction ||
++      (v.reaction && (v.reaction.emoji || v.reaction.text)) ||
++      (v.reaction_info && v.reaction_info.emoji) ||
++      (Array.isArray(v.latest_reactions) && v.latest_reactions[0] && (v.latest_reactions[0].emoji || v.latest_reactions[0].text)) ||
++      likeHeart;
++    return {
++      reacted: !!emoji,
++      reactionEmoji: typeof emoji === 'string' ? emoji : null
++    };
++  }
+
+   function normalizeViewer(v){
+     return {
+       id: v.pk || v.id || v.user_id || v.username,
+       username: v.username,
+       full_name: v.full_name || v.name || "",
+       is_verified: !!(v.is_verified || v.is_verified_badge),
+       profile_pic_url: v.profile_pic_url || v.profile_pic_url_hd || "",
+-      isFollower: !!(v.followed_by || v.is_followed || v.followed_by_viewer),
+-      youFollow: !!(v.following || v.is_following || v.follows_viewer)
++      isFollower: !!(v.followed_by || v.is_followed || v.followed_by_viewer),
++      youFollow: !!(v.following || v.is_following || v.follows_viewer),
++      ...extractReactionFromViewer(v)
+     };
+   }
+
+   function postChunk(payload){
+     window.postMessage({
+       source: "STORYLISTER",
+       type: "STORYLISTER_VIEWERS_CHUNK",
+       data: payload
+     }, "*");
+   }
+
+@@
+   // Patch fetch & XHR to capture viewer responses
+   const origFetch = window.fetch;
+   window.fetch = async function(input, init){
+     const res = await origFetch.apply(this, arguments);
+     try {
+       const url = (typeof input === 'string' ? input : input.url) || "";
+       if (/viewers|reel_viewer|reel_media_viewer|graphql/i.test(url)) {
+         const clone = res.clone();
+         clone.json().then(json => {
+           const data = json.data || json;
+           const mediaId =
+             data.media_id || data.reel?.id || data.reel?.media_id || data.media?.id ||
+             /stories\/[^/]+\/(\d+)/.exec(url)?.[1] || null;
+           const owner =
+             data.owner?.username || data.reel_owner?.username || data.user?.username || null;
+
+           const rawViewers = data.users || data.viewers || data.edges?.map(e => e.node) || [];
+           const normalized = rawViewers.map(normalizeViewer);
+           const total =
+             data.user_count || data.total_viewer_count || data.count ||
+             data.page_info?.total || normalized.length;
+
+           postChunk({
+             mediaId,
+             ownerUsername: owner,
+             viewers: normalized,
+             totalCount: total,
++            debug: DEBUG ? {
++              url,
++              rawCount: Array.isArray(rawViewers) ? rawViewers.length : 0,
++              normalizedCount: normalized.length,
++              totalReported: total,
++              timestamp: Date.now()
++            } : undefined
+           });
+         }).catch(()=>{});
+       }
+     } catch(e){}
+     return res;
+   };
+@@
+   // XHR patch similar treatment
+   const origOpen = XMLHttpRequest.prototype.open;
+   const origSend = XMLHttpRequest.prototype.send;
+   XMLHttpRequest.prototype.open = function(method, url){
+     this.__sl_url = url;
+     return origOpen.apply(this, arguments);
+   };
+   XMLHttpRequest.prototype.send = function(){
+     this.addEventListener('load', () => {
+       try {
+         const url = this.__sl_url || "";
+         if (/viewers|reel_viewer|reel_media_viewer|graphql/i.test(url)) {
+           const text = this.responseText;
+           try {
+             const json = JSON.parse(text);
+             const data = json.data || json;
+             const mediaId =
+               data.media_id || data.reel?.id || data.media?.id ||
+               /stories\/[^/]+\/(\d+)/.exec(url)?.[1] || null;
+             const owner =
+               data.owner?.username || data.reel_owner?.username || data.user?.username || null;
+
+             const rawViewers = data.users || data.viewers || data.edges?.map(e => e.node) || [];
+             const normalized = rawViewers.map(normalizeViewer);
+             const total =
+               data.user_count || data.total_viewer_count || data.count ||
+               data.page_info?.total || normalized.length;
+
+             postChunk({
+               mediaId,
+               ownerUsername: owner,
+               viewers: normalized,
+               totalCount: total,
++              debug: DEBUG ? {
++                url,
++                rawCount: Array.isArray(rawViewers) ? rawViewers.length : 0,
++                normalizedCount: normalized.length,
++                totalReported: total,
++                timestamp: Date.now()
++              } : undefined
+             });
+           } catch(e){}
+         }
+       } catch(e){}
+     });
+     return origSend.apply(this, arguments);
+   };
+
++  // Signal ready so content.js knows interception is active
++  window.postMessage({ source: "STORYLISTER", type: "STORYLISTER_READY" }, "*");
+ })();
+
+
+D) chrome-extension/content.js — early inject + mount when dialog opens
+diff --git a/chrome-extension/content.js b/chrome-extension/content.js
+@@
+ (function(){
+-  if (window.__storylister_content) return;
+-  window.__storylister_content = true;
++  if (window.__storylister_content) return;
++  window.__storylister_content = true;
++  const DEBUG = !!window.STORYLISTER_DEBUG;
+
++  // Ensure injected.js runs in the page (MAIN world) at document_start
++  try {
++    const s = document.createElement('script');
++    s.src = chrome.runtime.getURL('injected.js');
++    s.dataset.storylister = '1';
++    (document.head || document.documentElement).appendChild(s);
++    s.remove();
++  } catch(e){}
+
++  let interceptorReady = false;
++  window.addEventListener('message', (ev) => {
++    if (!ev || !ev.data || ev.data.source !== 'STORYLISTER') return;
++    if (ev.data.type === 'STORYLISTER_READY') {
++      interceptorReady = true;
++      if (DEBUG) console.log('[Storylister] Interceptor ready');
++    }
++  });
+
+   // Mount StoryLister UI when the "Viewers" dialog opens
++  const dialogObserver = new MutationObserver(() => {
++    const dlg = document.querySelector('[role="dialog"][aria-modal="true"]');
++    if (!dlg) return;
++    // Lazy init panel once per dialog open
++    if (!document.querySelector('#storylister-panel-root')) {
++      if (DEBUG) console.log('[Storylister] Mounting panel on dialog open');
++      // existing function in your codebase that injects panel UI:
++      try { window.storylisterMount && window.storylisterMount(); } catch(e){}
++    }
++  });
++  dialogObserver.observe(document.documentElement, { childList:true, subtree:true });
+ })();
+
+
+Note: If your repo exposes a different entry for mounting the panel, replace window.storylisterMount() with the actual initializer you use today (e.g., createPanel()).
+
+
+E) chrome-extension/content-backend.js — reactions, strict scoping, fixed Count Sentry
+diff --git a/chrome-extension/content-backend.js b/chrome-extension/content-backend.js
+@@
+-const state = { viewerStore:new Map(), idToKey:new Map(), sentry:{active:false,timer:null} };
++const state = {
++  viewerStore: new Map(),     // key -> Map(viewerId -> viewer)
++  idToKey: new Map(),         // mediaId -> storyKey
++  sentry: { active:false, userClosed:false, timer:null },
++  lastStoryKey: null
++};
++const DEBUG = !!window.STORYLISTER_DEBUG;
+
++function storyKey(ownerUsername, mediaId){
++  const owner = (ownerUsername || '').toLowerCase() || 'unknown';
++  const mid = String(mediaId || 'unknown');
++  return `stories:${owner}:${mid}`;
++}
++
++function baseKeyPrefix(ownerUsername){
++  const owner = (ownerUsername || '').toLowerCase() || 'unknown';
++  return `stories:${owner}:`;
++}
+
+ // receive chunks from injected.js
+ window.addEventListener('message', (ev)=>{
+   if (!ev || !ev.data || ev.data.source !== 'STORYLISTER') return;
+   const msg = ev.data;
+   if (msg.type !== 'STORYLISTER_VIEWERS_CHUNK') return;
+
+-  const { mediaId, viewers, totalCount } = msg.data || {};
+-  if (!mediaId || !Array.isArray(viewers)) return;
++  const { mediaId, ownerUsername, viewers, totalCount, debug } = msg.data || {};
++  if (!mediaId || !Array.isArray(viewers)) return;
+
+-  const key = getStorageKey(); // existing base key like /stories/{owner}/
+-  if (!state.idToKey.has(mediaId)) state.idToKey.set(mediaId, key);
+-  if (!state.viewerStore.has(key)) state.viewerStore.set(key, new Map());
+-  const map = state.viewerStore.get(key);
++  const ukey = storyKey(ownerUsername, mediaId);
++  // On story change, clear any keys with the same base (prevents cross-story accumulation)
++  if (state.lastStoryKey && state.lastStoryKey !== ukey) {
++    const prefix = baseKeyPrefix(ownerUsername);
++    for (const k of [...state.viewerStore.keys()]) {
++      if (k.startsWith(prefix) && k !== ukey) state.viewerStore.delete(k);
++    }
++  }
++  state.lastStoryKey = ukey;
++  state.idToKey.set(mediaId, ukey);
++  if (!state.viewerStore.has(ukey)) state.viewerStore.set(ukey, new Map());
++  const map = state.viewerStore.get(ukey);
+
+   // de-dupe by viewer id
+-  viewers.forEach(v => map.set(v.id, v));
++  viewers.forEach(v => map.set(v.id, v));
+
++  const loaded = map.size;
++  if (typeof totalCount === 'number' && loaded > totalCount) {
++    console.warn('[Storylister] Count overflow detected, clearing and requiring fresh capture', {loaded, totalCount});
++    map.clear();
++    return;
++  }
+
++  if (DEBUG && debug) {
++    console.log('[Storylister Debug]', {
++      key: ukey,
++      mediaId,
++      loaded,
++      totalCount,
++      ...debug
++    });
++  }
+
+   // re-render list for this story
+-  renderViewers(map); // existing function
++  renderViewers(map); // existing function
+ }, true);
+
+@@
+-function startCountSentry(){
+-  stopCountSentry();
+-  state.sentry.active = true;
+-  state.sentry.timer = setInterval(()=>{
+-    if (!state.sentry.active) return;
+-    const target = getSeenByCount();
+-    const map = state.viewerStore.get(getStorageKey());
+-    const loaded = map ? map.size : 0;
+-    if (target && loaded >= target - 1) { stopCountSentry(); return; }
+-    const dlg = document.querySelector('[role="dialog"][aria-modal="true"]');
+-    if (!dlg) {
+-      const btn = findSeenByButton();
+-      if (btn) try{ btn.click(); }catch(e){}
+-      return;
+-    }
+-    const scroller = findScrollableInDialog();
+-    if (scroller) scroller.scrollTop = scroller.scrollHeight;
+-  }, 1200);
+-}
++function startCountSentry(){
++  stopCountSentry();
++  state.sentry.active = true;
++  state.sentry.userClosed = false;
++  state.sentry.timer = setInterval(()=>{
++    if (!state.sentry.active) return;
++    const target = getSeenByCount();         // IG-reported count
++    const currentKey = state.lastStoryKey;
++    const map = currentKey ? state.viewerStore.get(currentKey) : null;
++    const loaded = map ? map.size : 0;
++
++    // Hard stop: never exceed IG count; never continue past parity
++    if (typeof target === 'number' && loaded >= target) {
++      stopCountSentry();
++      return;
++    }
++
++    // Only help by scrolling when the dialog is open. Never auto-reopen.
++    const dlg = document.querySelector('[role="dialog"][aria-modal="true"]');
++    if (!dlg) {
++      // If user closed the dialog or dialog isn't present, do nothing.
++      if (state.sentry.userClosed) stopCountSentry();
++      return;
++    }
++    const scroller = findScrollableInDialog();
++    if (scroller) scroller.scrollTop = scroller.scrollHeight;
++  }, 1200);
++}
+ 
+ function stopCountSentry(){
+   state.sentry.active = false;
+   if (state.sentry.timer) clearInterval(state.sentry.timer);
+   state.sentry.timer = null;
+ }
+ 
++// Detect closing of the viewer dialog and stop sentry to avoid auto-pausing stories
++document.addEventListener('click', (e)=>{
++  const dlg = document.querySelector('[role="dialog"][aria-modal="true"]');
++  if (!dlg) return;
++  const closeBtn = e.target.closest('[aria-label*="Close"]');
++  const outside = !dlg.contains(e.target);
++  if (closeBtn || outside) {
++    if (state.sentry.active) {
++      state.sentry.userClosed = true;
++      stopCountSentry();
++      console.log('[Storylister] User closed viewer dialog; stopping Count Sentry');
++    }
++  }
++}, true);
++
+@@
+ // renderViewers(map) – augment row HTML with reaction emoji + filter hooks
+ function renderViewers(map){
+   const list = document.querySelector('#storylister-viewer-list');
+   if (!list) return;
+   list.innerHTML = '';
+   for (const v of map.values()){
+     const el = document.createElement('div');
+     el.className = 'storylister-viewer';
+     el.dataset.username = (v.username || '').toLowerCase();
+     el.dataset.follower = v.isFollower ? '1' : '0';
+     el.dataset.following = v.youFollow ? '1' : '0';
+     el.dataset.verified = v.is_verified ? '1' : '0';
++    el.dataset.reacted = v.reacted ? '1' : '0';
+     el.innerHTML = `
+       <img src="${v.profile_pic_url || ''}" alt="${v.username || ''}" width="36" height="36" />
+       <div class="storylister-viewer-info">
+         <span class="storylister-username">${v.username || ''}${v.is_verified ? ' ✓' : ''}</span>
+         <span class="storylister-fullname">${v.full_name || ''}</span>
+       </div>
++      ${v.reacted && v.reactionEmoji ? `<span class="storylister-reaction">${v.reactionEmoji}</span>` : ``}
+     `;
+     list.appendChild(el);
+   }
+   applyFilters();
+ }
+ 
+ // applyFilters() – ensure "Reacts" button filters by data-reacted
+ function applyFilters(){
+   const filter = state.ui?.activeFilter || 'all';
+   const rows = document.querySelectorAll('.storylister-viewer');
+   rows.forEach(row=>{
+     const isFollower = row.dataset.follower === '1';
+     const isFollowing = row.dataset.following === '1';
+     const isVerified = row.dataset.verified === '1';
++    const reacted = row.dataset.reacted === '1';
+     let show = true;
+     switch (filter){
+       case 'followers': show = isFollower; break;
+       case 'following': show = isFollowing; break;
+       case 'nonfollowers': show = !isFollower; break;
+       case 'verified': show = isVerified; break;
++      case 'reacts': show = reacted; break;
+       default: show = true;
+     }
+     row.style.display = show ? '' : 'none';
+   });
+ }
+
+
+3) Why the auto‑pause regression came back (and how this fixes it)
+In 16.1, Count Sentry reopened the viewer dialog whenever it wasn’t present:
+if (!dlg) {
+  const btn = findSeenByButton();
+  if (btn) btn.click();   // <— this reintroduced the pause
+  return;
+}
+
+This patch removes auto‑reopen entirely. Sentry only scrolls if the dialog is open, stops when parity is reached, and stops immediately if the user closes the dialog—so stories play normally when you click away.
+
+4) Quick manual QA checklist (use on your next run)
+
+
+First visit to your profile → click your story ring → open “Seen by” → panel mounts; check console for [Storylister] Interceptor ready.
+
+
+Let it run until the bottom (Count Sentry scrolling). Confirm:
+
+
+Loaded never exceeds IG’s count.
+
+
+If you close the dialog mid‑way, Sentry stops and playback resumes.
+
+
+
+
+Reacts tab filters down to just users with a reaction; emoji is visible in each row.
+
+
+Click to another story → ensure the previous story’s viewers are not mixed in.
+
+
+Refresh the page and revisit the same story → counts match exactly (no inflation).
+
+
+
+5) Is your console paste helpful?
+It’s useful to confirm we’re on the profile route & using Polaris/IGDS components, but for reactions I need the actual viewer payload shapes. Here’s a tiny, safe snippet you can run on the Viewers dialog to capture a sample of what the interceptor is seeing:
+// Paste in DevTools Console while the "Viewers" dialog is open
+(function(){
+  window.__sl_samples = [];
+  window.addEventListener('message', (ev)=>{
+    if (!ev?.data || ev.data.source !== 'STORYLISTER') return;
+    if (ev.data.type !== 'STORYLISTER_VIEWERS_CHUNK') return;
+    const { mediaId, ownerUsername, viewers, totalCount, debug } = ev.data.data || {};
+    if (!mediaId) return;
+    // store only the first 5 viewers of each chunk for review
+    window.__sl_samples.push({
+      mediaId, ownerUsername, totalCount, debug,
+      sample: (viewers || []).slice(0, 5)
+    });
+  }, true);
+  console.log('Storylister: sampling active. Interact with the viewer list, then run __sl_samples');
+})();
+
+Then run __sl_samples and share one entry (you can redact usernames). I’ll confirm the exact reaction fields and, if needed, extend the normalizer (the patch already checks several common shapes).
+
+6) Optional cleanups (can be separate PRs)
+
+
+Shadow DOM mount for the panel to isolate from Instagram’s CSS.
+
+
+Virtualized list for 10k+ viewers.
+
+
+Unit tests for the extractReactionFromViewer normalizer (pure function).
+
+
+
+If you approve, I’ll label this as v16.2 – Stability and wire in any repo‑specific initializer names you use for mounting the panel.
