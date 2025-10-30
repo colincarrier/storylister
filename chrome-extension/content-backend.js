@@ -1,20 +1,5 @@
-// --- Storylister: early inject to catch first story viewers request ---
-(() => {
-  try {
-    if (location.pathname.startsWith('/stories/') &&
-        !document.querySelector('script[data-sl-injected="1"]') &&
-        chrome?.runtime?.getURL) {
-      const s = document.createElement('script');
-      s.src = chrome.runtime.getURL('injected.js');
-      s.dataset.slInjected = '1';
-      s.onload = () => s.remove();
-      (document.head || document.documentElement).appendChild(s);
-    }
-  } catch {}
-})();
-
 // content-backend.js
-// v15.5 - Complete surgical patches from ChatGPT
+// v16.3 - Key unification fix
 (() => {
   'use strict';
   
@@ -22,14 +7,14 @@
 
   const state = {
     injected: false,
-    currentKey: null,              // stable: location.pathname
+    currentKey: null,              // last active unique key (stories:owner:mediaId)
     openedForKey: new Set(),       // auto-open once per key
     stopPagination: null,          // cancel paginator
     viewerStore: new Map(),        // Map<storyKey, Map<viewerKey, viewer>>
     mirrorTimer: null,
     idToKey: new Map(),            // Map<mediaId -> storyKey> (prevents misrouting)
     sentry: { timer: null, active: false, userClosed: false },
-    mediaForKey: new Map(),        // tracks mediaId per pathname
+    mediaForKey: new Map(),        // tracks mediaId per story
     lastStoryKey: null             // track last unique story key
   };
 
@@ -89,16 +74,16 @@
       }
       
       const target = getSeenByCount();
-      const map = state.viewerStore.get(getStorageKey());
+      const currentKey = state.lastStoryKey || state.currentKey;
+      const map = currentKey ? state.viewerStore.get(currentKey) : null;
       const loaded = map ? map.size : 0;
 
-      // v16.2-RC: CRITICAL - Never allow loaded > target
+      // v16.3: CRITICAL - Never allow loaded > target
       if (target && loaded >= target) {
         // If we somehow have MORE viewers than Instagram reports, clear and reload
         if (loaded > target) {
           console.error(`[Storylister] Count overflow detected: ${loaded} > ${target}, clearing...`);
-          const key = getStorageKey();
-          state.viewerStore.set(key, new Map());
+          if (currentKey) state.viewerStore.set(currentKey, new Map());
           // Don't auto-reopen, just stop
           stopCountSentry();
           return;
@@ -109,7 +94,7 @@
 
       const dlg = document.querySelector('[role="dialog"][aria-modal="true"]');
       if (!dlg) {
-        // v16.2-RC: Don't reopen if we've loaded enough (>80% of target)
+        // v16.3: Don't reopen if we've loaded enough (>80% of target)
         if (loaded > 0 && target && loaded >= target * 0.8) {
           stopCountSentry();
         }
@@ -344,9 +329,10 @@
       if (Date.now() - t0 > maxMs) return;
 
       const target = getSeenByCount();
-      const map = state.viewerStore.get(getStorageKey());
+      const currentKey = state.lastStoryKey || state.currentKey;
+      const map = currentKey ? state.viewerStore.get(currentKey) : null;
       const loaded = map ? map.size : 0;
-      if (target && loaded >= target - 1) return; // allow ±1
+      if (target && loaded >= target) return;
 
       scroller.scrollTop = scroller.scrollHeight;
       const nearBottom = scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 10;
@@ -357,9 +343,9 @@
   }
 
   // Auto-open viewers — first story safe
-  async function autoOpenViewersOnceFor(key) {
+  async function autoOpenViewersOnceFor(ukey) {
     if (!Settings.cache.autoOpen) return;
-    if (state.openedForKey.has(key)) return;
+    if (state.openedForKey.has(ukey)) return;
 
     await ensureInjected();
     await waitForInjectedReady();  // Critical: wait for hooks before clicking
@@ -367,7 +353,7 @@
     const btn = await waitForSeenByButton(5000);
     if (!btn) return;
 
-    state.openedForKey.add(key);
+    state.openedForKey.add(ukey);
     try { btn.click(); } catch {}
     
     setTimeout(() => {
@@ -377,9 +363,9 @@
         state.stopPagination = startPagination(scroller, 15000); // longer on first story
         startCountSentry(); // keep nudging until target reached
       }
-      // Add DOM reaction fallback after dialog opens
-      setTimeout(() => mergeReactsFromDialogIntoMap(state.viewerStore.get(key)), 600);
-      setTimeout(() => mergeReactsFromDialogIntoMap(state.viewerStore.get(key)), 2000);
+      // Add DOM reaction fallback after dialog opens (pass story key, not Map)
+      setTimeout(() => mergeReactsFromDialogIntoMap(ukey), 600);
+      setTimeout(() => mergeReactsFromDialogIntoMap(ukey), 2000);
     }, 300);
   }
 
@@ -496,10 +482,23 @@
       map.set(viewerKey, { ...prev, ...v });
     });
 
-    // Apply DOM fallback for reactions
-    mergeReactsFromDialogIntoMap(map);
+    // Re-check overflow after insert
+    const loadedAfter = map.size;
+    if (typeof totalCount === 'number' && loadedAfter > totalCount) {
+      console.error(`[Storylister] Critical overflow after insert: ${loadedAfter} > ${totalCount}; resetting ${ukey}`);
+      map.clear();
+      stopCountSentry();
+      return;
+    }
+
+    // Apply DOM fallback for reactions (correct argument = story key)
+    mergeReactsFromDialogIntoMap(ukey);
 
     mirrorToLocalStorageDebounced(ukey);
+
+    // Announce active story key to the UI so it reads the same store key
+    state.currentKey = state.lastStoryKey = ukey;
+    window.dispatchEvent(new CustomEvent('storylister:active_media', { detail: { storyId: ukey } }));
   });
 
   // v16.2-RC: Detect when user manually closes the viewer dialog
@@ -536,24 +535,26 @@
       window.dispatchEvent(new CustomEvent('storylister:show_panel'));
       ensureInjected();
 
-      const key = canonicalKey();              // canonical key with mediaId
-      const mediaId = getMediaIdFromDOM();     // tighter story identity
+      const mediaId = getMediaIdFromDOM();              // media id if present
+      const owner = getStoryOwnerFromURL() || 'unknown';
+      const ukey = storyKey(owner, mediaId || 'unknown');
 
-      if (key !== lastKey || (mediaId && mediaId !== lastMediaId)) {
+      if (ukey !== lastKey || (mediaId && mediaId !== lastMediaId)) {
         // story changed
         if (state.stopPagination) state.stopPagination();
 
-        // Clear viewer map when story changes
-        if (key !== lastKey) {
-          state.viewerStore.set(key, new Map());
-        }
+        // Clear viewer map for this unique story to avoid carryover
+        state.viewerStore.set(ukey, new Map());
 
-        lastKey = state.currentKey = key;
+        lastKey = state.currentKey = state.lastStoryKey = ukey;
         lastMediaId = mediaId;
 
-        // When story (mediaId) changes under the same path, allow re-open
-        state.openedForKey.delete(key);
-        autoOpenViewersOnceFor(key);
+        // When story changes, allow re-open once
+        state.openedForKey.delete(ukey);
+        autoOpenViewersOnceFor(ukey);
+
+        // Announce active key so UI reads the correct bucket
+        window.dispatchEvent(new CustomEvent('storylister:active_media', { detail: { storyId: ukey } }));
       }
     };
   })();
@@ -574,7 +575,7 @@
 
   // When the panel opens, mark current as seen so NEW badges clear
   window.addEventListener('storylister:panel_opened', () => {
-    markAllSeenForKey(location.pathname);
+    if (state.lastStoryKey) markAllSeenForKey(state.lastStoryKey);
   });
 
   // Initialize
