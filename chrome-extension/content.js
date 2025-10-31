@@ -141,10 +141,10 @@
   
   const storage = new HybridStorage();
   
-  // Helper to derive the store key from current path
+  // Helper to derive the store key from current path or active media
   function slStoreKey() {
-    // Always use the pathname
-    return location.pathname;
+    // Prefer active media ID from backend, fall back to pathname
+    return ACTIVE_MEDIA_ID_FROM_BACKEND || location.pathname;
   }
 
   // Load cache map for current story

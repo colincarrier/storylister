@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Storylister",
-  "version": "16.3",
+  "version": "16.3.1",
   "description": "Story viewer insights.",
   "permissions": ["storage"],
   "host_permissions": [

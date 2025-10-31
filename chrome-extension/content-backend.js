@@ -18,7 +18,7 @@
     lastStoryKey: null             // track last unique story key
   };
 
-  // v16.2-RC: Unique story key generation
+  // v16.3: Unique story key generation
   function storyKey(ownerUsername, mediaId){
     const owner = (ownerUsername || '').toLowerCase() || 'unknown';
     const mid = String(mediaId || 'unknown');
@@ -114,8 +114,11 @@
              .some(el => /^Seen by\s+\d[\d,]*$/i.test((el.textContent || '').trim()));
   }
 
-  // Stable key + "Seen by" utilities
-  function getStorageKey() { return location.pathname; }   // works with and without numeric id
+  // Legacy key function - DEPRECATED, kept for backwards compatibility only
+  function getStorageKey() { 
+    console.warn('[Storylister] getStorageKey() is deprecated, use unique story keys instead');
+    return location.pathname; 
+  }
 
   // A2 - Robust mediaId resolution
   function getMediaIdFromPath() {
@@ -215,8 +218,9 @@
     return null; // unknown (we'll fall back to pathname as key)
   }
 
-  // Canonical per‑story key (prefer mediaId for stable caching)
+  // Canonical per‑story key - DEPRECATED, use storyKey() instead
   function canonicalKey() {
+    console.warn('[Storylister] canonicalKey() is deprecated, use storyKey() instead');
     const owner = getStoryOwnerFromURL() || 'unknown';
     const mid = getMediaIdFromDOM();
     return mid ? `/stories/${owner}/${mid}/` : location.pathname;
@@ -422,7 +426,7 @@
     const { mediaId, ownerUsername, viewers, totalCount, debug } = msg.data || {};
     if (!mediaId || !Array.isArray(viewers)) return;
     
-    // v16.2-RC: Use unique story keys to prevent cross-story contamination
+    // v16.3: Use unique story keys to prevent cross-story contamination
     const ukey = storyKey(ownerUsername, mediaId);
     
     // On story change, clear any other keys with the same owner prefix
@@ -440,7 +444,7 @@
     if (!state.viewerStore.has(ukey)) state.viewerStore.set(ukey, new Map());
     const map = state.viewerStore.get(ukey);
     
-    // v16.2-RC: Count overflow protection
+    // v16.3: Count overflow protection
     const loaded = map.size;
     if (typeof totalCount === 'number' && loaded > totalCount) {
       console.error(`[Storylister] Critical overflow: ${loaded} > ${totalCount}; resetting ${ukey}`);
@@ -501,7 +505,7 @@
     window.dispatchEvent(new CustomEvent('storylister:active_media', { detail: { storyId: ukey } }));
   });
 
-  // v16.2-RC: Detect when user manually closes the viewer dialog
+  // v16.3: Detect when user manually closes the viewer dialog
   document.addEventListener('click', (e) => {
     // Check if click is outside dialog (backdrop) or on close button
     const dlg = document.querySelector('[role="dialog"][aria-modal="true"]');
