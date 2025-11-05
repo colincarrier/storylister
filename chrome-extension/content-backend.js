@@ -452,34 +452,44 @@
   // Mirror (debounced), per pathname + mediaId aliases
   function mirrorToLocalStorageDebounced(key) {
     if (state.mirrorTimer) return;
-    state.mirrorTimer = setTimeout(() => {
+    state.mirrorTimer = setTimeout(async () => {
       state.mirrorTimer = null;
 
       const map = state.viewerStore.get(key);
       if (!map || map.size === 0) return;
 
-      const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
-      const existing = store[key] || {};
-      const existingMap = new Map(existing.viewers || []);
+      // 1) Persist bulk rows to IndexedDB
+      try { await IDB.putViewers(key, map); } catch {}
 
-      // preserve firstSeenAt; and keep the larger set (monotone)
-      const merged = new Map(existingMap);
-      for (const [vk, v] of map.entries()) {
-        const old = existingMap.get(vk);
-        merged.set(vk, { ...v, firstSeenAt: old?.firstSeenAt || v.firstSeenAt || Date.now() });
+      // 2) Keep a tiny per‑story index in localStorage
+      try {
+        const index = JSON.parse(localStorage.getItem('panel_story_index') || '{}');
+        const prev  = index[key] || {};
+        index[key] = {
+          mediaId: getMediaIdFromDOM() || prev.mediaId || null,
+          count: map.size,
+          fetchedAt: Date.now(),
+          lastSeenAt: prev.lastSeenAt || 0
+        };
+        localStorage.setItem('panel_story_index', JSON.stringify(index));
+      } catch (e) {
+        try { localStorage.removeItem('panel_story_index'); } catch {}
       }
 
-      // monotone: only replace if not shrinking
-      const finalEntries = merged.size >= (existingMap.size || 0) ? merged : existingMap;
+      // 3) Maintain a tiny legacy shell to avoid old code crashing (no viewer arrays)
+      try {
+        const shell = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+        const existing = shell[key] || {};
+        shell[key] = {
+          mediaId: getMediaIdFromDOM() || existing.mediaId || null,
+          viewers: [],                 // keep empty to stay tiny
+          fetchedAt: Date.now(),
+          lastSeenAt: existing.lastSeenAt || 0
+        };
+        localStorage.setItem('panel_story_store', JSON.stringify(shell));
+      } catch {}
 
-      store[key] = {
-        mediaId: getMediaIdFromDOM() || existing.mediaId || null,
-        viewers: Array.from(finalEntries.entries()),
-        fetchedAt: Date.now(),
-        ackAt: existing.ackAt || 0 // used for "NEW" badges
-      };
-
-      localStorage.setItem('panel_story_store', JSON.stringify(store));
+      // 4) Let UI refresh
       window.dispatchEvent(new CustomEvent('storylister:data_updated', { detail: { storyId: key } }));
     }, 250);
   }
