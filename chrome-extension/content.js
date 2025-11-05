@@ -1247,7 +1247,7 @@
     window.dispatchEvent(new CustomEvent('storylister:panel_opened'));
     
     // Load viewers
-    loadViewersFromStorage();
+    await loadViewersFromStorage();
     updateViewerList();
   }
   
@@ -1432,21 +1432,21 @@
   }
   
   // Listen for active media announcements from backend
-  window.addEventListener('storylister:active_media', (e) => {
+  window.addEventListener('storylister:active_media', async (e) => {
     ACTIVE_MEDIA_ID_FROM_BACKEND = e.detail?.storyId || null;
     // force a refresh now that we know the correct key
     if (typeof loadViewersFromStorage === 'function') {
-      loadViewersFromStorage();
+      await loadViewersFromStorage();
       updateViewerList();
     }
   });
 
   // Listen for data updates
-  window.addEventListener('storylister:data_updated', (e) => {
+  window.addEventListener('storylister:data_updated', async (e) => {
     // console.log('[Storylister] Data updated:', e.detail);
     const currentKey = slStoreKey();
     if (e.detail?.storyId === currentKey) {
-      renderViewersFromCache();
+      await loadViewersFromStorage();
     }
   });
   
@@ -1846,10 +1846,10 @@
     }
   });
   // Hook the backend's broadcast
-  window.addEventListener('storylister:data_updated', (e) => {
+  window.addEventListener('storylister:data_updated', async (e) => {
     const key = e.detail?.storyId;
     if (key !== slStoreKey()) return;   // only refresh when this story updated
-    loadViewersFromStorage();
+    await loadViewersFromStorage();
   });
   
   // Helper to get story ID from URL (same as backend)
