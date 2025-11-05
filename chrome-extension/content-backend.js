@@ -645,6 +645,8 @@
 
         // Clear viewer map for this unique story to avoid carryover
         state.viewerStore.set(ukey, new Map());
+        // Best effort: clear any old persisted rows for this story key
+        try { IDB.clearStory(ukey); } catch {}
 
         lastKey = state.currentKey = state.lastStoryKey = ukey;
         lastMediaId = mediaId;
