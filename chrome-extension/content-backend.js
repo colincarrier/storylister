@@ -2,7 +2,18 @@
 // v16.3 - Key unification fix
 (() => {
   'use strict';
-  
+
+  // --- Emergency cleanup of oversized legacy keys (prevents QuotaExceededError) ---
+  try {
+    ['panel_story_store', 'panel_stories_cache', 'panel_story_index'].forEach(k => {
+      const v = localStorage.getItem(k);
+      if (v && v.length > 500000) { // ~500 KB
+        console.warn(`[Storylister] Removing oversized ${k} (${v.length} bytes)`);
+        localStorage.removeItem(k);
+      }
+    });
+  } catch {}
+
   const DEBUG = false;
 
   const state = {
@@ -17,6 +28,71 @@
     mediaForKey: new Map(),        // tracks mediaId per story
     lastStoryKey: null             // track last unique story key
   };
+
+  // --- Minimal IDB helper for viewer rows ---
+  const IDB = {
+    db: null,
+    initPromise: null,
+    init() {
+      if (this.initPromise) return this.initPromise;
+      this.initPromise = new Promise(resolve => {
+        const req = indexedDB.open('storylister_data', 1);
+        req.onupgradeneeded = (e) => {
+          const db = e.target.result;
+          if (!db.objectStoreNames.contains('viewers')) {
+            const st = db.createObjectStore('viewers', { keyPath: 'compositeId' });
+            st.createIndex('storyId', 'storyId', { unique: false });
+            st.createIndex('username', 'username', { unique: false });
+          }
+        };
+        req.onsuccess = () => { this.db = req.result; resolve(); };
+        req.onerror  = () => { console.warn('[Storylister] IDB unavailable:', req.error); resolve(); };
+      });
+      return this.initPromise;
+    },
+    async clearStory(storyId) {
+      await this.init();
+      if (!this.db) return;
+      return new Promise(resolve => {
+        const tx = this.db.transaction(['viewers'], 'readwrite');
+        const store = tx.objectStore('viewers');
+        const idx = store.index('storyId');
+        const req = idx.getAllKeys(storyId);
+        req.onsuccess = () => {
+          const keys = req.result || [];
+          keys.forEach(k => { try { store.delete(k); } catch {} });
+        };
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+      });
+    },
+    async putViewers(storyId, entriesMap) {
+      await this.init();
+      if (!this.db) return;
+      return new Promise(resolve => {
+        const tx = this.db.transaction(['viewers'], 'readwrite');
+        const store = tx.objectStore('viewers');
+        // Batch writes inside a single transaction (no per-row await)
+        for (const [vk, v] of entriesMap.entries()) {
+          const username = (v?.username || v?.id || vk || '').toString();
+          if (!username) continue;
+          try {
+            store.put({
+              ...v,
+              compositeId: `${storyId}_${username}`,
+              storyId,
+              username,
+              timestamp: v?.viewedAt || Date.now()
+            });
+          } catch {}
+        }
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => { console.warn('[Storylister] IDB put failed:', tx.error); resolve(); };
+      });
+    }
+  };
+  // Kick IDB init immediately; don't block the page
+  IDB.init().catch(()=>{});
 
   // v16.3: Unique story key generation
   function storyKey(ownerUsername, mediaId){
