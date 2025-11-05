@@ -496,10 +496,20 @@
   
   // Mark all viewers as seen for a story
   function markAllSeenForKey(key) {
-    const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
-    if (!store[key]) return;
-    store[key].lastSeenAt = Date.now();
-    localStorage.setItem('panel_story_store', JSON.stringify(store));
+    try {
+      const idx = JSON.parse(localStorage.getItem('panel_story_index') || '{}');
+      if (!idx[key]) idx[key] = {};
+      idx[key].lastSeenAt = Date.now();
+      localStorage.setItem('panel_story_index', JSON.stringify(idx));
+    } catch {}
+    // legacy shell (best effort)
+    try {
+      const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+      if (store[key]) {
+        store[key].lastSeenAt = Date.now();
+        localStorage.setItem('panel_story_store', JSON.stringify(store));
+      }
+    } catch {}
     window.dispatchEvent(new CustomEvent('storylister:data_updated', { detail: { storyId: key } }));
   }
 
