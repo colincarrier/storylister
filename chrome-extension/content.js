@@ -1868,12 +1868,6 @@
     const m = location.pathname.match(/\/stories\/([^/]+)/);
     return m ? m[1] : null;
   }
-  
-  function slStoreKey() {
-    // Must match content-backend.js
-    return location.pathname;
-  }
-  
   // Ensure button handlers work (delegation for dynamic elements)
   // Make Manage Tags / Insights modals closeable
   document.addEventListener('click', (e) => {
