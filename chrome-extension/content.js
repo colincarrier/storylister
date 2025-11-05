@@ -561,20 +561,34 @@
   };
   
   // Load viewers from localStorage under the active story key
-  function loadViewersFromStorage() {
+  async function loadViewersFromStorage() {
     const currentKey = ACTIVE_MEDIA_ID_FROM_BACKEND || slStoreKey();
     if (!currentKey) return;
     
-    const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
-    const data = store[currentKey];
-    if (!data?.viewers) return;
-
-    // Get the lastSeenAt timestamp for this story
-    const lastSeenAt = data?.lastSeenAt || 0;
+    // Get lastSeenAt from the index
+    let lastSeenAt = 0;
+    try {
+      const index = JSON.parse(localStorage.getItem('panel_story_index') || '{}');
+      lastSeenAt = index[currentKey]?.lastSeenAt || 0;
+    } catch {}
+    
+    const viewersList = await storage.getViewers(currentKey);
+    if (!viewersList || viewersList.length === 0) return;
 
     viewers.clear();
-    // Each entry is [viewerKey, viewerObj] from backend's dedup
-    data.viewers.forEach(([_, v], i) => {
+    
+    // Handle both formats: IDB rows or localStorage tuples
+    viewersList.forEach((item, i) => {
+      let v;
+      
+      if (Array.isArray(item)) {
+        // Legacy localStorage format: [key, viewer]
+        v = item[1];
+      } else {
+        // IDB row format
+        v = item;
+      }
+      
       const viewerKey = v.username || v.id || v.pk;
       viewers.set(viewerKey, {
         id: v.id || v.pk || v.username,
