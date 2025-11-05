@@ -107,18 +107,7 @@
     }
     
     async getViewers(storyId) {
-      // Try localStorage first (fast)
-      try {
-        const sessionData = localStorage.getItem('panel_story_store');
-        if (sessionData) {
-          const parsed = JSON.parse(sessionData);
-          if (parsed[storyId]?.viewers) {
-            return parsed[storyId].viewers;
-          }
-        }
-      } catch (e) {}
-      
-      // Fall back to IndexedDB
+      // Try IDB first
       if (this.db) {
         try {
           await this.initPromise;
@@ -126,14 +115,28 @@
           const index = tx.objectStore('viewers').index('storyId');
           const request = index.getAll(storyId);
           
-          return new Promise(resolve => {
+          const rows = await new Promise(resolve => {
             request.onsuccess = () => resolve(request.result || []);
             request.onerror = () => resolve([]);
           });
+          
+          // Return IDB rows directly - loadViewersFromStorage handles both formats
+          return rows;
         } catch (e) {
-          return [];
+          console.warn('[Storylister] IDB read failed:', e);
         }
       }
+      
+      // Legacy localStorage fallback
+      try {
+        const store = localStorage.getItem('panel_story_store');
+        if (store) {
+          const parsed = JSON.parse(store);
+          if (parsed[storyId]?.viewers) {
+            return parsed[storyId].viewers;
+          }
+        }
+      } catch {}
       
       return [];
     }
