@@ -1,0 +1,556 @@
+You're right to press on this—two *separate* problems are biting v16.2/16.3 right now:
+
+1. **localStorage overflow** is throwing `QuotaExceededError`, which halts our data pipeline. The backend is still writing huge viewer arrays to `panel_story_store`. 
+2. **Key mismatch in the UI** means the panel often looks under the wrong key, so even when chunks arrive they don’t render (“Waiting for viewers…”). In your current UI, there are **two** `slStoreKey()` implementations and two `storylister:active_media` listeners—the later ones override the correct behavior. 
+
+Below are **surgical, copy‑paste diffs** that (a) move bulk data to IndexedDB, (b) keep a tiny localStorage index only, (c) unify the active story key wiring so the UI reads the same key the backend writes, and (d) preserve the no‑auto‑pause behavior and proper count sentry.
+
+---
+
+## ✅ What we’re changing, at a glance
+
+* **Backend (content‑backend.js)**
+
+  * Add **emergency cleanup** of oversized legacy keys on load.
+  * Add a small **IDB writer** (single transaction, no per‑row awaits).
+  * **Mirror** now writes viewers to IDB, and keeps a **tiny** localStorage index (`panel_story_index`) + a very small legacy shell under `panel_story_store` (empty `viewers: []`) to avoid breaking older code.
+  * Wrap all `localStorage.setItem` in **try/catch** so the UI never hangs again.
+  * When a new story activates, **clear IDB rows** for that story key (prevents carryover).
+  * **Mark‑as‑seen** writes to `panel_story_index` (and legacy shell for compatibility).
+
+* **UI (content.js)**
+
+  * Remove the **duplicate `slStoreKey()`** and **duplicate `active_media` listener**.
+  * Make `loadViewersFromStorage()` **async** and read from **IndexedDB first**, then fallback to legacy localStorage.
+  * When backend broadcasts `storylister:data_updated`, **reload from HybridStorage**, not from the old cache function.
+
+* **manifest.json**
+
+  * Bump version to `16.4.0`.
+
+These changes incorporate Claude’s concerns (IDB init race, batching), keep the v16.1/16.3 media‑ID detection and Count Sentry, and make the pipeline bulletproof.
+
+---
+
+## 1) `content-backend.js` — storage + pipeline hardening
+
+> File: **content-backend.js** (your v16.3 file with unique story keys). 
+
+### 1A. Add emergency cleanup and an IndexedDB helper (near the top)
+
+**Find** the IIFE opening:
+
+```js
+(() => {
+  'use strict';
+```
+
+**Replace it with** (paste this whole block once):
+
+```diff
+(() => {
+  'use strict';
+
++ // --- Emergency cleanup of oversized legacy keys (prevents QuotaExceededError) ---
++ try {
++   ['panel_story_store', 'panel_stories_cache', 'panel_story_index'].forEach(k => {
++     const v = localStorage.getItem(k);
++     if (v && v.length > 500000) { // ~500 KB
++       console.warn(`[Storylister] Removing oversized ${k} (${v.length} bytes)`);
++       localStorage.removeItem(k);
++     }
++   });
++ } catch {}
+
+  const DEBUG = false;
+
+  const state = {
+    injected: false,
+    currentKey: null,              // last active unique key (stories:owner:mediaId)
+    openedForKey: new Set(),       // auto-open once per key
+    stopPagination: null,          // cancel paginator
+    viewerStore: new Map(),        // Map<storyKey, Map<viewerKey, viewer>>
+    mirrorTimer: null,
+    idToKey: new Map(),            // Map<mediaId -> storyKey> (prevents misrouting)
+    sentry: { timer: null, active: false, userClosed: false },
+    mediaForKey: new Map(),        // tracks mediaId per story
+    lastStoryKey: null             // track last unique story key
+  };
+
++ // --- Minimal IDB helper for viewer rows ---
++ const IDB = {
++   db: null,
++   initPromise: null,
++   init() {
++     if (this.initPromise) return this.initPromise;
++     this.initPromise = new Promise(resolve => {
++       const req = indexedDB.open('storylister_data', 1);
++       req.onupgradeneeded = (e) => {
++         const db = e.target.result;
++         if (!db.objectStoreNames.contains('viewers')) {
++           const st = db.createObjectStore('viewers', { keyPath: 'compositeId' });
++           st.createIndex('storyId', 'storyId', { unique: false });
++           st.createIndex('username', 'username', { unique: false });
++         }
++       };
++       req.onsuccess = () => { this.db = req.result; resolve(); };
++       req.onerror  = () => { console.warn('[Storylister] IDB unavailable:', req.error); resolve(); };
++     });
++     return this.initPromise;
++   },
++   async clearStory(storyId) {
++     await this.init();
++     if (!this.db) return;
++     return new Promise(resolve => {
++       const tx = this.db.transaction(['viewers'], 'readwrite');
++       const store = tx.objectStore('viewers');
++       const idx = store.index('storyId');
++       const req = idx.getAllKeys(storyId);
++       req.onsuccess = () => {
++         const keys = req.result || [];
++         keys.forEach(k => { try { store.delete(k); } catch {} });
++       };
++       tx.oncomplete = () => resolve();
++       tx.onerror = () => resolve();
++     });
++   },
++   async putViewers(storyId, entriesMap) {
++     await this.init();
++     if (!this.db) return;
++     return new Promise(resolve => {
++       const tx = this.db.transaction(['viewers'], 'readwrite');
++       const store = tx.objectStore('viewers');
++       // Batch writes inside a single transaction (no per-row await)
++       for (const [vk, v] of entriesMap.entries()) {
++         const username = (v?.username || v?.id || vk || '').toString();
++         if (!username) continue;
++         try {
++           store.put({
++             ...v,
++             compositeId: `${storyId}_${username}`,
++             storyId,
++             username,
++             timestamp: v?.viewedAt || Date.now()
++           });
++         } catch {}
++       }
++       tx.oncomplete = () => resolve();
++       tx.onerror = () => { console.warn('[Storylister] IDB put failed:', tx.error); resolve(); };
++     });
++   }
++ };
++ // Kick IDB init immediately; don't block the page
++ IDB.init().catch(()=>{});
+```
+
+### 1B. Replace the mirror function to use IDB + tiny index
+
+**Find** the entire function **`mirrorToLocalStorageDebounced(key)`** and **replace it fully** with:
+
+```diff
+  // Mirror (debounced), per pathname + mediaId aliases
+-  function mirrorToLocalStorageDebounced(key) {
+-    if (state.mirrorTimer) return;
+-    state.mirrorTimer = setTimeout(() => {
+-      state.mirrorTimer = null;
+-
+-      const map = state.viewerStore.get(key);
+-      if (!map || map.size === 0) return;
+-
+-      const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+-      const existing = store[key] || {};
+-      const existingMap = new Map(existing.viewers || []);
+-
+-      // preserve firstSeenAt; and keep the larger set (monotone)
+-      const merged = new Map(existingMap);
+-      for (const [vk, v] of map.entries()) {
+-        const old = existingMap.get(vk);
+-        merged.set(vk, { ...v, firstSeenAt: old?.firstSeenAt || v.firstSeenAt || Date.now() });
+-      }
+-
+-      // monotone: only replace if not shrinking
+-      const finalEntries = merged.size >= (existingMap.size || 0) ? merged : existingMap;
+-
+-      store[key] = {
+-        mediaId: getMediaIdFromDOM() || existing.mediaId || null,
+-        viewers: Array.from(finalEntries.entries()),
+-        fetchedAt: Date.now(),
+-        ackAt: existing.ackAt || 0 // used for "NEW" badges
+-      };
+-
+-      localStorage.setItem('panel_story_store', JSON.stringify(store));
+-      window.dispatchEvent(new CustomEvent('storylister:data_updated', { detail: { storyId: key } }));
+-    }, 250);
+-  }
++  function mirrorToLocalStorageDebounced(key) {
++    if (state.mirrorTimer) return;
++    state.mirrorTimer = setTimeout(async () => {
++      state.mirrorTimer = null;
++
++      const map = state.viewerStore.get(key);
++      if (!map || map.size === 0) return;
++
++      // 1) Persist bulk rows to IndexedDB
++      try { await IDB.putViewers(key, map); } catch {}
++
++      // 2) Keep a tiny per‑story index in localStorage
++      try {
++        const index = JSON.parse(localStorage.getItem('panel_story_index') || '{}');
++        const prev  = index[key] || {};
++        index[key] = {
++          mediaId: getMediaIdFromDOM() || prev.mediaId || null,
++          count: map.size,
++          fetchedAt: Date.now(),
++          lastSeenAt: prev.lastSeenAt || 0
++        };
++        localStorage.setItem('panel_story_index', JSON.stringify(index));
++      } catch (e) {
++        try { localStorage.removeItem('panel_story_index'); } catch {}
++      }
++
++      // 3) Maintain a tiny legacy shell to avoid old code crashing (no viewer arrays)
++      try {
++        const shell = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
++        const existing = shell[key] || {};
++        shell[key] = {
++          mediaId: getMediaIdFromDOM() || existing.mediaId || null,
++          viewers: [],                 // keep empty to stay tiny
++          fetchedAt: Date.now(),
++          lastSeenAt: existing.lastSeenAt || 0
++        };
++        localStorage.setItem('panel_story_store', JSON.stringify(shell));
++      } catch {}
++
++      // 4) Let UI refresh
++      window.dispatchEvent(new CustomEvent('storylister:data_updated', { detail: { storyId: key } }));
++    }, 250);
++  }
+```
+
+### 1C. Update “mark as seen” to write to the new index
+
+**Find** `markAllSeenForKey(key)` and **replace** with:
+
+```diff
+  // Mark all viewers as seen for a story
+  function markAllSeenForKey(key) {
+-    const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+-    if (!store[key]) return;
+-    store[key].lastSeenAt = Date.now();
+-    localStorage.setItem('panel_story_store', JSON.stringify(store));
++    try {
++      const idx = JSON.parse(localStorage.getItem('panel_story_index') || '{}');
++      if (!idx[key]) idx[key] = {};
++      idx[key].lastSeenAt = Date.now();
++      localStorage.setItem('panel_story_index', JSON.stringify(idx));
++    } catch {}
++    // legacy shell (best effort)
++    try {
++      const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
++      if (store[key]) {
++        store[key].lastSeenAt = Date.now();
++        localStorage.setItem('panel_story_store', JSON.stringify(store));
++      }
++    } catch {}
+     window.dispatchEvent(new CustomEvent('storylister:data_updated', { detail: { storyId: key } }));
+  }
+```
+
+### 1D. On story change, clear any prior IDB rows for the new key
+
+Inside the `onDOMChange` closure, **find**:
+
+```js
+const mediaId = getMediaIdFromDOM();              // media id if present
+const owner = getStoryOwnerFromURL() || 'unknown';
+const ukey = storyKey(owner, mediaId || 'unknown');
+
+if (ukey !== lastKey || (mediaId && mediaId !== lastMediaId)) {
+  // story changed
+  if (state.stopPagination) state.stopPagination();
+
+  // Clear viewer map for this unique story to avoid carryover
+  state.viewerStore.set(ukey, new Map());
+
+  lastKey = state.currentKey = state.lastStoryKey = ukey;
+  lastMediaId = mediaId;
+```
+
+**Add** the IDB clearing right after we set the new Map:
+
+```diff
+   // Clear viewer map for this unique story to avoid carryover
+   state.viewerStore.set(ukey, new Map());
++  // Best effort: clear any old persisted rows for this story key
++  try { IDB.clearStory(ukey); } catch {}
+```
+
+### 1E. Count sentry is already conservative
+
+Your v16.3 sentry already **never allows overflow** and doesn’t reopen the dialog once you’ve closed it or if we’re ≥80% of target. Keep that; it’s correct. 
+
+---
+
+## 2) `content.js` — fix key wiring + read from IDB
+
+> File: **content.js** (UI layer). The current file contains a duplicate `slStoreKey()` and a second `storylister:active_media` handler that reloads legacy localStorage and overrides the correct behavior, which blocks data from appearing. 
+
+### 2A. Keep only **one** `slStoreKey()` (the one that prefers the backend key)
+
+**Find** the helper near the top:
+
+```js
+// Helper to derive the store key from current path or active media
+function slStoreKey() {
+  // Prefer active media ID from backend, fall back to pathname
+  return ACTIVE_MEDIA_ID_FROM_BACKEND || location.pathname;
+}
+```
+
+**Keep this**.
+**Scroll near the bottom** and **delete** the duplicate function:
+
+```diff
+-  function slStoreKey() {
+-    // Must match content-backend.js
+-    return location.pathname;
+-  }
+```
+
+### 2B. Remove the **duplicate** `storylister:active_media` listener at the bottom
+
+Delete this whole block (it reloads only from legacy localStorage and fights the correct path):
+
+```diff
+-  // Listen for story change events to reset the panel
+-  window.addEventListener('storylister:active_media', async (e) => {
+-    const key = e.detail?.storyId || location.pathname;
+-    // Reset viewer list and counts
+-    viewers.clear();
+-    // Reload tags for new story owner (DON'T clear tags!)
+-    await loadTaggedUsers();
+-    updateViewerList();
+-    
+-    // Load data from cache if available
+-    const activeKey = ACTIVE_MEDIA_ID_FROM_BACKEND || key;
+-    const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+-    const data = store[activeKey];
+-    if (data?.viewers) {
+-      // Rebuild viewers from cache
+-      data.viewers.forEach(([k, v]) => {
+-        viewers.set(k, v);
+-      });
+-      updateViewerList();
+-    }
+-  });
+```
+
+The **other** `storylister:active_media` listener near the top is correct—it sets `ACTIVE_MEDIA_ID_FROM_BACKEND` and calls the loader. Keep it. 
+
+### 2C. Make `loadViewersFromStorage()` async and read IDB first
+
+**Find** `function loadViewersFromStorage() { ... }` and **replace it** with:
+
+```diff
+-  function loadViewersFromStorage() {
+-    const currentKey = ACTIVE_MEDIA_ID_FROM_BACKEND || slStoreKey();
+-    if (!currentKey) return;
+-    
+-    const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
+-    const data = store[currentKey];
+-    if (!data?.viewers) return;
+-
+-    // Get the lastSeenAt timestamp for this story
+-    const lastSeenAt = data?.lastSeenAt || 0;
+-
+-    viewers.clear();
+-    // Each entry is [viewerKey, viewerObj] from backend's dedup
+-    data.viewers.forEach(([_, v], i) => {
+-      const viewerKey = v.username || v.id || v.pk;
+-      viewers.set(viewerKey, {
+-        id: v.id || v.pk || v.username,
+-        username: v.username || '',
+-        displayName: v.full_name || v.displayName || v.username || 'Anonymous',
+-        profilePic: v.profile_pic_url || v.profilePic || '',
+-        isVerified: !!v.is_verified,
+-
+-        // They follow you / You follow them (consistent with injected.js)
+-        isFollower: !!(v.isFollower ?? v.follows_viewer),     // THEM -> YOU
+-        youFollow:  !!(v.youFollow ?? v.followed_by_viewer),  // YOU -> THEM
+-
+-        reaction: v.reaction || null,
+-        reacted: !!v.reaction,
+-
+-        viewedAt: v.viewedAt || v.timestamp || Date.now(),
+-        originalIndex: Number.isFinite(v.originalIndex) ? v.originalIndex : i,
+-        isTagged: taggedUsers.has(v.username || v.id),
+-        firstSeenAt: v.firstSeenAt || Date.now(),
+-        
+-        // Mark as new if viewer appeared after last time we opened panel
+-        isNew: (v.firstSeenAt || v.viewedAt || 0) > lastSeenAt
+-      });
+-    });
+-    
+-    updateViewerList();
+-  }
++  async function loadViewersFromStorage() {
++    const currentKey = slStoreKey();
++    if (!currentKey) return;
++
++    // Prefer IndexedDB (backend writes bulk rows there)
++    let rows = [];
++    try { rows = await storage.getViewers(currentKey); } catch {}
++
++    // Obtain lastSeenAt from the new tiny index; fallback to legacy shell
++    let lastSeenAt = 0;
++    try {
++      const idx = JSON.parse(localStorage.getItem('panel_story_index') || '{}');
++      lastSeenAt = idx[currentKey]?.lastSeenAt || 0;
++    } catch {}
++    if (!lastSeenAt) {
++      try {
++        const legacy = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
++        lastSeenAt = legacy[currentKey]?.lastSeenAt || 0;
++      } catch {}
++    }
++
++    viewers.clear();
++
++    if (rows && rows.length) {
++      // IDB returns array of viewer objects (or pairs, depending on source)
++      rows.forEach((item, i) => {
++        const v = Array.isArray(item) ? item[1] : item;
++        const key = v.username || v.id || `idx_${i}`;
++        viewers.set(key, {
++          id: v.id || v.pk || v.username,
++          username: v.username || '',
++          displayName: v.full_name || v.displayName || v.username || 'Anonymous',
++          profilePic: v.profile_pic_url || v.profilePic || '',
++          isVerified: !!v.is_verified,
++          isFollower: !!(v.isFollower ?? v.follows_viewer),
++          youFollow:  !!(v.youFollow  ?? v.followed_by_viewer),
++          reaction: v.reaction || null,
++          reacted: !!v.reaction,
++          viewedAt: v.viewedAt || v.timestamp || Date.now(),
++          originalIndex: Number.isFinite(v.originalIndex) ? v.originalIndex : i,
++          isTagged: taggedUsers.has(v.username || v.id),
++          firstSeenAt: v.firstSeenAt || Date.now(),
++          isNew: (v.firstSeenAt || v.viewedAt || 0) > lastSeenAt
++        });
++      });
++      updateViewerList();
++      return;
++    }
++
++    // Fallback to legacy localStorage shape if IDB empty
++    try {
++      const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
++      const data = store[currentKey];
++      if (data?.viewers && Array.isArray(data.viewers)) {
++        data.viewers.forEach(([_, v], i) => {
++          const key = v.username || v.id || `idx_${i}`;
++          viewers.set(key, {
++            id: v.id || v.pk || v.username,
++            username: v.username || '',
++            displayName: v.full_name || v.displayName || v.username || 'Anonymous',
++            profilePic: v.profile_pic_url || v.profilePic || '',
++            isVerified: !!v.is_verified,
++            isFollower: !!(v.isFollower ?? v.follows_viewer),
++            youFollow:  !!(v.youFollow  ?? v.followed_by_viewer),
++            reaction: v.reaction || null,
++            reacted: !!v.reaction,
++            viewedAt: v.viewedAt || v.timestamp || Date.now(),
++            originalIndex: Number.isFinite(v.originalIndex) ? v.originalIndex : i,
++            isTagged: taggedUsers.has(v.username || v.id),
++            firstSeenAt: v.firstSeenAt || Date.now(),
++            isNew: (v.firstSeenAt || v.viewedAt || 0) > lastSeenAt
++          });
++        });
++        updateViewerList();
++      }
++    } catch {}
++  }
+```
+
+### 2D. When backend publishes updates, reload via the new loader
+
+**Find**:
+
+```js
+window.addEventListener('storylister:data_updated', (e) => {
+  const currentKey = slStoreKey();
+  if (e.detail?.storyId === currentKey) {
+    renderViewersFromCache();
+  }
+});
+```
+
+**Replace** with:
+
+```diff
+window.addEventListener('storylister:data_updated', (e) => {
+  const currentKey = slStoreKey();
+  if (e.detail?.storyId === currentKey) {
+-   renderViewersFromCache();
++   // Read from IndexedDB (fallback to legacy if needed)
++   loadViewersFromStorage();
+  }
+});
+```
+
+> (Everything else in content.js stays. Your `HybridStorage` is fine for reads and matches the IDB layout we write.) 
+
+---
+
+## 3) `manifest.json` — version bump
+
+**manifest.json** (take the newer one and bump version): 
+
+```diff
+-  "version": "16.3.1",
++  "version": "16.4.0",
+```
+
+(Keep `run_at: "document_start"` for both content scripts; that part is correct.) 
+
+---
+
+## Why this fixes the issues you’re seeing
+
+* The **spinning IG dialog** + **no data in panel** came from repeated `QuotaExceededError` on `localStorage.setItem('panel_story_store', huge_json)` in the backend mirror. Each throw aborts our code path. Moving bulk data to IDB and guarding every write stops the cascade. 
+* The **panel showing zero** even while viewers are visible in IG was also caused by the **duplicate `slStoreKey()`** and a **second active_media listener** that ignored the backend’s unique story key and tried to reload from legacy localStorage only. Removing those restores the single source of truth handshake and lets the UI read the correct bucket immediately. 
+* Count Sentry continues to **never exceed** IG’s reported count; if we ever see overflow, we reset and stop, preventing “higher than Instagram” numbers. (You already have this guard in v16.3.) 
+* Reacts still populate from the network payloads (our interceptor covers multiple fields including `latest_reaction.reaction_emoji` and `story_reaction.emoji`) and the **DOM fallback** will attach a ❤️ when the API omits it.  
+
+---
+
+## Sanity checklist (do this once after patch)
+
+1. **In DevTools, clear legacy bloat (one time):**
+
+   ```js
+   localStorage.removeItem('panel_story_store');
+   localStorage.removeItem('panel_stories_cache');
+   localStorage.removeItem('panel_story_index');
+   indexedDB.deleteDatabase('storylister_data'); // optional if you want a fresh test
+   ```
+2. Reload Instagram, open **your** story, open the viewer dialog once.
+3. Watch the panel:
+
+   * Counts fill steadily, panel count **≤** “Seen by X”.
+   * Switch to next story → panel resets, new counts start (no carry‑over).
+   * Close dialog: story playback continues (no auto‑reopen/auto‑pause).
+4. Inspect **Application → IndexedDB → storylister_data → viewers** to confirm rows exist per `storyId`.
+
+---
+
+## Notes / answers to Claude’s review
+
+* **Race on IDB init**: fixed. All writes `await IDB.init()` internally, and we batch within one transaction. (No per‑row awaits.)
+* **Async loop perf**: handled by writing within a single `readwrite` transaction and letting `tx.oncomplete` resolve—equivalent to Promise.all batching with less overhead.
+* **HybridStorage.getViewers**: Your existing UI reader is compatible; we ensured we write the same fields the UI expects and added a tiny index for `lastSeenAt`.
+* **Key unification**: The only `slStoreKey()` now prefers the backend’s broadcast key; the duplicate one is removed.
+
+---
+
+If you want, I can also refactor the **Insights** modal to aggregate from `panel_story_index` + IDB (instead of legacy `panel_story_store`) so it scales to 50k+ rows without touching localStorage. But for the critical path—**reliable capture and display**—the diffs above are the whole fix set.
