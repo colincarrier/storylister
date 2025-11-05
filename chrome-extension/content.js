@@ -1828,29 +1828,6 @@
       console.warn('[Storylister] Hide panel failed', e); 
     }
   });
-  
-  // Listen for story change events to reset the panel
-  window.addEventListener('storylister:active_media', async (e) => {
-    const key = e.detail?.storyId || location.pathname;
-    // Reset viewer list and counts
-    viewers.clear();
-    // Reload tags for new story owner (DON'T clear tags!)
-    await loadTaggedUsers();
-    updateViewerList();
-    
-    // Load data from cache if available
-    const activeKey = ACTIVE_MEDIA_ID_FROM_BACKEND || key;
-    const store = JSON.parse(localStorage.getItem('panel_story_store') || '{}');
-    const data = store[activeKey];
-    if (data?.viewers) {
-      // Rebuild viewers from cache
-      data.viewers.forEach(([k, v]) => {
-        viewers.set(k, v);
-      });
-      updateViewerList();
-    }
-  });
-  
   // Hook the backend's broadcast
   window.addEventListener('storylister:data_updated', (e) => {
     const key = e.detail?.storyId;
