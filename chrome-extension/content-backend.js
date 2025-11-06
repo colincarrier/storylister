@@ -228,6 +228,16 @@
   function getMediaIdFromDOM() {
     const owner = getStoryOwnerFromURL();
 
+    // 0) First-story fallback: sometimes the first story path has no id; scan anchors
+    if (owner && !/\/stories\/[^/]+\/\d{8,}/.test(location.pathname)) {
+      const anchors = document.querySelectorAll(`a[href*="/stories/${owner}/"]`);
+      for (const a of anchors) {
+        const href = a.getAttribute('href') || '';
+        const m = href.match(/\/stories\/[^/]+\/(\d{8,})/);
+        if (m) return m[1];
+      }
+    }
+
     // 1) URL path (fastest)
     {
       const m = location.pathname.match(/\/stories\/[^/]+\/(\d{15,20})/);
@@ -373,7 +383,7 @@
 
     const rows = dlg.querySelectorAll('[role="button"], [role="link"], a[href^="/"]');
     rows.forEach(row => {
-      // Look for the exact heart signature and common variants
+      // Exact IG heart signature + variants you provided
       const hasHeart = !!(
         row.querySelector('svg[aria-label="Liked"] path[d^="M34.6 3.1"]') ||
         row.querySelector('svg[aria-label*="Liked"] path[d^="M34.6"]') ||
@@ -382,7 +392,7 @@
       );
       if (!hasHeart) return;
 
-      // Resolve username from profile link in this row
+      // Resolve username strictly from profile link element in the row
       const link = row.querySelector('a[href^="/"][href$="/"]:not([href="/"])');
       const username = link?.getAttribute('href')?.replace(/^\/|\/$/g,'') || '';
       if (!username) return;
@@ -566,7 +576,7 @@
       });
     }
 
-    // A3 - Fix follower/following mapping, dedupe, and stamp first-time "NEW"
+    // A3 - Normalize + dedupe + stamp NEW once
     viewers.forEach((raw, idx) => {
       const v = { ...raw };
 
@@ -584,13 +594,18 @@
       const viewerKey = (v.username ? String(v.username).toLowerCase() : null) || String(v.id || idx);
       const prev = map.get(viewerKey);
       if (!prev) {
-        // first time we've ever seen this user for this story
+        // First time we've ever seen this user for THIS story
         v.firstSeenAt = v.viewedAt || Date.now();
-        v.isNew = true;                       // one-time NEW badge
+        v.isNew = true; // one-time NEW
         map.set(viewerKey, v);
       } else {
-        // merge without re-registering as NEW
-        map.set(viewerKey, { ...prev, ...v, isNew: prev.isNew === true ? true : false, firstSeenAt: prev.firstSeenAt || v.firstSeenAt });
+        // Merge without re-registering as NEW or losing firstSeenAt
+        map.set(viewerKey, {
+          ...prev,
+          ...v,
+          isNew: prev.isNew === true,
+          firstSeenAt: prev.firstSeenAt || v.firstSeenAt
+        });
       }
     });
 
