@@ -310,7 +310,7 @@
   flex: 1 1 auto;
   overflow-y: auto;
   min-height: 0; /* allows flex child to shrink */
-  padding: 8px 16px;
+  padding: 8px 12px; /* match header/button rail */
   background: #fafafa;
 }
 
@@ -318,7 +318,7 @@
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 8px;
+  padding: 8px 4px; /* reduce left padding so avatars line up */
   border-radius: 6px;
   cursor: pointer;
   transition: background-color 0.2s;
