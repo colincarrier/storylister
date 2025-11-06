@@ -597,3 +597,17 @@
   object-fit: cover !important;
   display: block !important;
 }
+
+
+.viewer-reaction {
+  margin-left: 6px;
+  font-size: 14px;
+}
+
+.viewer-new-animation {
+  animation: sl-pop 300ms ease-out;
+}
+@keyframes sl-pop {
+  0% { transform: scale(0.98); background: #f1f5ff; }
+  100% { transform: none; background: transparent; }
+}
