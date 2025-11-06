@@ -659,7 +659,9 @@
   }
   
   // Update viewer list UI
-  function updateViewerList() {
+  // fullRefresh = true → clear & rebuild (filters/sort)
+  // fullRefresh = false → incremental (data updates)
+  function updateViewerList(fullRefresh = false) {
     const listElement = document.getElementById('sl-list');
     if (!listElement) return;
     
@@ -714,6 +716,16 @@
       return;
     }
 
+    // Full rebuild path (filters/sort changed)
+    if (fullRefresh) {
+      listElement.innerHTML = '';
+      const frag = document.createDocumentFragment();
+      filteredViewers.forEach(v => frag.appendChild(buildViewerRow(v)));
+      listElement.appendChild(frag);
+      return;
+    }
+
+    // Incremental path: only add new rows; patch hearts on existing
     // Build a set of existing usernames in DOM
     const existing = new Set(
       Array.from(listElement.querySelectorAll('.storylister-viewer-username'))
@@ -725,57 +737,54 @@
     filteredViewers.forEach(viewer => {
       const uname = slSafe(viewer.username);
       const rowEl = listElement.querySelector(`.storylister-viewer-username[data-username="${uname}"]`);
-
       if (!existing.has(uname)) {
-        const viewerEl = document.createElement('div');
-        viewerEl.className = 'storylister-viewer-item';
-        const reactionHtml = viewer.reaction ? `<span class="viewer-reaction">${viewer.reaction}</span>` : '';
-        const newBadge = viewer.isNew ? '<span class="viewer-new-badge">NEW</span>' : '';
-        viewerEl.innerHTML = `
-          <a href="https://www.instagram.com/${uname}/" target="_blank" rel="noopener noreferrer" class="storylister-viewer-avatar" data-username="${uname}">
-            ${slAvatarHTML(viewer.profilePic, uname)}
-          </a>
-          <div class="storylister-viewer-info">
-            <div class="storylister-viewer-username" data-username="${uname}">
-              <a href="https://www.instagram.com/${uname}/" target="_blank" rel="noopener noreferrer" class="sl-username">${uname}</a>
-              ${viewer.isVerified ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="#1877F2" style="display: inline; vertical-align: middle; margin-left: 4px;"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>' : ''}
-              ${reactionHtml}
-              ${newBadge}
-            </div>
-            <div class="storylister-viewer-meta">
-              ${viewer.displayName} · ${formatTimeAgo(viewer.viewedAt)}
-            </div>
-          </div>
-          <div class="storylister-viewer-tags">
-            ${!isProMode ? `
-              <button class="storylister-tag ${viewer.isTagged ? 'active' : ''}" data-username="${uname}">
-                👀
-              </button>
-            ` : `
-              <select class="storylister-tag-dropdown" data-username="${uname}">
-                <option value="">No tag</option>
-                ${customTags.map(tag => 
-                  `<option value="${tag.id}" ${viewer.isTagged ? 'selected' : ''}>${tag.emoji} ${tag.label}</option>`
-                ).join('')}
-              </select>
-            `}
-          </div>
-        `;
-        viewerEl.classList.add('viewer-new-animation');
-        // we prepend newest at top
-        frag.appendChild(viewerEl);
+        const el = buildViewerRow(viewer);
+        el.classList.add('viewer-new-animation');
+        frag.appendChild(el);
       } else if (viewer.reaction && rowEl && !rowEl.querySelector('.viewer-reaction')) {
-        // Patch a heart on an existing row if it appeared later
         const span = document.createElement('span');
         span.className = 'viewer-reaction';
         span.textContent = viewer.reaction;
         rowEl.appendChild(span);
       }
     });
-    if (frag.childNodes.length) {
-      // Prepend in one go
-      listElement.prepend(frag);
-    }
+    if (frag.childNodes.length) listElement.prepend(frag);
+  }
+
+  // Build a single viewer row (shared by both paths)
+  function buildViewerRow(viewer) {
+    const uname = slSafe(viewer.username);
+    const el = document.createElement('div');
+    el.className = 'storylister-viewer-item';
+    const reactionHtml = viewer.reaction ? `<span class="viewer-reaction">${viewer.reaction}</span>` : '';
+    const newBadge = viewer.isNew ? '<span class="viewer-new-badge">NEW</span>' : '';
+    el.innerHTML = `
+      <a href="https://www.instagram.com/${uname}/" target="_blank" rel="noopener noreferrer" class="storylister-viewer-avatar" data-username="${uname}">
+        ${slAvatarHTML(viewer.profilePic, uname)}
+      </a>
+      <div class="storylister-viewer-info">
+        <div class="storylister-viewer-username" data-username="${uname}">
+          <a href="https://www.instagram.com/${uname}/" target="_blank" rel="noopener noreferrer" class="sl-username">${uname}</a>
+          ${viewer.isVerified ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="#1877F2" style="display:inline;vertical-align:middle;margin-left:4px;"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>' : ''}
+          ${reactionHtml}
+          ${newBadge}
+        </div>
+        <div class="storylister-viewer-meta">
+          ${viewer.displayName} · ${formatTimeAgo(viewer.viewedAt)}
+        </div>
+      </div>
+      <div class="storylister-viewer-tags">
+        ${!isProMode ? `
+          <button class="storylister-tag ${viewer.isTagged ? 'active' : ''}" data-username="${uname}">👀</button>
+        ` : `
+          <select class="storylister-tag-dropdown" data-username="${uname}">
+            <option value="">No tag</option>
+            ${customTags.map(tag => `<option value="${tag.id}" ${viewer.isTagged ? 'selected' : ''}>${tag.emoji} ${tag.label}</option>`).join('')}
+          </select>
+        `}
+      </div>
+    `;
+    return el;
   }
   
   // Create the right rail UI
@@ -1298,14 +1307,11 @@
     // Close button
     document.getElementById('sl-close')?.addEventListener('click', hideRightRail);
     
-    // Force refresh (hard re-sync)
+    // Force refresh (non-destructive)
     document.getElementById('sl-refresh')?.addEventListener('click', async () => {
-      try {
-        viewers.clear();
-        await loadTaggedUsers();
-        updateViewerList();
-        await DataSyncManager.performSync();
-      } catch {}
+      await loadTaggedUsers();
+      await DataSyncManager.performSync();
+      updateViewerList(true); // force a full rebuild once after sync
     });
     
     // Settings toggle
@@ -1330,7 +1336,7 @@
       isProMode = !isProMode;
       e.target.textContent = isProMode ? 'Pro' : 'Free';
       e.target.classList.toggle('pro', isProMode);
-      updateViewerList();
+      updateViewerList(true); // full rebuild for Pro mode change
     });
     
     // Search - stop propagation to prevent interference
@@ -1357,7 +1363,7 @@
         
         e.currentTarget.classList.add('active');
         currentFilters.type = filterType;
-        updateViewerList();
+        updateViewerList(true); // full rebuild on filter change
       });
     });
     
@@ -1365,14 +1371,14 @@
     document.querySelector('[data-filter-tagged]')?.addEventListener('click', (e) => {
       currentFilters.showTagged = !currentFilters.showTagged;
       e.currentTarget.classList.toggle('active', currentFilters.showTagged);
-      updateViewerList();
+      updateViewerList(true); // full rebuild for tagged toggle
     });
 
     // Reacts filter
     document.querySelector('[data-filter-reacts]')?.addEventListener('click', (e) => {
       currentFilters.showReacts = !currentFilters.showReacts;
       e.currentTarget.classList.toggle('active', currentFilters.showReacts);
-      updateViewerList();
+      updateViewerList(true); // full rebuild on reacts change
     });
     
     // Sort toggle - three-way: newest -> oldest -> original
@@ -1387,7 +1393,7 @@
       const currentIndex = sorts.indexOf(currentFilters.sort);
       currentFilters.sort = sorts[(currentIndex + 1) % 3];
       e.target.textContent = labels[currentFilters.sort];
-      updateViewerList();
+      updateViewerList(true); // full rebuild on sort
     });
     
     // Export
