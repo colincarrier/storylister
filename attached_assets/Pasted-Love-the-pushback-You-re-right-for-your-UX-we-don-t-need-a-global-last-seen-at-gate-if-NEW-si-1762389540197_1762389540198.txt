@@ -1,0 +1,327 @@
+Love the pushback. You’re right: for your UX, we don’t need a global “last seen at” gate if “NEW” simply means “first time this user appeared for this specific story while the panel is open.” We’ll:
+
+* stamp `firstSeenAt` on first add per (story, user)
+* set `isNew: true` once, and never re-register
+* incrementally render only the new rows (and attach a reaction heart if it appears later)
+* add a small force-refresh button
+
+Below are **surgical diffs against your current v16.4 files** you just shared. They are minimal and safe.
+
+---
+
+### 1) `content-backend.js` — mark first-time viewers as NEW and tighten heart detection
+
+**Why:**
+
+* When a viewer is inserted into the in-memory map for the first time, stamp `firstSeenAt` and `isNew` once; don’t rely on any `lastSeenAt`.
+* DOM fallback for hearts should match the **exact** heart path you provided and prefer the `aria-label="Liked"` case.
+
+```diff
+diff --git a/content-backend.js b/content-backend.js
+--- a/content-backend.js
++++ b/content-backend.js
+@@
+   function mergeReactsFromDialogIntoMap(key) {
+     const dlg = document.querySelector('[role="dialog"][aria-modal="true"]');
+     if (!dlg) return;
+     const map = state.viewerStore.get(key);
+     if (!map) return;
+ 
+-    const rows = dlg.querySelectorAll('[role="button"], [role="link"]');
++    const rows = dlg.querySelectorAll('[role="button"], [role="link"], a[href^="/"]');
+     rows.forEach(row => {
+-      // look for a heart svg in the row
+-      const hasHeart = !!row.querySelector('svg[aria-label*="Like"], svg[aria-label*="Unlike"], use[href*="heart"], path[d*="M34.6 3.1"]');
++      // Look for the exact heart signature and common variants
++      const hasHeart = !!(
++        row.querySelector('svg[aria-label="Liked"] path[d^="M34.6 3.1"]') ||
++        row.querySelector('svg[aria-label*="Liked"] path[d^="M34.6"]') ||
++        row.querySelector('svg[aria-label*="Like"] path[d^="M34.6 3.1"]') ||
++        row.querySelector('svg path[d="M34.6 3.1c-4.5 0-7.9 1.8-10.6 5.6"]')
++      );
+       if (!hasHeart) return;
+ 
+-      // find the username in that row (left column usually)
+-      const uEl = row.querySelector('a[href^="/"][href*="/"] span, a[href^="/"] div, span a[href^="/"]');
+-      const username = (uEl?.textContent || '').trim();
++      // Resolve username from profile link in this row
++      const link = row.querySelector('a[href^="/"][href$="/"]:not([href="/"])');
++      const username = link?.getAttribute('href')?.replace(/^\/|\/$/g,'') || '';
+       if (!username) return;
+ 
+       const k = username.toLowerCase();
+       const prev = map.get(k);
+       if (prev && !prev.reaction) {
+         map.set(k, { ...prev, reaction: '❤️' });
+       }
+     });
+     mirrorToLocalStorageDebounced(key);
+   }
+@@
+   window.addEventListener('message', (evt) => {
+@@
+-    // A3 - Fix follower/following mapping and dedupe
+-    viewers.forEach((raw, idx) => {
++    // A3 - Fix follower/following mapping, dedupe, and stamp first-time "NEW"
++    viewers.forEach((raw, idx) => {
+       const v = { ...raw };
+@@
+-      const viewerKey = (v.username ? String(v.username).toLowerCase() : null) || String(v.id || idx);
+-
+-      const prev = map.get(viewerKey) || {};
+-      map.set(viewerKey, { ...prev, ...v });
++      const viewerKey = (v.username ? String(v.username).toLowerCase() : null) || String(v.id || idx);
++      const prev = map.get(viewerKey);
++      if (!prev) {
++        // first time we've ever seen this user for this story
++        v.firstSeenAt = v.viewedAt || Date.now();
++        v.isNew = true;                       // one-time NEW badge
++        map.set(viewerKey, v);
++      } else {
++        // merge without re-registering as NEW
++        map.set(viewerKey, { ...prev, ...v, isNew: prev.isNew === true ? true : false, firstSeenAt: prev.firstSeenAt || v.firstSeenAt });
++      }
+     });
+```
+
+> This file already includes your IDB writes and tiny LS mirrors, so nothing else changes there.
+
+---
+
+### 2) `content.js` — incremental DOM updates + refresh button
+
+**Why:**
+
+* Don’t re-render the whole list each time; only add **new** viewers (and patch hearts on existing rows).
+* Give yourself a small “force refresh” button if something gets stuck.
+
+```diff
+diff --git a/content.js b/content.js
+--- a/content.js
++++ b/content.js
+@@
+   // Update viewer list UI
+-  function updateViewerList() {
++  function updateViewerList() {
+     const listElement = document.getElementById('sl-list');
+     if (!listElement) return;
+     
+     const filteredViewers = getFilteredViewers();
+@@
+-    // Clear and rebuild list
+-    listElement.innerHTML = '';
+-    
+-    if (filteredViewers.length === 0) {
++    // If nothing to show, render empty
++    if (filteredViewers.length === 0) {
++      listElement.innerHTML = '';
+       listElement.innerHTML = `
+         <div class="storylister-empty">
+           <div class="storylister-empty-icon">👁️</div>
+           <div class="storylister-empty-text">
+             ${viewers.size === 0 ? 'Waiting for viewers...' : 'No viewers match filters'}
+           </div>
+         </div>
+       `;
+       return;
+     }
+-    
+-    filteredViewers.forEach(viewer => {
+-      const viewerEl = document.createElement('div');
+-      viewerEl.className = 'storylister-viewer-item';
+-      
+-      // Build reaction display
+-      let reactionHtml = '';
+-      if (viewer.reaction) {
+-        reactionHtml = `<span class="viewer-reaction">${viewer.reaction}</span>`;
+-      }
+-      
+-      // Build new badge
+-      let newBadge = '';
+-      if (viewer.isNew) {
+-        newBadge = '<span class="viewer-new-badge">NEW</span>';
+-      }
+-      
+-      viewerEl.innerHTML = `
+-        <a href="https://www.instagram.com/${viewer.username}/" target="_blank" rel="noopener noreferrer" class="storylister-viewer-avatar" data-username="${slSafe(viewer.username)}">
+-          ${slAvatarHTML(viewer.profilePic, viewer.username)}
+-        </a>
+-        <div class="storylister-viewer-info">
+-          <div class="storylister-viewer-username" data-username="${viewer.username}">
+-            <a href="https://www.instagram.com/${viewer.username}/" target="_blank" rel="noopener noreferrer" class="sl-username">${viewer.username}</a>
+-            ${viewer.isVerified ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="#1877F2" style="display: inline; vertical-align: middle; margin-left: 4px;"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>' : ''}
+-            ${reactionHtml}
+-            ${newBadge}
+-          </div>
+-          <div class="storylister-viewer-meta">
+-            ${viewer.displayName} · ${formatTimeAgo(viewer.viewedAt)}
+-          </div>
+-        </div>
+-        <div class="storylister-viewer-tags">
+-          ${!isProMode ? `
+-            <button class="storylister-tag ${viewer.isTagged ? 'active' : ''}" data-username="${viewer.username}">
+-              👀
+-            </button>
+-          ` : `
+-            <select class="storylister-tag-dropdown" data-username="${viewer.username}">
+-              <option value="">No tag</option>
+-              ${customTags.map(tag => 
+-                `<option value="${tag.id}" ${viewer.isTagged ? 'selected' : ''}>${tag.emoji} ${tag.label}</option>`
+-              ).join('')}
+-            </select>
+-          `}
+-        </div>
+-      `;
+-      listElement.appendChild(viewerEl);
+-    });
++
++    // Build a set of existing usernames in DOM
++    const existing = new Set(
++      Array.from(listElement.querySelectorAll('.storylister-viewer-username'))
++        .map(el => el.dataset.username)
++    );
++
++    // Incrementally prepend only new viewers; leave existing rows intact
++    const frag = document.createDocumentFragment();
++    filteredViewers.forEach(viewer => {
++      const uname = slSafe(viewer.username);
++      const rowEl = listElement.querySelector(`.storylister-viewer-username[data-username="${uname}"]`);
++
++      if (!existing.has(uname)) {
++        const viewerEl = document.createElement('div');
++        viewerEl.className = 'storylister-viewer-item';
++        const reactionHtml = viewer.reaction ? `<span class="viewer-reaction">${viewer.reaction}</span>` : '';
++        const newBadge = viewer.isNew ? '<span class="viewer-new-badge">NEW</span>' : '';
++        viewerEl.innerHTML = `
++          <a href="https://www.instagram.com/${uname}/" target="_blank" rel="noopener noreferrer" class="storylister-viewer-avatar" data-username="${uname}">
++            ${slAvatarHTML(viewer.profilePic, uname)}
++          </a>
++          <div class="storylister-viewer-info">
++            <div class="storylister-viewer-username" data-username="${uname}">
++              <a href="https://www.instagram.com/${uname}/" target="_blank" rel="noopener noreferrer" class="sl-username">${uname}</a>
++              ${viewer.isVerified ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="#1877F2" style="display: inline; vertical-align: middle; margin-left: 4px;"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>' : ''}
++              ${reactionHtml}
++              ${newBadge}
++            </div>
++            <div class="storylister-viewer-meta">
++              ${viewer.displayName} · ${formatTimeAgo(viewer.viewedAt)}
++            </div>
++          </div>
++          <div class="storylister-viewer-tags">
++            ${!isProMode ? `
++              <button class="storylister-tag ${viewer.isTagged ? 'active' : ''}" data-username="${uname}">
++                👀
++              </button>
++            ` : `
++              <select class="storylister-tag-dropdown" data-username="${uname}">
++                <option value="">No tag</option>
++                ${customTags.map(tag => 
++                  `<option value="${tag.id}" ${viewer.isTagged ? 'selected' : ''}>${tag.emoji} ${tag.label}</option>`
++                ).join('')}
++              </select>
++            `}
++          </div>
++        `;
++        viewerEl.classList.add('viewer-new-animation');
++        // we prepend newest at top
++        frag.appendChild(viewerEl);
++      } else if (viewer.reaction && rowEl && !rowEl.querySelector('.viewer-reaction')) {
++        // Patch a heart on an existing row if it appeared later
++        const span = document.createElement('span');
++        span.className = 'viewer-reaction';
++        span.textContent = viewer.reaction;
++        rowEl.appendChild(span);
++      }
++    });
++    if (frag.childNodes.length) {
++      // Prepend in one go
++      listElement.prepend(frag);
++    }
+   }
+@@
+   function createRightRail() {
+@@
+-            <div class="storylister-header-actions">
++            <div class="storylister-header-actions">
++              <button id="sl-refresh" class="storylister-pro-toggle" title="Force refresh">🔄</button>
+               <button id="sl-settings-btn" class="storylister-settings-btn" title="Settings">⚙️</button>
+               <button id="sl-pro-toggle" class="storylister-pro-toggle">
+                 ${isProMode ? 'Pro' : 'Free'}
+               </button>
+               <button id="sl-close" class="storylister-close">×</button>
+             </div>
+@@
+   function setupEventListeners() {
+@@
++    // Force refresh (hard re-sync)
++    document.getElementById('sl-refresh')?.addEventListener('click', async () => {
++      try {
++        viewers.clear();
++        await loadTaggedUsers();
++        updateViewerList();
++        await DataSyncManager.performSync();
++      } catch {}
++    });
+@@
+   // Listen for data updates
+   window.addEventListener('storylister:data_updated', async (e) => {
+     // console.log('[Storylister] Data updated:', e.detail);
+     const currentKey = slStoreKey();
+     if (e.detail?.storyId === currentKey) {
+-      await loadViewersFromStorage();
++      // Re-sync but render incrementally
++      await loadViewersFromStorage();
++      updateViewerList();
+     }
+   });
+```
+
+> These edits are applied to your current UI script (the one that already contains Insights + IDB reads).
+
+---
+
+### 3) (optional tiny style) `content.css` — pulse on new rows
+
+```diff
+diff --git a/content.css b/content.css
+--- a/content.css
++++ b/content.css
+@@
+ .viewer-reaction {
+   margin-left: 6px;
+   font-size: 14px;
+ }
++
++.viewer-new-animation {
++  animation: sl-pop 300ms ease-out;
++}
++@keyframes sl-pop {
++  0% { transform: scale(0.98); background: #f1f5ff; }
++  100% { transform: none; background: transparent; }
++}
+```
+
+> (Any of your `content.css` variants are fine to patch—this is purely visual.)
+
+---
+
+## Why we **don’t** need `lastSeenAt` anymore
+
+* With these changes, “NEW” means “first time this viewer appeared for **this story** while the panel is open.” We stamp `firstSeenAt` and `isNew` when the map didn’t have the user yet. That’s enough to badge and sort without any cross-open state.
+* If you later want “NEW since the **previous panel open**”, we can re-introduce a tiny `panel_story_index.lastSeenAt`, but per your direction we’re keeping it **session-local and simple**.
+
+---
+
+## QA you can run now
+
+1. Open a story, let the panel appear. As viewers stream in, only new rows should prepend with a quick pulse and “NEW” next to their names.
+2. Trigger a heart from another account; if IG puts the icon in the list, the row should get a ❤️ appended even if it was already rendered.
+3. Click the **🔄** button — the list clears, re-syncs, and incremental adds resume. No full reflow.
+
+---
+
+If you want “NEW” to clear when you switch to another story (but remain for this one), we can clear `isNew` for the previous story’s in-memory map on story change; right now it only affects rendering (no persistence), which matches your “don’t re-register” request.
+
+If you want me to also wire the incremental path into Insights (so counts tick live), say the word and I’ll add a tiny `MutationObserver` hook inside the modal.
+
+**Files patched:** `content-backend.js` (mark `isNew` and stricter hearts) , `content.js` (incremental render + refresh button) , `content.css` (optional animation) .

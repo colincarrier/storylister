@@ -1,0 +1,68 @@
+✅ This is Working Correctly
+[Storylister] Removing oversized panel_story_store (4587350 bytes)
+This means:
+
+The emergency cleanup detected and removed the bloated localStorage
+Your data pipeline is no longer blocked
+New data will flow to IndexedDB instead
+
+🔍 Critical Issue: Missing content.js
+I notice you didn't include content.js in your file list. This is essential - it's the UI layer that needs the updated loadViewersFromStorage() function to read from IndexedDB.
+You need to ensure content.js has:
+1. Updated HybridStorage class
+javascriptasync getViewers(storyId) {
+  // Try IDB first
+  if (this.db) {
+    await this.initPromise;
+    const tx = this.db.transaction(['viewers'], 'readonly');
+    const index = tx.objectStore('viewers').index('storyId');
+    const rows = await new Promise(resolve => {
+      const req = index.getAll(storyId);
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => resolve([]);
+    });
+    return rows; // Return IDB format directly
+  }
+  return [];
+}
+2. Updated loadViewersFromStorage
+javascriptasync function loadViewersFromStorage() {
+  const currentKey = slStoreKey();
+  if (!currentKey) return;
+  
+  // Read from IDB
+  let rows = await storage.getViewers(currentKey);
+  
+  // Get lastSeenAt from tiny index
+  let lastSeenAt = 0;
+  try {
+    const idx = JSON.parse(localStorage.getItem('panel_story_index') || '{}');
+    lastSeenAt = idx[currentKey]?.lastSeenAt || 0;
+  } catch {}
+  
+  viewers.clear();
+  
+  if (rows && rows.length) {
+    rows.forEach((item, i) => {
+      const v = Array.isArray(item) ? item[1] : item;
+      // ... rest of viewer mapping
+    });
+    updateViewerList();
+  }
+}
+3. Remove duplicate slStoreKey()
+Make sure there's only ONE slStoreKey() function that prefers ACTIVE_MEDIA_ID_FROM_BACKEND.
+🎯 Quick Verification
+
+Open DevTools → Application → IndexedDB
+Look for storylister_data → viewers
+You should see viewer records being stored there
+Check localStorage - you should now see:
+
+panel_story_index (tiny, just counts)
+panel_story_store (empty viewers arrays)
+No more huge data
+
+
+
+If the panel still shows "Waiting for viewers", it means content.js isn't reading from IDB correctly. Share your content.js file and I'll fix it immediately.

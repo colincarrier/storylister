@@ -371,15 +371,20 @@
     const map = state.viewerStore.get(key);
     if (!map) return;
 
-    const rows = dlg.querySelectorAll('[role="button"], [role="link"]');
+    const rows = dlg.querySelectorAll('[role="button"], [role="link"], a[href^="/"]');
     rows.forEach(row => {
-      // look for a heart svg in the row
-      const hasHeart = !!row.querySelector('svg[aria-label*="Like"], svg[aria-label*="Unlike"], use[href*="heart"], path[d*="M34.6 3.1"]');
+      // Look for the exact heart signature and common variants
+      const hasHeart = !!(
+        row.querySelector('svg[aria-label="Liked"] path[d^="M34.6 3.1"]') ||
+        row.querySelector('svg[aria-label*="Liked"] path[d^="M34.6"]') ||
+        row.querySelector('svg[aria-label*="Like"] path[d^="M34.6 3.1"]') ||
+        row.querySelector('svg path[d="M34.6 3.1c-4.5 0-7.9 1.8-10.6 5.6"]')
+      );
       if (!hasHeart) return;
 
-      // find the username in that row (left column usually)
-      const uEl = row.querySelector('a[href^="/"][href*="/"] span, a[href^="/"] div, span a[href^="/"]');
-      const username = (uEl?.textContent || '').trim();
+      // Resolve username from profile link in this row
+      const link = row.querySelector('a[href^="/"][href$="/"]:not([href="/"])');
+      const username = link?.getAttribute('href')?.replace(/^\/|\/$/g,'') || '';
       if (!username) return;
 
       const k = username.toLowerCase();
@@ -561,7 +566,7 @@
       });
     }
 
-    // A3 - Fix follower/following mapping and dedupe
+    // A3 - Fix follower/following mapping, dedupe, and stamp first-time "NEW"
     viewers.forEach((raw, idx) => {
       const v = { ...raw };
 
@@ -577,9 +582,16 @@
 
       // Deduplicate by username (lc) or id
       const viewerKey = (v.username ? String(v.username).toLowerCase() : null) || String(v.id || idx);
-
-      const prev = map.get(viewerKey) || {};
-      map.set(viewerKey, { ...prev, ...v });
+      const prev = map.get(viewerKey);
+      if (!prev) {
+        // first time we've ever seen this user for this story
+        v.firstSeenAt = v.viewedAt || Date.now();
+        v.isNew = true;                       // one-time NEW badge
+        map.set(viewerKey, v);
+      } else {
+        // merge without re-registering as NEW
+        map.set(viewerKey, { ...prev, ...v, isNew: prev.isNew === true ? true : false, firstSeenAt: prev.firstSeenAt || v.firstSeenAt });
+      }
     });
 
     // Re-check overflow after insert
