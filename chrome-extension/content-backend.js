@@ -702,8 +702,9 @@
     };
   })();
 
-  // When the panel opens, mark current as seen so NEW badges clear
-  window.addEventListener('storylister:panel_opened', () => {
+  // Mark "seen" only when panel is CLOSED so "NEW since last check"
+  // actually means since the last time you reviewed the list.
+  window.addEventListener('storylister:panel_closed', () => {
     if (state.lastStoryKey) markAllSeenForKey(state.lastStoryKey);
   });
 
