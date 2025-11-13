@@ -631,8 +631,23 @@
     v.username = (v.username || '').trim();
     v.displayName = v.displayName || v.username;
     v.isVerified = Boolean(v.isVerified);
-    v.isFollower = Boolean(v.isFollower);
-    v.youFollow = Boolean(v.youFollow);
+    
+    // Keep existing normalized follow flags if present, otherwise convert from IG API
+    if (!('isFollower' in v)) {
+      // IG API naming is backwards:
+      //     follows_viewer => THEY follow YOU (isFollower)
+      //     followed_by_viewer => YOU follow THEM (youFollow)
+      v.isFollower = Boolean(v.follows_viewer || v.follows_you || v.is_follower);
+    } else {
+      v.isFollower = Boolean(v.isFollower);
+    }
+    
+    if (!('youFollow' in v)) {
+      v.youFollow = Boolean(v.followed_by_viewer || v.you_follow || v.is_following);
+    } else {
+      v.youFollow = Boolean(v.youFollow);
+    }
+    
     v.reaction = v.reaction || null;
 
     // If IG gives you a timestamp, prefer it. Otherwise leave undefined here.
@@ -699,8 +714,12 @@
     state.lastStoryKey = ukey;
     state.idToKey.set(mediaId, ukey);
     
-    if (!state.viewerStore.has(ukey)) state.viewerStore.set(ukey, new Map());
-    const map = state.viewerStore.get(ukey);
+    // Get or create map for this story
+    let map = state.viewerStore.get(ukey);
+    if (!map) {
+      map = new Map();
+      state.viewerStore.set(ukey, map);
+    }
     
     // v16.3: Count overflow protection
     const loaded = map.size;
@@ -723,27 +742,12 @@
       });
     }
 
-    // Process viewers with proper normalization
-    const processedViewers = viewers.map((raw, idx) => {
-      // Normalize follow flags for UI:
-      // IG API naming is backwards:
-      //     follows_viewer => THEY follow YOU (isFollower)
-      //     followed_by_viewer => YOU follow THEM (youFollow)
-      const isFollower = (raw.follows_viewer === true) || (raw.follows_you === true) || (raw.is_follower === true);
-      const youFollow  = (raw.followed_by_viewer === true) || (raw.you_follow === true) || (raw.is_following === true);
-      
-      return {
-        ...raw,
-        isFollower: !!isFollower,
-        youFollow: !!youFollow
-      };
-    });
+    // Use the new upsert function to process and store viewers
+    upsertViewersForStory(ukey, viewers);
 
-    // Use the new upsert function
-    upsertViewersForStory(ukey, processedViewers);
-
-    // Re-check overflow after insert
-    const loadedAfter = map.size;
+    // Re-check overflow after insert (get map again after upsert)
+    map = state.viewerStore.get(ukey);
+    const loadedAfter = map ? map.size : 0;
     if (typeof totalCount === 'number' && loadedAfter > totalCount) {
       console.error(`[Storylister] Critical overflow after insert: ${loadedAfter} > ${totalCount}; resetting ${ukey}`);
       map.clear();

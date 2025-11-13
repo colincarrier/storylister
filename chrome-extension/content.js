@@ -193,6 +193,20 @@
   let viewers = new Map();
   let currentStory = null;
   let storyMeta = {};
+  
+  // New state object for filter system
+  const state = {
+    searchQuery: '',
+    activeFilter: null, // 'verified', 'tagged', or null for all
+    activeSubFilters: new Set(), // 'following', 'followers', 'non-followers', 'reacts', 'newest'
+    sortOrder: 'newest', // 'newest' or 'oldest'
+    taggedUsers: new Set(),
+    viewerStore: new Map(), // Will be populated from backend
+    lastStoryKey: null,
+    currentKey: null
+  };
+  
+  // Legacy filters for backward compatibility (will be phased out)
   let currentFilters = {
     query: '',
     type: 'all',
@@ -380,16 +394,15 @@
   }
   
   // Format time ago
-  function formatTimeAgo(timestamp) {
-    const diff = Date.now() - timestamp;
-    const minutes = Math.floor(diff / 60000);
-    const hours = Math.floor(minutes / 60);
-    const days = Math.floor(hours / 24);
-    
-    if (days > 0) return `${days}d ago`;
-    if (hours > 0) return `${hours}h ago`;
-    if (minutes > 0) return `${minutes}m ago`;
-    return 'just now';
+  function formatTimeAgo(ts) {
+    const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+    if (s < 60) return `${s}s`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m}m`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h}h`;
+    const d = Math.floor(h / 24);
+    return `${d}d`;
   }
   
   // Auto-pause videos
@@ -742,7 +755,7 @@
           ${newBadge}
         </div>
         <div class="storylister-viewer-meta">
-          ${viewer.displayName} · ${formatTimeAgo(viewer.viewedAt)}
+          ${viewer.displayName || viewer.username || ''} · ${viewer.firstSeenAt ? formatTimeAgo(viewer.firstSeenAt) : 'just now'}
         </div>
       </div>
       <div class="storylister-viewer-tags">
