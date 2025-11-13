@@ -666,12 +666,7 @@
     if (!listElement) return;
     
     const filteredViewers = getFilteredViewers();
-    
-    // Count stats
-    const totalViewers = viewers.size;
-    const totalVerified = Array.from(viewers.values()).filter(v => v.isVerified).length;
-    const taggedInCurrentStory = Array.from(viewers.values()).filter(v => v.isTagged).length;
-    const newViewersCount = Array.from(viewers.values()).filter(v => v.isNew).length;
+    const viewArr = Array.from(viewers.values());
     
     // Update header with story position
     const storyIndicator = document.querySelector('.storylister-story-indicator');
@@ -682,24 +677,17 @@
       storyIndicator.textContent = storyText;
     }
     
-    // Update stats
     // Update counts: show filtered / total from canonical index
-    const filteredCountEl = document.getElementById('sl-filtered-count');
-    const viewerCount = document.getElementById('sl-viewer-count');
-    const verifiedCount = document.getElementById('sl-verified-count');
-    const taggedCount = document.getElementById('sl-tagged-count');
-    
+    const filteredCount = filteredViewers.length;
     const idx = JSON.parse(localStorage.getItem('panel_story_index') || '{}');
     const total = idx[slStoreKey()]?.count ?? viewers.size;
-    
-    if (filteredCountEl) {
-      filteredCountEl.textContent = `${filteredViewers.length} of ${total} viewer${(total|0) === 1 ? '' : 's'}`;
-    }
-    
-    // Update the individual stat counters
-    if (viewerCount) viewerCount.textContent = String(total);
-    if (verifiedCount) verifiedCount.textContent = String(totalVerified);
-    if (taggedCount) taggedCount.textContent = `${taggedInCurrentStory}/${taggedUsers.size}`;
+    document.getElementById('sl-filtered-count') && (document.getElementById('sl-filtered-count').textContent =
+      `${filteredCount} of ${total} viewer${(total|0) === 1 ? '' : 's'}`);
+    document.getElementById('sl-viewer-count') && (document.getElementById('sl-viewer-count').textContent = String(total));
+    document.getElementById('sl-verified-count') && (document.getElementById('sl-verified-count').textContent =
+      String(viewArr.filter(v => v.isVerified).length));
+    document.getElementById('sl-tagged-count') && (document.getElementById('sl-tagged-count').textContent =
+      `${String(viewArr.filter(v => v.isTagged).length)}/${String(taggedUsers.size)}`);
     
     // If nothing to show, render empty
     if (filteredViewers.length === 0) {
@@ -734,7 +722,7 @@
     // Incrementally prepend only new viewers; leave existing rows intact
     const frag = document.createDocumentFragment();
     filteredViewers.forEach(viewer => {
-      const uname = slSafe(viewer.username);
+      const uname = (viewer.username || '').toLowerCase();
       const rowEl = listElement.querySelector(`.storylister-viewer-username[data-username="${uname}"]`);
       if (!existing.has(uname)) {
         const el = buildViewerRow(viewer);
@@ -752,7 +740,7 @@
 
   // Build a single viewer row (shared by both paths)
   function buildViewerRow(viewer) {
-    const uname = slSafe(viewer.username);
+    const uname = (viewer.username || '').toLowerCase();
     const el = document.createElement('div');
     el.className = 'storylister-viewer-item';
     const reactionHtml = viewer.reaction ? `<span class="viewer-reaction">${viewer.reaction}</span>` : '';

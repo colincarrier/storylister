@@ -309,8 +309,8 @@
 .storylister-results {
   flex: 1 1 auto;
   overflow-y: auto;
-  min-height: 0; /* allows flex child to shrink */
-  padding: 8px 12px; /* match header/button rail */
+  min-height: 0;
+  padding: 8px 12px;      /* aligns with 16px header + 3px panel + 1px border */
   background: #fafafa;
 }
 
@@ -336,6 +336,7 @@
   overflow: hidden;
   flex-shrink: 0;
   cursor: pointer;
+  margin-left: 0; /* exact left edge */
 }
 
 .storylister-viewer-avatar img {
