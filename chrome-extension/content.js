@@ -4,6 +4,41 @@
 (function() {
   // console.log('[Storylister] Initializing extension UI');
   
+  // Event bus for cross-world communication
+  const BUS = {
+    on(type, handler) {
+      document.addEventListener(type, handler);
+    },
+    off(type, handler) {
+      document.removeEventListener(type, handler);
+    },
+    emit(type, detail) {
+      // IMPORTANT: send only JSON-serializable data across worlds
+      document.dispatchEvent(new CustomEvent(type, { detail }));
+    }
+  };
+  
+  // Event names
+  const EVT = {
+    UI_READY: 'sl:UI_READY',
+    VIEWERS_SNAPSHOT: 'sl:VIEWERS_SNAPSHOT',   // full snapshot
+    VIEWERS_DIFF: 'sl:VIEWERS_DIFF',           // optional diffs
+    REQUEST_REFRESH: 'sl:REQUEST_REFRESH',
+    REFRESH_STARTED: 'sl:REFRESH_STARTED',
+    REFRESH_DONE: 'sl:REFRESH_DONE'
+  };
+  
+  // Local UI state only
+  const uiState = {
+    storyKey: null,
+    viewers: new Map(),  // key -> viewer object
+    searchQuery: '',
+    activeFilter: 'all',
+    activeSubFilters: new Set(),
+    sortOrder: 'oldest',
+    taggedUsers: new Set()
+  };
+  
   // 1) Inject MAIN-world interceptor as early as possible
   try {
     const s = document.createElement('script');
@@ -20,6 +55,10 @@
     if (ev.data.type === 'STORYLISTER_READY') {
       interceptorReady = true;
       // console.log('[Storylister] Interceptor ready');
+    }
+    // Also handle VIEWERS_SNAPSHOT from window.postMessage (Claude's addition)
+    if (ev.data.type === EVT.VIEWERS_SNAPSHOT && ev.data.detail) {
+      hydrateFromSnapshot(ev.data.detail);
     }
   });
 
@@ -407,46 +446,59 @@
   
   // Auto-pause videos
   
-  // Get filtered viewers
-  function getActiveStoryMap() {
-    const key = state.lastStoryKey || state.currentKey;
-    return key ? state.viewerStore.get(key) : null;
+  // Helper to get viewer key
+  function viewerKey(v) {
+    return v?.username || v?.id || 'unknown';
+  }
+  
+  // Hydrate UI state from backend snapshot
+  function hydrateFromSnapshot(detail) {
+    const { storyKey, viewers: viewerArray } = detail;
+    uiState.storyKey = storyKey;
+    uiState.viewers.clear();
+    for (const v of viewerArray || []) {
+      const k = viewerKey(v);
+      if (!k) continue;
+      uiState.viewers.set(k, v);
+    }
+    updateViewerList({ full: true }); // your existing UI render
   }
 
+  // Get filtered viewers from uiState
   function getFilteredViewers() {
-    const map = getActiveStoryMap();
-    let filtered = map ? Array.from(map.values()) : [];
-
-    // Search
-    if (state.searchQuery) {
-      const q = state.searchQuery.toLowerCase();
-      filtered = filtered.filter(v =>
-        (v.username || '').toLowerCase().includes(q) ||
-        (v.displayName || '').toLowerCase().includes(q)
+    let list = Array.from(uiState.viewers.values());
+    
+    // Apply filters from uiState
+    // Search text
+    if (uiState.searchQuery) {
+      const q = uiState.searchQuery.toLowerCase();
+      list = list.filter(v =>
+        (v.username && v.username.toLowerCase().includes(q)) ||
+        (v.displayName && v.displayName.toLowerCase().includes(q))
       );
     }
-
+    
     // Main filters
-    if (state.activeFilter === 'verified') {
-      filtered = filtered.filter(v => v.isVerified === true);
-    } else if (state.activeFilter === 'tagged') {
-      filtered = filtered.filter(v => state.taggedUsers.has((v.username || '').toLowerCase()));
+    if (uiState.activeFilter === 'verified') {
+      list = list.filter(v => v.isVerified === true);
+    } else if (uiState.activeFilter === 'tagged') {
+      list = list.filter(v => uiState.taggedUsers.has((v.username || '').toLowerCase()));
     }
-
+    
     // Subfilters
-    if (state.activeSubFilters.has('following')) filtered = filtered.filter(v => v.youFollow === true);
-    if (state.activeSubFilters.has('followers')) filtered = filtered.filter(v => v.isFollower === true);
-    if (state.activeSubFilters.has('non-followers')) filtered = filtered.filter(v => !v.isFollower);
-    if (state.activeSubFilters.has('reacts')) filtered = filtered.filter(v => !!v.reaction);
-    if (state.activeSubFilters.has('newest')) filtered = filtered.filter(v => v.isNew === true);
-
+    if (uiState.activeSubFilters.has('following')) list = list.filter(v => v.youFollow === true);
+    if (uiState.activeSubFilters.has('followers')) list = list.filter(v => v.isFollower === true);
+    if (uiState.activeSubFilters.has('non-followers')) list = list.filter(v => !v.isFollower);
+    if (uiState.activeSubFilters.has('reacts')) list = list.filter(v => !!v.reaction);
+    if (uiState.activeSubFilters.has('newest')) list = list.filter(v => v.isNew === true);
+    
     // Sort
-    filtered.sort((a, b) => {
-      if (state.sortOrder === 'newest') return (b.viewedAt || 0) - (a.viewedAt || 0);
+    list.sort((a, b) => {
+      if (uiState.sortOrder === 'newest') return (b.viewedAt || 0) - (a.viewedAt || 0);
       return (a.viewedAt || 0) - (b.viewedAt || 0);
     });
-
-    return filtered;
+    
+    return list;
   }
   
   // Data synchronization with chunking
@@ -1292,21 +1344,9 @@
     // Close button
     document.getElementById('sl-close')?.addEventListener('click', hideRightRail);
     
-    // Non-destructive refresh
-    document.getElementById('sl-refresh')?.addEventListener('click', async () => {
-      // Find the scrollable dialog and restart pagination if available
-      const scroller = window.findScrollableInDialog?.();
-      if (scroller && window.startPagination) {
-        if (window.state?.stopPagination) window.state.stopPagination();
-        window.state.stopPagination = window.startPagination(scroller, { maxMs: 30000, freezeTarget: true });
-      }
-      
-      // Perform sync without clearing data
-      try {
-        await DataSyncManager?.performSync?.();
-      } catch (_) {}
-      
-      updateViewerList(false); // incremental update, not full rebuild
+    // Non-destructive refresh - emit REQUEST_REFRESH event
+    document.getElementById('sl-refresh')?.addEventListener('click', () => {
+      BUS.emit(EVT.REQUEST_REFRESH, { storyKey: uiState.storyKey });
     });
     
     // Settings toggle
@@ -1341,7 +1381,7 @@
         e.stopPropagation(); 
       }, { capture: true });
       searchEl.addEventListener('input', (e) => {
-        currentFilters.query = e.target.value;
+        uiState.searchQuery = e.target.value;
         updateViewerList();
       });
     }
@@ -1918,11 +1958,34 @@
     }
   });
 
+  // Listen for backend snapshots
+  BUS.on(EVT.VIEWERS_SNAPSHOT, (e) => {
+    hydrateFromSnapshot(e.detail);
+  });
+  
+  // Optional UX hooks for refresh events
+  BUS.on(EVT.REFRESH_STARTED, () => {
+    // Could show a spinner here if desired
+    const refreshBtn = document.getElementById('sl-refresh');
+    if (refreshBtn) refreshBtn.textContent = '⏳';
+  });
+  
+  BUS.on(EVT.REFRESH_DONE, () => {
+    // Reset refresh button
+    const refreshBtn = document.getElementById('sl-refresh');
+    if (refreshBtn) refreshBtn.textContent = '🔄';
+  });
+
   // Start initialization
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', initialize);
   } else {
     initialize();
   }
+  
+  // Emit UI_READY when initialized
+  setTimeout(() => {
+    BUS.emit(EVT.UI_READY, {});
+  }, 100);
   
 })();
