@@ -1374,12 +1374,8 @@
       updateViewerList(true); // full rebuild for tagged toggle
     });
 
-    // Reacts filter
-    document.querySelector('[data-filter-reacts]')?.addEventListener('click', (e) => {
-      currentFilters.showReacts = !currentFilters.showReacts;
-      e.currentTarget.classList.toggle('active', currentFilters.showReacts);
-      updateViewerList(true); // full rebuild on reacts change
-    });
+    // Reacts is a normal "type" filter; the button already has data-filter-type="reacts"
+    // so no special handler is needed beyond the generic [data-filter-type] above.
     
     // Sort toggle - three-way: newest -> oldest -> original
     document.getElementById('sl-sort')?.addEventListener('click', (e) => {
