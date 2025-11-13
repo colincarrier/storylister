@@ -581,8 +581,9 @@
       const v = { ...raw };
 
       // Normalize follow flags for UI:
-      // IG: friendship_status.following => YOU follow THEM (youFollow)
-      //     friendship_status.followed_by => THEY follow YOU (isFollower)
+      // IG API naming is backwards:
+      //     follows_viewer => THEY follow YOU (isFollower)
+      //     followed_by_viewer => YOU follow THEM (youFollow)
       // We accept either our normalized fields or IG-shaped fields.
       const isFollower = (v.follows_viewer === true) || (v.follows_you === true) || (v.is_follower === true);
       const youFollow  = (v.followed_by_viewer === true) || (v.you_follow === true) || (v.is_following === true);
