@@ -318,7 +318,7 @@
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 8px 4px; /* reduce left padding so avatars line up */
+  padding: 8px 0;   /* zero left/right so avatar sits exactly on the rail */
   border-radius: 6px;
   cursor: pointer;
   transition: background-color 0.2s;
