@@ -1,0 +1,319 @@
+You’re on the right track—**“scroll until loaded === target count”** is the right mental model for Instagram’s virtualized viewer list. I’d keep that idea, but harden it so it doesn’t stall when the target is missing/moving, and make the state updates idempotent so “NEW”/timestamps don’t reset.
+
+Below is a drop‑in, production‑safe refinement of the fixes you pasted, plus the missing glue (helpers, guards, and a couple of edge‑case protections). I’ve kept your naming (`state.viewerStore`, `startPagination`, etc.) so you can paste this with minimal diff.
+
+---
+
+## 1) Robust auto‑scroll (content‑backend.js)
+
+Key tweaks vs. your snippet:
+
+* **Freeze the target** at the start (optional) so new views don’t make the goal post move.
+* **Dual stall detection** (no growth in map size *and* no growth in scrollHeight).
+* **Graceful exits**: success, timeout, scroller removed, or stall.
+* **Small “nudge” scroll** to wake lazy-loading when height stops changing.
+
+```javascript
+// Helpers you can keep in this file:
+function getSeenByCount(root = document) {
+  const dlg = root.querySelector('div[role="dialog"][aria-modal="true"]');
+  if (!dlg) return null;
+
+  // Look for "Seen by 1,234" or "Viewed by 1.234" (locale tolerant).
+  const candidates = Array.from(dlg.querySelectorAll('button,[role="button"],span,div'))
+    .map(el => el.textContent || '')
+    .filter(t => /\b(Seen|Viewed)\s+by\b/i.test(t));
+  if (!candidates.length) return null;
+
+  const digits = candidates.join(' ').replace(/[^\d]/g, '');
+  const num = digits ? parseInt(digits, 10) : NaN;
+  return Number.isFinite(num) && num > 0 ? num : null;
+}
+
+function findScrollableInDialog() {
+  const dlg = document.querySelector('div[role="dialog"][aria-modal="true"]');
+  if (!dlg) return null;
+  // Prefer an element with overflow-y and real scrollable content.
+  const all = dlg.querySelectorAll('*');
+  for (const el of all) {
+    const cs = getComputedStyle(el);
+    if ((cs.overflowY === 'auto' || cs.overflowY === 'scroll') &&
+        el.scrollHeight > el.clientHeight + 4) {
+      return el;
+    }
+  }
+  return null;
+}
+
+/**
+ * Paginate viewers until we loaded them all (or hit a guard).
+ * @param {Element} scroller - the scrollable container inside the IG dialog
+ * @param {Object} opts
+ * @param {number} opts.maxMs - hard timeout
+ * @param {boolean} opts.freezeTarget - snapshot the "Seen by" count
+ */
+function startPagination(scroller, { maxMs = 30000, freezeTarget = true } = {}) {
+  const t0 = performance.now();
+  let stopped = false;
+  let lastHeight = 0;
+  let lastLoaded = 0;
+  let stallTicks = 0;
+
+  // Optional: freeze the target so "new views" don't extend the runway.
+  const capturedTarget = freezeTarget ? getSeenByCount() : null;
+
+  function stop(reason) {
+    stopped = true;
+    console.log(`[Storylister] pagination stop: ${reason}`);
+  }
+
+  function tick() {
+    if (stopped) return;
+    if (!document.contains(scroller)) return stop('scroller removed');
+    if (performance.now() - t0 > maxMs) return stop('timeout');
+
+    const currentKey = state.lastStoryKey || state.currentKey;
+    const map = currentKey ? state.viewerStore.get(currentKey) : null;
+    const loaded = map ? map.size : 0;
+
+    const dynamicTarget = freezeTarget ? capturedTarget : getSeenByCount();
+    const target = dynamicTarget || null;
+
+    if (target && loaded >= target) {
+      return stop(`loaded ${loaded}/${target}`);
+    }
+
+    // Stall detection: no new viewers for a while *or* no height change.
+    if (loaded === lastLoaded && scroller.scrollHeight === lastHeight) {
+      stallTicks += 1;
+      if (stallTicks > 6) {
+        // Nudge twice to re-trigger IG’s lazy loader
+        scroller.scrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight - 120);
+        setTimeout(() => { scroller.scrollTop = scroller.scrollHeight; }, 120);
+      }
+      if (stallTicks > 20) {
+        return stop('stall');
+      }
+    } else {
+      stallTicks = 0;
+    }
+
+    lastLoaded = loaded;
+    lastHeight = scroller.scrollHeight;
+
+    // Normal advance to bottom
+    scroller.scrollTop = scroller.scrollHeight;
+
+    setTimeout(tick, 300);
+  }
+
+  tick();
+  return () => { stopped = true; };
+}
+```
+
+> **When to call it**
+> On dialog open or when the refresh button is pressed (see §6), do:
+>
+> ```js
+> const scroller = findScrollableInDialog();
+> if (scroller) {
+>   state.stopPagination?.();
+>   state.stopPagination = startPagination(scroller, { maxMs: 30000, freezeTarget: true });
+> }
+> ```
+
+---
+
+## 2) State that never resets “NEW” or timestamps (content‑backend.js)
+
+Two small but important changes:
+
+* **Normalize + stable key** per viewer.
+* **Only set `firstSeenAt`/`viewedAt`/`isNew` on first sighting**.
+
+```javascript
+// Call from your window.addEventListener('message', ...) handler
+function normalizeViewer(raw, idx) {
+  const v = { ...raw };
+  v.username = (v.username || '').trim();
+  v.displayName = v.displayName || v.username;
+  v.isVerified = Boolean(v.isVerified);
+  v.isFollower = Boolean(v.isFollower);
+  v.youFollow = Boolean(v.youFollow);
+  v.reaction = v.reaction || null;
+
+  // If IG gives you a timestamp, prefer it. Otherwise leave undefined here.
+  if (v.viewedAt && typeof v.viewedAt !== 'number') {
+    // normalize if it’s a string/relative
+    v.viewedAt = Number(v.viewedAt) || undefined;
+  }
+  return v;
+}
+
+function upsertViewersForStory(storyKey, viewers) {
+  let map = state.viewerStore.get(storyKey);
+  if (!map) {
+    map = new Map();
+    state.viewerStore.set(storyKey, map);
+  }
+
+  viewers.forEach((raw, idx) => {
+    const v = normalizeViewer(raw, idx);
+    const viewerKey = (v.username ? v.username.toLowerCase() : null) || String(v.id || idx);
+    const prev = map.get(viewerKey);
+
+    if (!prev) {
+      const now = Date.now();
+      map.set(viewerKey, {
+        ...v,
+        firstSeenAt: v.firstSeenAt || now,
+        viewedAt: v.viewedAt || now,
+        isNew: true,
+      });
+    } else {
+      map.set(viewerKey, {
+        ...prev,          // preserve our local state
+        ...v,             // overlay fresh IG fields
+        isNew: prev.isNew === true, // never re-flip to true
+        firstSeenAt: prev.firstSeenAt,
+        viewedAt: Number.isFinite(prev.viewedAt) ? prev.viewedAt : (v.viewedAt || prev.firstSeenAt),
+      });
+    }
+  });
+}
+```
+
+> If you’d like this to **survive page reloads**, serialize `state.viewerStore` to `sessionStorage` (or `chrome.storage.local`) every few seconds and revive it on init.
+
+---
+
+## 3) Filters (content.js)
+
+Your property names look right; the fix is mostly to **read from the active story map** and to lowercase usernames once for the “tagged” filter:
+
+```javascript
+function getActiveStoryMap() {
+  const key = state.lastStoryKey || state.currentKey;
+  return key ? state.viewerStore.get(key) : null;
+}
+
+function getFilteredViewers() {
+  const map = getActiveStoryMap();
+  let filtered = map ? Array.from(map.values()) : [];
+
+  // Search
+  if (state.searchQuery) {
+    const q = state.searchQuery.toLowerCase();
+    filtered = filtered.filter(v =>
+      (v.username || '').toLowerCase().includes(q) ||
+      (v.displayName || '').toLowerCase().includes(q)
+    );
+  }
+
+  // Main filters
+  if (state.activeFilter === 'verified') {
+    filtered = filtered.filter(v => v.isVerified === true);
+  } else if (state.activeFilter === 'tagged') {
+    filtered = filtered.filter(v => state.taggedUsers.has((v.username || '').toLowerCase()));
+  }
+
+  // Subfilters
+  if (state.activeSubFilters.has('following')) filtered = filtered.filter(v => v.youFollow === true);
+  if (state.activeSubFilters.has('followers')) filtered = filtered.filter(v => v.isFollower === true);
+  if (state.activeSubFilters.has('non-followers')) filtered = filtered.filter(v => !v.isFollower);
+  if (state.activeSubFilters.has('reacts')) filtered = filtered.filter(v => !!v.reaction);
+  if (state.activeSubFilters.has('newest')) filtered = filtered.filter(v => v.isNew === true);
+
+  // Sort
+  filtered.sort((a, b) => {
+    if (state.sortOrder === 'newest') return (b.viewedAt || 0) - (a.viewedAt || 0);
+    return (a.viewedAt || 0) - (b.viewedAt || 0);
+  });
+
+  return filtered;
+}
+```
+
+---
+
+## 4) Alignment (CSS)
+
+Your CSS looks good; nothing to add here.
+
+```css
+.storylister-results { padding: 8px 12px; }
+.storylister-viewer-item { padding: 8px 0; }
+```
+
+---
+
+## 5) Timestamp display (content.js)
+
+Use `firstSeenAt` for “time ago” and keep sort separate (by `viewedAt` as above):
+
+```javascript
+function buildViewerRow(viewer) {
+  const timeSince = viewer.firstSeenAt ? formatTimeAgo(viewer.firstSeenAt) : 'just now';
+  return `
+    <div class="storylister-viewer-item" data-username="${escapeHtml(viewer.username || '')}">
+      <div class="storylister-viewer-name">${escapeHtml(viewer.displayName || viewer.username || '')}</div>
+      <div class="storylister-viewer-meta">${escapeHtml(viewer.username || '')} · ${timeSince}</div>
+      ${viewer.reaction ? `<div class="storylister-viewer-react">${escapeHtml(viewer.reaction)}</div>` : ''}
+    </div>
+  `;
+}
+
+function formatTimeAgo(ts) {
+  const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h`;
+  const d = Math.floor(h / 24);
+  return `${d}d`;
+}
+```
+
+---
+
+## 6) Non‑destructive refresh
+
+Do not clear the map; just re‑page the dialog and trigger your sync/UI update.
+
+```javascript
+document.getElementById('sl-refresh')?.addEventListener('click', async () => {
+  const scroller = findScrollableInDialog();
+  if (scroller) {
+    state.stopPagination?.();
+    state.stopPagination = startPagination(scroller, { maxMs: 30000, freezeTarget: true });
+  }
+  try {
+    await DataSyncManager?.performSync?.();
+  } catch (_) {}
+  updateViewerList(false); // incremental
+});
+```
+
+---
+
+## A couple of “gotchas” to keep in mind
+
+1. **Moving target**: if you don’t freeze the “Seen by” number, new viewers can keep pushing the goal. The `freezeTarget` option prevents that.
+2. **Localization**: “Seen by” might be “Viewed by” (or localized). The provided `getSeenByCount` is tolerant; if it returns `null`, the paginator falls back to stall/timeout exits.
+3. **Deduping**: IG sometimes recycles DOM nodes. Always use the **Map key** (`viewerKey`) to dedupe; don’t trust DOM counts.
+4. **Persisting across page reloads** (optional): If you want “NEW” and timestamps to survive reloads, serialize `state.viewerStore` (e.g., to `sessionStorage`/`chrome.storage.local`) and rehydrate on init.
+
+---
+
+## Quick test plan
+
+* Open a story with a large viewer count (e.g., 500+).
+  **Expected**: scroller keeps paging until either (a) `loaded >= target`, (b) stall, or (c) timeout. “Loaded X/Y – complete” log on success.
+* Hit **Refresh**.
+  **Expected**: counts increment without clearing; “NEW” badges don’t re‑appear; timestamps remain stable.
+* Toggle filters/search.
+  **Expected**: verified/tagged/follower/non‑follower/reacts/newest behave off the normalized fields; search matches `username` or `displayName`.
+
+If you want, paste the relevant bits of your `message` handler or `updateViewerList` and I’ll tune the glue code precisely to your file layout.

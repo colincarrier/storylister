@@ -30,6 +30,103 @@
   };
 
   // --- Minimal IDB helper for viewer rows ---
+  // Helpers you can keep in this file:
+  function getSeenByCount(root = document) {
+    const dlg = root.querySelector('div[role="dialog"][aria-modal="true"]');
+    if (!dlg) return null;
+
+    // Look for "Seen by 1,234" or "Viewed by 1.234" (locale tolerant).
+    const candidates = Array.from(dlg.querySelectorAll('button,[role="button"],span,div'))
+      .map(el => el.textContent || '')
+      .filter(t => /\b(Seen|Viewed)\s+by\b/i.test(t));
+    if (!candidates.length) return null;
+
+    const digits = candidates.join(' ').replace(/[^\d]/g, '');
+    const num = digits ? parseInt(digits, 10) : NaN;
+    return Number.isFinite(num) && num > 0 ? num : null;
+  }
+
+  function findScrollableInDialog() {
+    const dlg = document.querySelector('div[role="dialog"][aria-modal="true"]');
+    if (!dlg) return null;
+    // Prefer an element with overflow-y and real scrollable content.
+    const all = dlg.querySelectorAll('*');
+    for (const el of all) {
+      const cs = getComputedStyle(el);
+      if ((cs.overflowY === 'auto' || cs.overflowY === 'scroll') &&
+          el.scrollHeight > el.clientHeight + 4) {
+        return el;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Paginate viewers until we loaded them all (or hit a guard).
+   * @param {Element} scroller - the scrollable container inside the IG dialog
+   * @param {Object} opts
+   * @param {number} opts.maxMs - hard timeout
+   * @param {boolean} opts.freezeTarget - snapshot the "Seen by" count
+   */
+  function startPagination(scroller, { maxMs = 30000, freezeTarget = true } = {}) {
+    const t0 = performance.now();
+    let stopped = false;
+    let lastHeight = 0;
+    let lastLoaded = 0;
+    let stallTicks = 0;
+
+    // Optional: freeze the target so "new views" don't extend the runway.
+    const capturedTarget = freezeTarget ? getSeenByCount() : null;
+
+    function stop(reason) {
+      stopped = true;
+      console.log(`[Storylister] pagination stop: ${reason}`);
+    }
+
+    function tick() {
+      if (stopped) return;
+      if (!document.contains(scroller)) return stop('scroller removed');
+      if (performance.now() - t0 > maxMs) return stop('timeout');
+
+      const currentKey = state.lastStoryKey || state.currentKey;
+      const map = currentKey ? state.viewerStore.get(currentKey) : null;
+      const loaded = map ? map.size : 0;
+
+      const dynamicTarget = freezeTarget ? capturedTarget : getSeenByCount();
+      const target = dynamicTarget || null;
+
+      if (target && loaded >= target) {
+        return stop(`loaded ${loaded}/${target}`);
+      }
+
+      // Stall detection: no new viewers for a while *or* no height change.
+      if (loaded === lastLoaded && scroller.scrollHeight === lastHeight) {
+        stallTicks += 1;
+        if (stallTicks > 6) {
+          // Nudge twice to re-trigger IG's lazy loader
+          scroller.scrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight - 120);
+          setTimeout(() => { scroller.scrollTop = scroller.scrollHeight; }, 120);
+        }
+        if (stallTicks > 20) {
+          return stop('stall');
+        }
+      } else {
+        stallTicks = 0;
+      }
+
+      lastLoaded = loaded;
+      lastHeight = scroller.scrollHeight;
+
+      // Normal advance to bottom
+      scroller.scrollTop = scroller.scrollHeight;
+
+      setTimeout(tick, 300);
+    }
+
+    tick();
+    return () => { stopped = true; };
+  }
+
   const IDB = {
     db: null,
     initPromise: null,
@@ -528,6 +625,56 @@
     window.dispatchEvent(new CustomEvent('storylister:data_updated', { detail: { storyId: key } }));
   }
 
+  // Call from your window.addEventListener('message', ...) handler
+  function normalizeViewer(raw, idx) {
+    const v = { ...raw };
+    v.username = (v.username || '').trim();
+    v.displayName = v.displayName || v.username;
+    v.isVerified = Boolean(v.isVerified);
+    v.isFollower = Boolean(v.isFollower);
+    v.youFollow = Boolean(v.youFollow);
+    v.reaction = v.reaction || null;
+
+    // If IG gives you a timestamp, prefer it. Otherwise leave undefined here.
+    if (v.viewedAt && typeof v.viewedAt !== 'number') {
+      // normalize if it's a string/relative
+      v.viewedAt = Number(v.viewedAt) || undefined;
+    }
+    return v;
+  }
+
+  function upsertViewersForStory(storyKey, viewers) {
+    let map = state.viewerStore.get(storyKey);
+    if (!map) {
+      map = new Map();
+      state.viewerStore.set(storyKey, map);
+    }
+
+    viewers.forEach((raw, idx) => {
+      const v = normalizeViewer(raw, idx);
+      const viewerKey = (v.username ? v.username.toLowerCase() : null) || String(v.id || idx);
+      const prev = map.get(viewerKey);
+
+      if (!prev) {
+        const now = Date.now();
+        map.set(viewerKey, {
+          ...v,
+          firstSeenAt: v.firstSeenAt || now,
+          viewedAt: v.viewedAt || now,
+          isNew: true,
+        });
+      } else {
+        map.set(viewerKey, {
+          ...prev,          // preserve our local state
+          ...v,             // overlay fresh IG fields
+          isNew: prev.isNew === true, // never re-flip to true
+          firstSeenAt: prev.firstSeenAt,
+          viewedAt: Number.isFinite(prev.viewedAt) ? prev.viewedAt : (v.viewedAt || prev.firstSeenAt),
+        });
+      }
+    });
+  }
+
   // Message bridge (route chunks correctly; dedupe; no async spam)
   window.addEventListener('message', (evt) => {
     if (evt.source !== window || evt.origin !== location.origin) return;
@@ -576,39 +723,24 @@
       });
     }
 
-    // A3 - Normalize + dedupe + stamp NEW once
-    viewers.forEach((raw, idx) => {
-      const v = { ...raw };
-
+    // Process viewers with proper normalization
+    const processedViewers = viewers.map((raw, idx) => {
       // Normalize follow flags for UI:
       // IG API naming is backwards:
       //     follows_viewer => THEY follow YOU (isFollower)
       //     followed_by_viewer => YOU follow THEM (youFollow)
-      // We accept either our normalized fields or IG-shaped fields.
-      const isFollower = (v.follows_viewer === true) || (v.follows_you === true) || (v.is_follower === true);
-      const youFollow  = (v.followed_by_viewer === true) || (v.you_follow === true) || (v.is_following === true);
-
-      v.isFollower = !!isFollower;  // they follow you
-      v.youFollow  = !!(youFollow); // you follow them
-
-      // Deduplicate by username (lc) or id
-      const viewerKey = (v.username ? String(v.username).toLowerCase() : null) || String(v.id || idx);
-      const prev = map.get(viewerKey);
-      if (!prev) {
-        // First time we've ever seen this user for THIS story
-        v.firstSeenAt = v.viewedAt || Date.now();
-        v.isNew = true; // one-time NEW
-        map.set(viewerKey, v);
-      } else {
-        // Merge without re-registering as NEW or losing firstSeenAt
-        map.set(viewerKey, {
-          ...prev,
-          ...v,
-          isNew: prev.isNew === true,
-          firstSeenAt: prev.firstSeenAt || v.firstSeenAt
-        });
-      }
+      const isFollower = (raw.follows_viewer === true) || (raw.follows_you === true) || (raw.is_follower === true);
+      const youFollow  = (raw.followed_by_viewer === true) || (raw.you_follow === true) || (raw.is_following === true);
+      
+      return {
+        ...raw,
+        isFollower: !!isFollower,
+        youFollow: !!youFollow
+      };
     });
+
+    // Use the new upsert function
+    upsertViewersForStory(ukey, processedViewers);
 
     // Re-check overflow after insert
     const loadedAfter = map.size;

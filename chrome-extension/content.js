@@ -395,60 +395,45 @@
   // Auto-pause videos
   
   // Get filtered viewers
-  function getFilteredViewers() {
-    let filteredViewers = Array.from(viewers.values());
+  function getActiveStoryMap() {
+    const key = state.lastStoryKey || state.currentKey;
+    return key ? state.viewerStore.get(key) : null;
+  }
 
-    // Apply text search
-    if (currentFilters.query) {
-      const query = currentFilters.query.toLowerCase();
-      filteredViewers = filteredViewers.filter(viewer => 
-        viewer.username.toLowerCase().includes(query) ||
-        (viewer.displayName || viewer.full_name || '').toLowerCase().includes(query)
+  function getFilteredViewers() {
+    const map = getActiveStoryMap();
+    let filtered = map ? Array.from(map.values()) : [];
+
+    // Search
+    if (state.searchQuery) {
+      const q = state.searchQuery.toLowerCase();
+      filtered = filtered.filter(v =>
+        (v.username || '').toLowerCase().includes(q) ||
+        (v.displayName || '').toLowerCase().includes(q)
       );
     }
 
-    // Apply type filter
-    switch (currentFilters.type) {
-      case 'reacts':
-        filteredViewers = filteredViewers.filter(v => !!v.reaction);
-        break;
-      case 'following':        // you follow them
-        filteredViewers = filteredViewers.filter(v => v.youFollow === true);
-        break;
-      case 'followers':        // they follow you
-        filteredViewers = filteredViewers.filter(v => v.isFollower === true);
-        break;
-      case 'non-followers':     // they don't follow you
-        filteredViewers = filteredViewers.filter(v =>
-          v.youFollow === false && v.isFollower === false
-        );
-        break;
-      case 'verified':
-        filteredViewers = filteredViewers.filter(v => v.isVerified);
-        break;
+    // Main filters
+    if (state.activeFilter === 'verified') {
+      filtered = filtered.filter(v => v.isVerified === true);
+    } else if (state.activeFilter === 'tagged') {
+      filtered = filtered.filter(v => state.taggedUsers.has((v.username || '').toLowerCase()));
     }
 
-    // Apply tag filter
-    if (currentFilters.showTagged) {
-      filteredViewers = filteredViewers.filter(v => v.isTagged);
-    }
+    // Subfilters
+    if (state.activeSubFilters.has('following')) filtered = filtered.filter(v => v.youFollow === true);
+    if (state.activeSubFilters.has('followers')) filtered = filtered.filter(v => v.isFollower === true);
+    if (state.activeSubFilters.has('non-followers')) filtered = filtered.filter(v => !v.isFollower);
+    if (state.activeSubFilters.has('reacts')) filtered = filtered.filter(v => !!v.reaction);
+    if (state.activeSubFilters.has('newest')) filtered = filtered.filter(v => v.isNew === true);
 
-    // Apply sorting
-    switch (currentFilters.sort) {
-      case 'oldest':
-        filteredViewers.sort((a, b) => (a.viewedAt || a.capturedAt || 0) - (b.viewedAt || b.capturedAt || 0));
-        break;
-      case 'original':
-        // Preserve Instagram's original order
-        filteredViewers.sort((a, b) => (a.originalIndex || 0) - (b.originalIndex || 0));
-        break;
-      case 'recent':
-      default:
-        filteredViewers.sort((a, b) => (b.viewedAt || b.capturedAt || 0) - (a.viewedAt || a.capturedAt || 0));
-        break;
-    }
+    // Sort
+    filtered.sort((a, b) => {
+      if (state.sortOrder === 'newest') return (b.viewedAt || 0) - (a.viewedAt || 0);
+      return (a.viewedAt || 0) - (b.viewedAt || 0);
+    });
 
-    return filteredViewers;
+    return filtered;
   }
   
   // Data synchronization with chunking
