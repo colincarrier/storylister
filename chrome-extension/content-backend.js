@@ -552,7 +552,7 @@
       const scroller = findScrollableInDialog();
       if (scroller) {
         if (state.stopPagination) state.stopPagination();
-        state.stopPagination = startPagination(scroller, 15000); // longer on first story
+        state.stopPagination = startPagination(scroller, { maxMs: 30000, freezeTarget: true });
         startCountSentry(); // keep nudging until target reached
       }
       // Add DOM reaction fallback after dialog opens (pass story key, not Map)

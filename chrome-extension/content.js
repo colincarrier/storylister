@@ -1292,11 +1292,21 @@
     // Close button
     document.getElementById('sl-close')?.addEventListener('click', hideRightRail);
     
-    // Force refresh (non-destructive)
+    // Non-destructive refresh
     document.getElementById('sl-refresh')?.addEventListener('click', async () => {
-      await loadTaggedUsers();
-      await DataSyncManager.performSync();
-      updateViewerList(true); // force a full rebuild once after sync
+      // Find the scrollable dialog and restart pagination if available
+      const scroller = window.findScrollableInDialog?.();
+      if (scroller && window.startPagination) {
+        if (window.state?.stopPagination) window.state.stopPagination();
+        window.state.stopPagination = window.startPagination(scroller, { maxMs: 30000, freezeTarget: true });
+      }
+      
+      // Perform sync without clearing data
+      try {
+        await DataSyncManager?.performSync?.();
+      } catch (_) {}
+      
+      updateViewerList(false); // incremental update, not full rebuild
     });
     
     // Settings toggle
