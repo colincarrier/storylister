@@ -683,24 +683,23 @@
     }
     
     // Update stats
+    // Update counts: show filtered / total from canonical index
+    const filteredCountEl = document.getElementById('sl-filtered-count');
     const viewerCount = document.getElementById('sl-viewer-count');
     const verifiedCount = document.getElementById('sl-verified-count');
     const taggedCount = document.getElementById('sl-tagged-count');
     
-    if (viewerCount) viewerCount.textContent = totalViewers;
-    if (verifiedCount) verifiedCount.textContent = totalVerified;
-    if (taggedCount) taggedCount.textContent = `${taggedInCurrentStory}/${taggedUsers.size}`;
+    const idx = JSON.parse(localStorage.getItem('panel_story_index') || '{}');
+    const total = idx[slStoreKey()]?.count ?? viewers.size;
     
-    // Update filtered count with DOM total if available
-    let countText = `${filteredViewers.length} viewers`;
-    if (storyMeta.domTotal && storyMeta.domTotal > viewers.size) {
-      countText = `Showing ${filteredViewers.length} of ${storyMeta.domTotal} viewers`;
+    if (filteredCountEl) {
+      filteredCountEl.textContent = `${filteredViewers.length} of ${total} viewer${(total|0) === 1 ? '' : 's'}`;
     }
-    if (newViewersCount > 0) {
-      countText += ` (${newViewersCount} new)`;
-    }
-    const filteredCount = document.getElementById('sl-filtered-count');
-    if (filteredCount) filteredCount.textContent = countText;
+    
+    // Update the individual stat counters
+    if (viewerCount) viewerCount.textContent = String(total);
+    if (verifiedCount) verifiedCount.textContent = String(totalVerified);
+    if (taggedCount) taggedCount.textContent = `${taggedInCurrentStory}/${taggedUsers.size}`;
     
     // If nothing to show, render empty
     if (filteredViewers.length === 0) {
