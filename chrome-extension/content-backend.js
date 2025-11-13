@@ -16,6 +16,30 @@
 
   const DEBUG = false;
 
+  // Event bus for cross-world communication
+  const BUS = {
+    on(type, handler) {
+      document.addEventListener(type, handler);
+    },
+    off(type, handler) {
+      document.removeEventListener(type, handler);
+    },
+    emit(type, detail) {
+      // IMPORTANT: send only JSON-serializable data across worlds
+      document.dispatchEvent(new CustomEvent(type, { detail }));
+    }
+  };
+  
+  // Event names
+  const EVT = {
+    UI_READY: 'sl:UI_READY',
+    VIEWERS_SNAPSHOT: 'sl:VIEWERS_SNAPSHOT',   // full snapshot
+    VIEWERS_DIFF: 'sl:VIEWERS_DIFF',           // optional diffs
+    REQUEST_REFRESH: 'sl:REQUEST_REFRESH',
+    REFRESH_STARTED: 'sl:REFRESH_STARTED',
+    REFRESH_DONE: 'sl:REFRESH_DONE'
+  };
+
   const state = {
     injected: false,
     currentKey: null,              // last active unique key (stories:owner:mediaId)
@@ -127,54 +151,23 @@
     return () => { stopped = true; };
   }
 
-  // Call from your window.addEventListener('message', ...) handler
-  function normalizeViewer(raw, idx) {
-    const v = { ...raw };
-    v.username = (v.username || '').trim();
-    v.displayName = v.displayName || v.username;
-    v.isVerified = Boolean(v.isVerified);
-    v.isFollower = Boolean(v.isFollower);
-    v.youFollow = Boolean(v.youFollow);
-    v.reaction = v.reaction || null;
-
-    // If IG gives you a timestamp, prefer it. Otherwise leave undefined here.
-    if (v.viewedAt && typeof v.viewedAt !== 'number') {
-      // normalize if it's a string/relative
-      v.viewedAt = Number(v.viewedAt) || undefined;
-    }
-    return v;
+  // Snapshot functions for cross-world communication
+  function snapshot() {
+    // Convert Map to array for cross-world safety
+    const currentKey = state.lastStoryKey || state.currentKey;
+    const map = currentKey ? state.viewerStore.get(currentKey) : null;
+    return {
+      storyKey: currentKey,
+      count: map ? map.size : 0,
+      viewers: map ? Array.from(map.values()) : []
+    };
   }
 
-  function upsertViewersForStory(storyKey, viewers) {
-    let map = state.viewerStore.get(storyKey);
-    if (!map) {
-      map = new Map();
-      state.viewerStore.set(storyKey, map);
-    }
-
-    viewers.forEach((raw, idx) => {
-      const v = normalizeViewer(raw, idx);
-      const viewerKey = (v.username ? v.username.toLowerCase() : null) || String(v.id || idx);
-      const prev = map.get(viewerKey);
-
-      if (!prev) {
-        const now = Date.now();
-        map.set(viewerKey, {
-          ...v,
-          firstSeenAt: v.firstSeenAt || now,
-          viewedAt: v.viewedAt || now,
-          isNew: true,
-        });
-      } else {
-        map.set(viewerKey, {
-          ...prev,          // preserve our local state
-          ...v,             // overlay fresh IG fields
-          isNew: prev.isNew === true, // never re-flip to true
-          firstSeenAt: prev.firstSeenAt,
-          viewedAt: Number.isFinite(prev.viewedAt) ? prev.viewedAt : (v.viewedAt || prev.firstSeenAt),
-        });
-      }
-    });
+  function broadcastSnapshot() {
+    // Broadcast to both document and window for maximum compatibility (Claude's addition)
+    const data = snapshot();
+    document.dispatchEvent(new CustomEvent(EVT.VIEWERS_SNAPSHOT, { detail: data }));
+    window.postMessage({ type: EVT.VIEWERS_SNAPSHOT, detail: data }, '*');
   }
 
   const IDB = {
@@ -738,7 +731,32 @@
         });
       }
     });
+    
+    // Broadcast snapshot after mutation
+    broadcastSnapshot();
   }
+
+  // Event listeners for UI communication
+  BUS.on(EVT.UI_READY, () => {
+    broadcastSnapshot();
+  });
+
+  BUS.on(EVT.REQUEST_REFRESH, async () => {
+    const currentKey = state.lastStoryKey || state.currentKey;
+    BUS.emit(EVT.REFRESH_STARTED, { storyKey: currentKey });
+
+    const scroller = findScrollableInDialog();
+    if (scroller) {
+      try {
+        state.stopPagination?.();
+        state.stopPagination = startPagination(scroller, { maxMs: 30000, freezeTarget: true });
+      } finally {
+        BUS.emit(EVT.REFRESH_DONE, { storyKey: currentKey });
+      }
+    } else {
+      BUS.emit(EVT.REFRESH_DONE, { storyKey: currentKey, error: 'no_scroller' });
+    }
+  });
 
   // Message bridge (route chunks correctly; dedupe; no async spam)
   window.addEventListener('message', (evt) => {
