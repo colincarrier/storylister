@@ -1,0 +1,238 @@
+You and Replit are 100% correct—the spec assumes shared memory between `content.js` and `content-backend.js`, which is not true in Chrome’s isolation model. The fix is to make **one script the source of truth** and **sync via a message bus**, not a shared object.
+
+Below is a drop‑in plan you can hand to Replit. It keeps `state.viewerStore` in `content-backend.js` and mirrors a UI snapshot in `content.js` via events. It also fixes the refresh button and filters.
+
+---
+
+## Reply you can send to Replit
+
+**You’re right about the isolation. Please proceed with `content-backend.js` owning all state and broadcasting updates to `content.js` via our event bus.**
+`content.js` should maintain its own UI copy and never read `state.viewerStore` directly.
+
+### Event channel
+
+Use DOM events (or `postMessage`, see note below) with a small, namespaced bus:
+
+```js
+// shared/bus.js (or inline in both files)
+export const BUS = {
+  on(type, handler) {
+    document.addEventListener(type, handler);
+  },
+  off(type, handler) {
+    document.removeEventListener(type, handler);
+  },
+  emit(type, detail) {
+    // IMPORTANT: send only JSON-serializable data across worlds
+    document.dispatchEvent(new CustomEvent(type, { detail }));
+  }
+};
+// Event names:
+export const EVT = {
+  UI_READY: 'sl:UI_READY',
+  VIEWERS_SNAPSHOT: 'sl:VIEWERS_SNAPSHOT',   // full snapshot
+  VIEWERS_DIFF: 'sl:VIEWERS_DIFF',           // optional diffs
+  REQUEST_REFRESH: 'sl:REQUEST_REFRESH',
+  REFRESH_STARTED: 'sl:REFRESH_STARTED',
+  REFRESH_DONE: 'sl:REFRESH_DONE'
+};
+```
+
+> **Why `document`?** Dispatch/listen on `document` for reliable crossing between page context and content script. (If you hit issues on certain sites, switch to `window.postMessage`—see note at the end.)
+
+---
+
+### `content-backend.js` (source of truth)
+
+* Owns `state.viewerStore` (a `Map` keyed by `username` or `id`).
+* After any mutation, **broadcast either a full snapshot** (simplest) **or a small diff**.
+* Responds to refresh requests from the UI.
+
+```js
+import { BUS, EVT } from './shared/bus.js';
+
+// Internal, not exported:
+const state = {
+  viewerStore: new Map(),     // key -> viewer object
+  stopPagination: null,
+  storyKey: null
+};
+
+function viewerKey(v) {
+  return v?.username || v?.id;
+}
+
+function snapshot() {
+  // Convert Map to array for cross-world safety
+  return {
+    storyKey: state.storyKey,
+    count: state.viewerStore.size,
+    viewers: Array.from(state.viewerStore.values())
+  };
+}
+
+function broadcastSnapshot() {
+  BUS.emit(EVT.VIEWERS_SNAPSHOT, snapshot());
+}
+
+export function upsertViewersForStory(storyKey, viewers) {
+  state.storyKey = storyKey;
+  for (const v of viewers) {
+    const k = viewerKey(v);
+    if (!k) continue;
+    state.viewerStore.set(k, v);
+  }
+  broadcastSnapshot();
+}
+
+export function removeViewers(keys) {
+  for (const k of keys) state.viewerStore.delete(k);
+  broadcastSnapshot();
+}
+
+// Initial hydration on UI ready
+BUS.on(EVT.UI_READY, () => {
+  broadcastSnapshot();
+});
+
+// Refresh handling
+BUS.on(EVT.REQUEST_REFRESH, async () => {
+  BUS.emit(EVT.REFRESH_STARTED, { storyKey: state.storyKey });
+
+  const scroller = findScrollableInDialog(); // your existing helper
+  if (scroller) {
+    try {
+      state.stopPagination?.();
+      state.stopPagination = startPagination(scroller, { maxMs: 30000 }); // your existing code
+      // If startPagination is async and yields results progressively,
+      // it should call upsertViewersForStory() internally to stream updates.
+    } finally {
+      BUS.emit(EVT.REFRESH_DONE, { storyKey: state.storyKey });
+    }
+  } else {
+    BUS.emit(EVT.REFRESH_DONE, { storyKey: state.storyKey, error: 'no_scroller' });
+  }
+});
+```
+
+> **IMPORTANT:** Only send JSON‑serializable data in events (no `Map`, `Set`, functions, or class instances). Convert to arrays/POJOs first (as shown).
+
+---
+
+### `content.js` (UI mirror + filters)
+
+* Maintains `uiState.viewers` (a `Map`) that mirrors the backend snapshot.
+* All UI code (filters, counts, rendering) reads from **`uiState`**, never from `state.viewerStore`.
+* Requests a snapshot on load, and emits refresh requests when the button is clicked.
+
+```js
+import { BUS, EVT } from './shared/bus.js';
+
+// Local UI state only
+const uiState = {
+  storyKey: null,
+  viewers: new Map(),  // key -> viewer object
+  filters: {
+    // whatever you support: searchText, isFollowingOnly, etc.
+  }
+};
+
+function viewerKey(v) {
+  return v?.username || v?.id;
+}
+
+function hydrateFromSnapshot(detail) {
+  const { storyKey, viewers } = detail;
+  uiState.storyKey = storyKey;
+  uiState.viewers.clear();
+  for (const v of viewers) {
+    const k = viewerKey(v);
+    if (!k) continue;
+    uiState.viewers.set(k, v);
+  }
+  updateViewerList({ full: true }); // your existing UI render
+}
+
+function getFilteredViewers() {
+  let list = Array.from(uiState.viewers.values());
+  // apply filters from uiState.filters
+  // e.g., text:
+  if (uiState.filters.searchText) {
+    const q = uiState.filters.searchText.toLowerCase();
+    list = list.filter(v =>
+      (v.username && v.username.toLowerCase().includes(q)) ||
+      (v.fullName && v.fullName.toLowerCase().includes(q))
+    );
+  }
+  // ... other filters
+  return list;
+}
+
+function updateViewerList({ full } = {}) {
+  const filtered = getFilteredViewers();
+  // your existing DOM update using `filtered`
+  // and counts using `uiState.viewers.size`
+}
+
+// Listen for backend updates
+BUS.on(EVT.VIEWERS_SNAPSHOT, (e) => {
+  hydrateFromSnapshot(e.detail);
+});
+
+// Initial handshake
+BUS.emit(EVT.UI_READY, {});
+
+document.getElementById('sl-refresh')?.addEventListener('click', () => {
+  BUS.emit(EVT.REQUEST_REFRESH, { storyKey: uiState.storyKey });
+});
+
+// Optional UX hooks
+BUS.on(EVT.REFRESH_STARTED, () => {
+  setSpinner(true);
+});
+BUS.on(EVT.REFRESH_DONE, () => {
+  setSpinner(false);
+});
+```
+
+---
+
+### What to change in the current spec/code
+
+* **Remove** all references in `content.js` to `state.viewerStore`.
+  Replace with reads from `uiState.viewers` (as shown).
+* **Emit** `EVT.UI_READY` from `content.js` on load so `content-backend.js` can push an initial snapshot immediately.
+* **Wire** the refresh button to emit `EVT.REQUEST_REFRESH`; handle it in `content-backend.js`.
+* **Ensure** any existing pagination code calls `upsertViewersForStory()` so the UI gets streaming updates.
+
+---
+
+### Test plan (quick)
+
+1. Load the dialog: `content.js` emits `UI_READY` → backend responds with `VIEWERS_SNAPSHOT` → list renders (no `undefined` reads).
+2. Scroll/auto‑paginate: backend updates the store and emits new snapshots → UI incrementally updates.
+3. Click **Refresh**: UI gets `REFRESH_STARTED` (spinner shows), pagination restarts, then `REFRESH_DONE` (spinner hides).
+4. Apply filters/search: `getFilteredViewers()` reads from `uiState.viewers` and updates the DOM.
+
+---
+
+### Note on transport choice
+
+* **Custom DOM events** (shown above) are simple and work well if you keep payloads JSON‑serializable.
+* If you ever see oddities with `CustomEvent.detail` across the page vs. content world on certain sites, switch the bus to `window.postMessage`:
+
+  ```js
+  // swap BUS.emit / BUS.on with:
+  window.addEventListener('message', (e) => {
+    if (e.source !== window || !e.data || !e.data.type) return;
+    // route based on e.data.type
+  });
+
+  window.postMessage({ type: EVT.VIEWERS_SNAPSHOT, payload: snapshot }, '*');
+  ```
+
+  The rest of the architecture stays the same.
+
+---
+
+If you’d like, I can also produce a small diff against your current files so Replit can paste it in directly.
