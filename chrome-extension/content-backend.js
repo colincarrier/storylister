@@ -127,6 +127,56 @@
     return () => { stopped = true; };
   }
 
+  // Call from your window.addEventListener('message', ...) handler
+  function normalizeViewer(raw, idx) {
+    const v = { ...raw };
+    v.username = (v.username || '').trim();
+    v.displayName = v.displayName || v.username;
+    v.isVerified = Boolean(v.isVerified);
+    v.isFollower = Boolean(v.isFollower);
+    v.youFollow = Boolean(v.youFollow);
+    v.reaction = v.reaction || null;
+
+    // If IG gives you a timestamp, prefer it. Otherwise leave undefined here.
+    if (v.viewedAt && typeof v.viewedAt !== 'number') {
+      // normalize if it's a string/relative
+      v.viewedAt = Number(v.viewedAt) || undefined;
+    }
+    return v;
+  }
+
+  function upsertViewersForStory(storyKey, viewers) {
+    let map = state.viewerStore.get(storyKey);
+    if (!map) {
+      map = new Map();
+      state.viewerStore.set(storyKey, map);
+    }
+
+    viewers.forEach((raw, idx) => {
+      const v = normalizeViewer(raw, idx);
+      const viewerKey = (v.username ? v.username.toLowerCase() : null) || String(v.id || idx);
+      const prev = map.get(viewerKey);
+
+      if (!prev) {
+        const now = Date.now();
+        map.set(viewerKey, {
+          ...v,
+          firstSeenAt: v.firstSeenAt || now,
+          viewedAt: v.viewedAt || now,
+          isNew: true,
+        });
+      } else {
+        map.set(viewerKey, {
+          ...prev,          // preserve our local state
+          ...v,             // overlay fresh IG fields
+          isNew: prev.isNew === true, // never re-flip to true
+          firstSeenAt: prev.firstSeenAt,
+          viewedAt: Number.isFinite(prev.viewedAt) ? prev.viewedAt : (v.viewedAt || prev.firstSeenAt),
+        });
+      }
+    });
+  }
+
   const IDB = {
     db: null,
     initPromise: null,
