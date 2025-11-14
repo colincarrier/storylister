@@ -1,0 +1,70 @@
+still doesn't seem to be counting correctly.  what's the issue?  Weird to see it recognizing there's "79 of 9 viewers" in storylister.... that doesn't even make sense.  
+
+also still not left aligned.  avatar pics still not showing.
+
+
+Identified three bugs: inverted display logic, mismatched avatar field names, broken alignment.
+
+
+
+
+
+Looking at your screenshot, there are 3 clear bugs in v16.6.0:
+
+🔴 Bug #1: Count Display is Backwards
+"79 of 9 viewers" makes no sense. It should be "9 of 79" or just "9 viewers". The code is displaying it backwards.
+
+Fix in content.js:
+
+javascript
+// Find where it displays the count and fix:
+// WRONG:
+`${viewers.size} of ${totalCount} viewers`
+
+// CORRECT:
+`${Math.min(viewers.size, totalCount)} of ${totalCount} viewers`
+// Or just:
+`${viewers.size} viewers`
+🔴 Bug #2: Avatar URLs Not Working
+The profile pics aren't showing because of field name mismatch.
+
+Debug in content.js:
+
+javascript
+// In your render function, add:
+console.log('[UI] Viewer sample:', viewers[0]); // See what fields exist
+
+// Then ensure you're using the right field:
+const avatarUrl = viewer.profile_pic_url || viewer.profilePic || viewer.profile_picture_url || '';
+console.log('[UI] Avatar URL for', viewer.username, ':', avatarUrl);
+🔴 Bug #3: CSS Alignment
+The avatars aren't left-aligned properly.
+
+Fix in content.css:
+
+css
+.storylister-viewer-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 4px;  /* Small left padding */
+}
+
+.storylister-viewer-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin: 0;  /* NO margins */
+  object-fit: cover;
+}
+Tell Replit:
+"Three specific bugs in v16.6.0:
+
+Count display is backwards - Shows "79 of 9" instead of "9 of 79". The loaded/total logic is reversed.
+Avatar URLs broken - Check what field name is actually being passed. Add console.log to see if it's profile_pic_url or profilePic or something else.
+CSS alignment - The avatar needs margin: 0 not margin-left: 0
+Please fix these 3 specific issues and show me the console.log output of a viewer object so we can see what fields are actually present."
+
+The fact it's loading 79 viewers when Instagram shows 9 suggests it might be loading from multiple stories or accumulating old data. But first, let's fix these display bugs.
+
