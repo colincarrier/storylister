@@ -157,17 +157,24 @@
     const currentKey = state.lastStoryKey || state.currentKey;
     const map = currentKey ? state.viewerStore.get(currentKey) : null;
     return {
-      storyKey: currentKey,
+      key: currentKey,  // Changed from storyKey to key for consistency
+      storyKey: currentKey,  // Keep both for compatibility
       count: map ? map.size : 0,
       viewers: map ? Array.from(map.values()) : []
     };
   }
 
   function broadcastSnapshot() {
-    // Broadcast to both document and window for maximum compatibility (Claude's addition)
+    // Broadcast to both document and window for maximum compatibility
     const data = snapshot();
     document.dispatchEvent(new CustomEvent(EVT.VIEWERS_SNAPSHOT, { detail: data }));
     window.postMessage({ type: EVT.VIEWERS_SNAPSHOT, detail: data }, '*');
+    
+    // Debug logging
+    console.log('[BACKEND] Broadcasting snapshot', { 
+      key: data.key, 
+      count: data.count 
+    });
   }
 
   const IDB = {
@@ -706,6 +713,9 @@
     if (!map) {
       map = new Map();
       state.viewerStore.set(storyKey, map);
+      // attempt to revive prior in-session state
+      loadStory(storyKey);
+      map = state.viewerStore.get(storyKey) || new Map();
     }
 
     viewers.forEach((raw, idx) => {
@@ -720,6 +730,7 @@
           firstSeenAt: v.firstSeenAt || now,
           viewedAt: v.viewedAt || now,
           isNew: true,
+          reaction: v.reaction || (v.liked ? '❤️' : undefined)
         });
       } else {
         map.set(viewerKey, {
@@ -728,12 +739,42 @@
           isNew: prev.isNew === true, // never re-flip to true
           firstSeenAt: prev.firstSeenAt,
           viewedAt: Number.isFinite(prev.viewedAt) ? prev.viewedAt : (v.viewedAt || prev.firstSeenAt),
+          reaction: prev.reaction || v.reaction || (v.liked ? '❤️' : undefined)
         });
       }
     });
     
+    // Save to sessionStorage
+    saveStory(storyKey);
+    
     // Broadcast snapshot after mutation
     broadcastSnapshot();
+    
+    console.log('[BACKEND] Updated story', storyKey, { count: map.size });
+  }
+
+  // Persistence (sessionStorage to keep scope minimal and safe)
+  function saveStory(key) {
+    const map = state.viewerStore.get(key);
+    if (!map) return;
+    try {
+      const obj = Object.fromEntries([...map.entries()]);
+      sessionStorage.setItem(`sl:story:${key}`, JSON.stringify(obj));
+    } catch (e) {
+      console.warn('[BACKEND] saveStory failed', e);
+    }
+  }
+
+  function loadStory(key) {
+    try {
+      const raw = sessionStorage.getItem(`sl:story:${key}`);
+      if (!raw) return;
+      const obj = JSON.parse(raw);
+      const map = new Map(Object.entries(obj));
+      state.viewerStore.set(key, map);
+    } catch (e) {
+      console.warn('[BACKEND] loadStory failed', e);
+    }
   }
 
   // Event listeners for UI communication
@@ -766,6 +807,15 @@
 
     const { mediaId, ownerUsername, viewers, totalCount, debug } = msg.data || {};
     if (!mediaId || !Array.isArray(viewers)) return;
+    
+    // Debug logging
+    console.log('[BACKEND] Received chunk', {
+      mediaId,
+      ownerUsername,
+      chunk: viewers?.length || 0,
+      totalCount,
+      debug
+    });
     
     // v16.3: Use unique story keys to prevent cross-story contamination
     const ukey = storyKey(ownerUsername, mediaId);

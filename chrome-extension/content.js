@@ -453,15 +453,81 @@
   
   // Hydrate UI state from backend snapshot
   function hydrateFromSnapshot(detail) {
-    const { storyKey, viewers: viewerArray } = detail;
-    uiState.storyKey = storyKey;
-    uiState.viewers.clear();
-    for (const v of viewerArray || []) {
-      const k = viewerKey(v);
-      if (!k) continue;
-      uiState.viewers.set(k, v);
+    if (!detail) return;
+    
+    const { key, storyKey, viewers: viewerArray, count } = detail;
+    const activeKey = key || storyKey;
+    
+    console.log('[UI] Hydrating from snapshot:', { 
+      key: activeKey, 
+      count: count || viewerArray?.length || 0 
+    });
+    
+    // Update global state references
+    ACTIVE_MEDIA_ID_FROM_BACKEND = activeKey;
+    uiState.storyKey = activeKey;
+    state.currentKey = activeKey;
+    state.lastStoryKey = activeKey;
+    
+    // Get or create the story Map (don't clear - preserve existing state)
+    let storyMap = state.viewerStore.get(activeKey);
+    if (!storyMap) {
+      storyMap = new Map();
+      state.viewerStore.set(activeKey, storyMap);
     }
-    updateViewerList({ full: true }); // your existing UI render
+    
+    // Merge viewers into Maps, preserving existing isNew/reaction flags
+    for (const v of viewerArray || []) {
+      // Normalize viewer key to avoid collisions
+      const vKey = ((v.username || v.id || '').toLowerCase()).trim();
+      if (!vKey) continue;
+      
+      // Get existing viewer data if present
+      const existing = storyMap.get(vKey);
+      
+      // Merge with existing data, preserving persistent flags
+      const merged = {
+        ...v,
+        // Preserve isNew flag if it was already false (once seen, always seen)
+        isNew: existing ? (existing.isNew && v.isNew) : v.isNew,
+        // Preserve reaction if it exists in either
+        reaction: v.reaction || (existing?.reaction || null),
+        // Keep earliest firstSeenAt
+        firstSeenAt: existing?.firstSeenAt || v.firstSeenAt || Date.now()
+      };
+      
+      // Store merged data in all Maps
+      storyMap.set(vKey, merged);
+      uiState.viewers.set(vKey, merged);
+      
+      // Store in global viewers Map with UI-friendly format
+      viewers.set(vKey, {
+        id: merged.id || merged.pk || merged.username,
+        username: merged.username || '',
+        displayName: merged.full_name || merged.displayName || merged.username || 'Anonymous',
+        profilePic: merged.profile_pic_url || merged.profilePic || '',
+        isVerified: merged.is_verified || merged.isVerified || false,
+        // Use merged flags
+        isNew: merged.isNew === true,
+        reaction: merged.reaction,
+        isFollower: merged.isFollower || merged.follows_viewer || false,
+        youFollow: merged.youFollow || merged.followed_by_viewer || false,
+        viewedAt: merged.viewedAt || merged.timestamp || Date.now(),
+        originalIndex: merged.originalIndex || 0,
+        isTagged: taggedUsers.has((merged.username || '').toLowerCase())
+      });
+    }
+    
+    // Update metadata
+    storyMeta.domTotal = count || viewerArray?.length || 0;
+    storyMeta.collectedCount = viewers.size;
+    
+    // Reset filter caches and trigger full UI update
+    currentFilters.lastSearch = null;
+    currentFilters.lastFilters = null;
+    
+    // Trigger UI update through existing pipeline with full rebuild
+    updateViewerList(true);
   }
 
   // Get filtered viewers from uiState
@@ -1502,6 +1568,14 @@
     }
   });
 
+  // Listen for active media changes from backend
+  window.addEventListener('storylister:active_media', (e) => {
+    if (e.detail?.storyId) {
+      ACTIVE_MEDIA_ID_FROM_BACKEND = e.detail.storyId;
+      console.log('[UI] Active media updated:', ACTIVE_MEDIA_ID_FROM_BACKEND);
+    }
+  });
+  
   // Listen for data updates
   window.addEventListener('storylister:data_updated', async (e) => {
     // console.log('[Storylister] Data updated:', e.detail);
