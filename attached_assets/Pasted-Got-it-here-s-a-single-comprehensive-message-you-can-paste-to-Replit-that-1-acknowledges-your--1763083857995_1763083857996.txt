@@ -1,0 +1,476 @@
+Got it — here’s a single, comprehensive message you can paste to Replit that (1) acknowledges your “keep v16.5.0” direction, (2) documents the current blocking bugs you observed, and (3) provides **exact, minimal, drop‑in code changes** (by file) to fix the broken data flow, persistence, pagination, avatars, and reactions — without introducing new architecture or “risky” changes.
+
+---
+
+## 📌 Copy/Paste this to Replit
+
+> **Context**
+> We originally asked you to ship v16.5.0 as-is. After hands-on testing, v16.5.0 has **blocking bugs** that make it unusable in production. Please keep the architecture exactly as-is (nested Maps + event bus), but apply the **minimal, targeted fixes** below to restore the data pipeline, persistence, pagination, avatars, and reactions.
+>
+> **Observed failures (from live runs + recording):**
+>
+> 1. Auto-scroll **is** happening, but the UI isn’t populating — so the pipeline is broken between `injected.js → content-backend.js → content.js`.
+> 2. Viewer list **caps at ~50**, then the count **drops** — classic virtualization + state-reset symptom.
+> 3. Everyone is flagged **NEW** on every refresh — state isn’t merging/persisting.
+> 4. **Avatars missing** / left alignment off.
+> 5. **Reactions/likes** aren’t captured.
+> 6. Counts show **0/0** at times or otherwise wrong.
+>
+> **Acceptance criteria (please validate):**
+>
+> * Autoscroll loads **all** viewers for the current story until `loaded >= seenByCount`.
+> * Viewer state **merges** across chunks; NEW only on first sight.
+> * Counts do **not** regress back to 50; no shrinking.
+> * Avatars display and align left consistently.
+> * Hearts/reactions show when present.
+> * Snapshot events reach the UI every tick; the UI hydrates from them.
+>
+> Below are **surgical patches** by file. These keep the existing design intact and only fix the broken pieces.
+
+---
+
+### 1) `injected.js` (ensure we actually emit chunks + correct fields)
+
+**What to do**
+
+* Guarantee we normalize key fields (`id`, `username`, `profile_pic_url`) and **postMessage** each chunk.
+* Add debug logs so we can see each step in DevTools.
+
+**Patch**
+
+```js
+// === injected.js ===
+// Add or update this helper:
+function normalizeViewer(v, idx) {
+  const u = v?.user || v?.node?.user || v?.node || v || {};
+  const profilePic =
+    u.profile_pic_url ||
+    u.profile_pic_url_hd ||
+    u.profile_picture_url ||
+    u.profile_pic_url_small ||
+    '';
+
+  return {
+    id: u.pk ?? u.id ?? null,
+    username: u.username ?? null,
+    full_name: u.full_name ?? u.fullName ?? '',
+    profile_pic_url: profilePic,
+    // Try to carry any "liked" signals if present in payload
+    liked: !!(v?.has_liked || v?.liked || v?.reaction === '❤️')
+  };
+}
+
+// Wherever you batch/emit viewers, ensure this runs:
+function emitViewersChunk({ mediaId, ownerUsername, viewers, totalCount }) {
+  const normalized = (viewers || []).map(normalizeViewer);
+
+  window.postMessage(
+    {
+      source: 'STORYLISTER',
+      type: 'STORYLISTER_VIEWERS_CHUNK',
+      data: { mediaId, ownerUsername, viewers: normalized, totalCount }
+    },
+    '*'
+  );
+
+  // Debug
+  console.log('[INJECTED] Posted', normalized.length, 'viewers for', mediaId, {
+    ownerUsername, totalCount, sample: normalized.slice(0, 2)
+  });
+}
+```
+
+---
+
+### 2) `content-backend.js` (fix pipeline, merge state, pagination, reactions, snapshot)
+
+**What to do**
+
+* **Receive** the injected message reliably, **upsert** into the per-story Map without resetting, then **broadcast** a snapshot event name the UI actually listens for.
+* Add a safe **stuck-guard** to keep scrolling until we reach `seenByCount`.
+* Add **lightweight persistence** (sessionStorage) so “NEW” is one-time. (No manifest change needed.)
+
+**Patch**
+
+```js
+// === content-backend.js ===
+const EVT = {
+  VIEWERS_SNAPSHOT: 'sl:VIEWERS_SNAPSHOT', // keep this exact; UI listens for this
+};
+
+const state = {
+  viewerStore: new Map(),         // storyKey -> Map(viewerKey -> viewerObj)
+  lastStoryKey: null,
+  paginateTimer: null,
+  noGrowthTicks: 0,
+  lastLoadedCount: 0
+};
+
+// Utility: consistent story key
+function storyKey(ownerUsername, mediaId) {
+  return `${(ownerUsername || '').toLowerCase()}#${mediaId}`;
+}
+
+// Utility: consistent viewer key
+function viewerKey(viewer) {
+  return (viewer?.username?.toLowerCase()) || String(viewer?.id ?? '');
+}
+
+// Persistence (sessionStorage to keep scope minimal and safe)
+function saveStory(key) {
+  const map = state.viewerStore.get(key);
+  if (!map) return;
+  const obj = Object.fromEntries([...map.entries()]);
+  sessionStorage.setItem(`sl:story:${key}`, JSON.stringify(obj));
+}
+
+function loadStory(key) {
+  try {
+    const raw = sessionStorage.getItem(`sl:story:${key}`);
+    if (!raw) return;
+    const obj = JSON.parse(raw);
+    const map = new Map(Object.entries(obj));
+    state.viewerStore.set(key, map);
+  } catch (e) {
+    console.warn('[BACKEND] loadStory failed', e);
+  }
+}
+
+// Upsert viewers for a story, MERGING existing state so NEW is one-time
+function upsertViewersForStory(storyKey, viewers) {
+  let map = state.viewerStore.get(storyKey);
+  if (!map) {
+    map = new Map();
+    state.viewerStore.set(storyKey, map);
+    // attempt to revive prior in-session state
+    loadStory(storyKey);
+  }
+
+  viewers.forEach((v, idx) => {
+    const k = viewerKey(v) || String(idx);
+    const prev = map.get(k);
+    if (!prev) {
+      const now = Date.now();
+      map.set(k, {
+        ...v,
+        firstSeenAt: now,
+        viewedAt: now,
+        isNew: true,
+        reaction: v.liked ? '❤️' : undefined
+      });
+    } else {
+      map.set(k, {
+        ...prev,              // keep our state
+        ...v,                 // overlay fresh IG fields
+        isNew: prev.isNew,    // preserve NEW flag (one-time)
+        firstSeenAt: prev.firstSeenAt,
+        viewedAt: prev.viewedAt ?? Date.now(),
+        reaction: prev.reaction || (v.liked ? '❤️' : undefined)
+      });
+    }
+  });
+
+  saveStory(storyKey);
+  broadcastSnapshot(storyKey);
+}
+
+// Snapshot builder
+function snapshot(storyKey) {
+  const map = state.viewerStore.get(storyKey) || new Map();
+  const viewers = [...map.values()];
+  return {
+    key: storyKey,
+    count: map.size,
+    viewers
+  };
+}
+
+// Broadcast snapshot the UI actually consumes
+function broadcastSnapshot(storyKey) {
+  const data = snapshot(storyKey);
+  document.dispatchEvent(new CustomEvent(EVT.VIEWERS_SNAPSHOT, { detail: data }));
+  // Debug
+  console.log('[BACKEND] Broadcasting snapshot', { key: storyKey, count: data.count });
+}
+
+// Receive chunks from injected.js
+window.addEventListener('message', (evt) => {
+  if (evt.source !== window) return;
+  const msg = evt.data;
+  if (!msg || msg.source !== 'STORYLISTER' || msg.type !== 'STORYLISTER_VIEWERS_CHUNK') return;
+
+  const { mediaId, ownerUsername, viewers, totalCount } = msg.data || {};
+  const key = storyKey(ownerUsername, mediaId);
+  state.lastStoryKey = key;
+
+  console.log('[BACKEND] Received chunk', {
+    key, totalCount, chunk: viewers?.length || 0
+  });
+
+  upsertViewersForStory(key, viewers || []);
+});
+
+// Seen-by count (from UI). Keep lenient selectors; IG changes often.
+function getSeenByCount() {
+  // Try button text like "Seen by N"
+  const btn = [...document.querySelectorAll('button, div')]
+    .find(el => /Seen by\s+\d+/i.test(el.textContent || ''));
+  if (btn) {
+    const m = (btn.textContent || '').match(/Seen by\s+(\d+)/i);
+    if (m) return Number(m[1]);
+  }
+  return null; // unknown; we'll use growth guard
+}
+
+// Merge “heart” reacts by scanning the dialog rows
+function mergeReactsFromDialogIntoMap(key) {
+  const dlg = document.querySelector('[role="dialog"][aria-modal="true"]');
+  if (!dlg) return;
+
+  const listRows = dlg.querySelectorAll('a[href^="/"][role="link"], div[role="button"], li, div');
+  const map = state.viewerStore.get(key);
+  if (!map) return;
+
+  listRows.forEach(row => {
+    // Look for a heart-ish indicator with multiple fallbacks
+    const heart =
+      row.querySelector('svg[aria-label*="Like" i], svg[aria-label*="Heart" i], svg[fill*="currentColor"][height][width] use[href*="heart"]');
+    if (!heart) return;
+
+    // Extract username from anchor
+    const a = row.querySelector('a[href^="/"]');
+    const username = a?.getAttribute('href')?.split('/').filter(Boolean)[0];
+    if (!username) return;
+
+    const k = username.toLowerCase();
+    const v = map.get(k);
+    if (v && !v.reaction) {
+      v.reaction = '❤️';
+    }
+  });
+}
+
+// Pagination / virtualization guard
+function startPagination() {
+  if (state.paginateTimer) return;
+
+  const scrollContainer = document.querySelector('[role="dialog"][aria-modal="true"] [style*="overflow: auto"], [role="dialog"][aria-modal="true"] ul, [role="dialog"][aria-modal="true"] div[tabindex]');
+  if (!scrollContainer) {
+    console.warn('[PAGINATE] No scroll container found.');
+    return;
+  }
+
+  const key = state.lastStoryKey;
+  if (!key) return;
+
+  console.log('[PAGINATE] Starting…');
+
+  state.noGrowthTicks = 0;
+  state.lastLoadedCount = 0;
+
+  const tick = () => {
+    const map = state.viewerStore.get(key);
+    const loaded = map ? map.size : 0;
+    const target = getSeenByCount();
+
+    // Merge reactions opportunistically each tick
+    mergeReactsFromDialogIntoMap(key);
+
+    // Debug
+    console.log('[PAGINATE] Tick', { loaded, target, noGrowth: state.noGrowthTicks });
+
+    // If target known and reached, stop
+    if (target && loaded >= target) {
+      stopPagination('Reached seen-by target');
+      return;
+    }
+
+    // Growth detection (handles unknown target case)
+    if (loaded > state.lastLoadedCount) {
+      state.noGrowthTicks = 0;
+      state.lastLoadedCount = loaded;
+    } else {
+      state.noGrowthTicks++;
+    }
+
+    // If we got stuck for multiple ticks, do a small bump + pause to let IG render
+    if (state.noGrowthTicks >= 5) {
+      scrollContainer.scrollBy({ top: 400, left: 0, behavior: 'instant' });
+      state.noGrowthTicks = 0;
+    } else {
+      // Normal incremental scroll
+      scrollContainer.scrollBy({ top: 300, left: 0, behavior: 'instant' });
+    }
+  };
+
+  state.paginateTimer = setInterval(tick, 600);
+}
+
+function stopPagination(reason = '') {
+  if (state.paginateTimer) {
+    clearInterval(state.paginateTimer);
+    state.paginateTimer = null;
+    console.log('[PAGINATE] Stopped:', reason);
+  }
+}
+
+// Expose startPagination if you already call it elsewhere, just ensure it’s invoked after opening the viewers dialog:
+window.__SL_startPagination = startPagination;
+```
+
+> **Note:** Don’t reinitialize `state.viewerStore` anywhere after pagination begins. That reset is the reason counts “drop back to ~50”.
+
+---
+
+### 3) `content.js` (wire up the event, hydrate UI, keep NEW one-time)
+
+**What to do**
+
+* Listen for the **exact** snapshot event name the backend emits (`sl:VIEWERS_SNAPSHOT`).
+* Hydrate UI from the incoming `detail`.
+* Respect `isNew` once, don’t recalc “NEW” on every render.
+
+**Patch**
+
+```js
+// === content.js ===
+document.addEventListener('sl:VIEWERS_SNAPSHOT', (e) => {
+  const data = e.detail; // { key, count, viewers }
+  console.log('[UI] Received snapshot:', { key: data.key, count: data.count });
+  hydrateFromSnapshot(data);
+});
+
+function hydrateFromSnapshot({ key, viewers, count }) {
+  // Your existing renderer; ensure we:
+  // - use viewer.profile_pic_url for avatars
+  // - render viewer.reaction if present
+  // - respect viewer.isNew without flipping it back to true
+  renderTable(viewers || [], count);
+}
+
+function renderTable(viewers, count) {
+  // Pseudocode: you likely have this already; ensure fields match:
+  const list = document.querySelector('#storylister-list');
+  const countEl = document.querySelector('#storylister-count');
+  if (countEl) countEl.textContent = String(count ?? viewers.length);
+
+  list.innerHTML = '';
+  for (const v of viewers) {
+    const row = document.createElement('div');
+    row.className = 'storylister-viewer-item';
+
+    const avatar = document.createElement('img');
+    avatar.className = 'storylister-viewer-avatar';
+    avatar.src = v.profile_pic_url || '';
+    avatar.alt = v.username || '';
+
+    const main = document.createElement('div');
+    main.className = 'storylister-viewer-main';
+    main.innerHTML = `
+      <div class="storylister-line">
+        <strong>${v.username ?? ''}</strong>
+        ${v.isNew ? '<span class="storylister-badge new">NEW</span>' : ''}
+        ${v.reaction ? `<span class="storylister-react">${v.reaction}</span>` : ''}
+      </div>
+      <div class="storylister-sub">${v.full_name ?? ''}</div>
+    `;
+
+    row.appendChild(avatar);
+    row.appendChild(main);
+    list.appendChild(row);
+  }
+}
+```
+
+---
+
+### 4) `content.css` (avatar alignment + spacing)
+
+**What to do**
+
+* Make avatars reliably left-aligned and not bumped by padding/margins.
+* Keep this minimal; no global resets.
+
+**Patch**
+
+```css
+/* === content.css === */
+.storylister-viewer-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 4px;
+  border-radius: 6px;
+  margin-bottom: 4px;
+}
+
+.storylister-viewer-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  margin-left: 0; /* left align */
+  object-fit: cover;
+}
+
+.storylister-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.storylister-badge.new {
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: #e6f4ea; /* light green */
+  color: #137333;
+}
+
+.storylister-react {
+  font-size: 13px;
+  line-height: 1;
+}
+```
+
+---
+
+### 5) (Optional) `popup.js` / `popup.html`
+
+No changes required for the pipeline. If you’re reflecting counts in popup, ensure you’re listening for `sl:VIEWERS_SNAPSHOT` the same way the content panel does, or querying background state.
+
+---
+
+## ✅ Smoke Test Plan (please run exactly)
+
+1. Open a story’s “Seen by” dialog.
+2. In DevTools **Console**, you should see this order repeat as it scrolls:
+
+   * `[INJECTED] Posted X viewers …`
+   * `[BACKEND] Received chunk { key, totalCount, chunk: X }`
+   * `[BACKEND] Broadcasting snapshot { key, count }`
+   * `[UI] Received snapshot: { key, count }`
+3. Verify **count climbs and never drops**.
+4. Verify **avatars render** (left aligned), **NEW** is only on first appearance, and **❤️** shows for reactors.
+5. Let it run until `loaded >= seenByCount` (if present) or until **no growth** for multiple ticks; pagination should stop cleanly.
+
+If any one of those four log lines is missing, that’s the broken hop in the pipeline:
+
+* Missing **INJECTED** ⇒ `injected.js` isn’t capturing or emitting.
+* Missing **BACKEND Received** ⇒ message listener filter or origin check is blocking it.
+* Missing **Broadcasting** ⇒ `upsertViewersForStory` not called or throws.
+* Missing **UI Received** ⇒ event name mismatch or listener not bound.
+
+---
+
+## Why these fixes match the symptoms
+
+* **50 → down**: caused by re-inits/reset during pagination. We removed resets and added a **growth guard** so virtualization won’t regress counts.
+* **Everyone NEW**: the **merge logic** preserves `isNew`, `firstSeenAt`, etc., and session-scoped persistence keeps status across refreshes.
+* **No avatars**: we normalized `profile_pic_url` across IG’s varying field names and ensured the UI uses that field.
+* **No reactions**: we now merge heart status both from payload `liked` and DOM scan (fallback).
+* **Not populating**: end‑to‑end **event bus logs** and the guaranteed `postMessage → listener → upsert → broadcast` flow re-establish the pipeline.
+
+---
+
+**Please apply exactly the patches above (no other architecture changes), rebuild v16.5.0, and post the console log sequence from a single story load so we can verify each hop.**
