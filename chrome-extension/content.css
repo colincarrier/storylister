@@ -336,7 +336,7 @@
   overflow: hidden;
   flex-shrink: 0;
   cursor: pointer;
-  margin-left: 0; /* exact left edge */
+  margin: 0; /* Reset ALL margins for proper left alignment */
 }
 
 .storylister-viewer-avatar img {

@@ -797,8 +797,12 @@
     const filteredCount = filteredViewers.length;
     const idx = JSON.parse(localStorage.getItem('panel_story_index') || '{}');
     const total = idx[slStoreKey()]?.count ?? viewers.size;
+    
+    // CRITICAL FIX: Never show more viewers than Instagram reports
+    const displayCount = Math.min(filteredCount, total);
+    
     document.getElementById('sl-filtered-count') && (document.getElementById('sl-filtered-count').textContent =
-      `${filteredCount} of ${total} viewer${(total|0) === 1 ? '' : 's'}`);
+      `${displayCount} of ${total} viewer${(total|0) === 1 ? '' : 's'}`);
     document.getElementById('sl-viewer-count') && (document.getElementById('sl-viewer-count').textContent = String(total));
     document.getElementById('sl-verified-count') && (document.getElementById('sl-verified-count').textContent =
       String(viewArr.filter(v => v.isVerified).length));
@@ -861,9 +865,16 @@
     el.className = 'storylister-viewer-item';
     const reactionHtml = viewer.reaction ? `<span class="viewer-reaction">${viewer.reaction}</span>` : '';
     const newBadge = viewer.isNew ? '<span class="viewer-new-badge">NEW</span>' : '';
+    
+    // DEBUG: Log avatar URL to see what field we're getting
+    const avatarUrl = viewer.profilePic || viewer.profile_pic_url || '';
+    if (!avatarUrl && viewer.username) {
+      console.log('[UI] Missing avatar for', viewer.username, 'viewer object:', viewer);
+    }
+    
     el.innerHTML = `
       <a href="https://www.instagram.com/${uname}/" target="_blank" rel="noopener noreferrer" class="storylister-viewer-avatar" data-username="${uname}">
-        ${slAvatarHTML(viewer.profilePic, uname)}
+        ${slAvatarHTML(avatarUrl, uname)}
       </a>
       <div class="storylister-viewer-info">
         <div class="storylister-viewer-username" data-username="${uname}">

@@ -713,9 +713,8 @@
     if (!map) {
       map = new Map();
       state.viewerStore.set(storyKey, map);
-      // attempt to revive prior in-session state
-      loadStory(storyKey);
-      map = state.viewerStore.get(storyKey) || new Map();
+      // DON'T load old session data - it causes accumulation across story switches
+      // loadStory(storyKey);  // REMOVED - this was causing the 79 vs 9 bug
     }
 
     viewers.forEach((raw, idx) => {
